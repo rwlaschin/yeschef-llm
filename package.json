@@ -1,0 +1,21 @@
+{
+  "name": "ollama-infra",
+  "version": "1.0.0",
+  "description": "GCP infrastructure scripts for Ollama LLM deployment",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "deploy": "cross-env NODE_ENV=production node scripts/deploy.js",
+    "rollback": "cross-env NODE_ENV=production node scripts/rollback.js",
+    "dev": "cross-env NODE_ENV=dev node scripts/dev.js"
+  },
+  "dependencies": {
+    "@google-cloud/pubsub": "^4.0.0",
+    "cross-env": "^7.0.3",
+    "dotenv-flow": "^4.1.0",
+    "firebase-admin": "^13.10.0",
+    "mongodb": "^6.0.0"
+  }
+}
