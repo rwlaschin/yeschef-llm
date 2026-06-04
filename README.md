@@ -1,77 +1,75 @@
-# Ollama LLM Infrastructure
+# Ollama Infrastructure - GCP LLM Deployment
 
-GCP-based LLM inference using Ollama, Pub/Sub, MongoDB Atlas Vector Search, and Docker.
+AI-powered inference via Ollama, Pub/Sub messaging, and MongoDB RAG.
 
-## Models
-| Topic | Model | GPU | Subscription |
-|---|---|---|---|
-| query_llama3_2b_v1 | Llama 3.2 2B | 1x L4 (24GB) | sub_llama3_2b_v1 |
-| query_llama3_3_70b_v1 | Llama 3.3 70B Q4 | 2x L4 (48GB) | sub_llama3_3_70b_v1 |
+## Prerequisites
 
-## Structure
-```
-ollama-infra/
-  pubsub/setup.js        # Create topics and subscriptions
-  worker/index.js        # Pub/Sub worker: RAG + Ollama + save result
-  scripts/deploy.js      # Build, push, deploy to Cloud Run
-  scripts/rollback.js    # Rollback to previous Cloud Run revision
-  scripts/dev.js         # Start local dev environment
-  docker/slim/           # Image 1: Llama 3.2 2B
-  docker/large/          # Image 2: Llama 3.3 70B
-  docker-compose.yml     # Local dev: Firebase emulator + Ollama + worker
-  .env.example           # Environment variable template
+**All explicitly listed — no hidden dependencies.**
+
+- **Node.js** ≥ 22
+- **Firebase CLI** — `npm install -g firebase-tools`
+- **Ollama** — `curl -fsSL https://ollama.com/install.sh | sh`
+
+## Setup
+
+```bash
+npm install                # Install dependencies
+npm run setup              # Verify all prerequisites installed
+npm run dev                # Start local development
 ```
 
-## Commands
+## Development
 
-### Setup
-```
-npm run setup:pubsub     # Create Pub/Sub topics and subscriptions
-```
-
-### Deploy
-```
-npm run deploy:prod      # Build, push, deploy to production
-npm run deploy:test      # Build, push, deploy to test
+```bash
+npm run dev                # Firebase emulator + Ollama + worker
+                           # - Emulator UI: http://localhost:4000
+                           # - Ollama: http://localhost:11434
+                           # - Pub/Sub auto-created for testing
 ```
 
-### Rollback
-```
-npm run rollback:prod    # Rollback production to previous revision
-npm run rollback:test    # Rollback test to previous revision
+Test with:
+```bash
+gcloud pubsub topics publish llama3_2b_v1 \
+  --message='{"jobId":"test-1","query":"List foods safe for a diabetic diet"}' \
+  --project=demo-ollama
 ```
 
-### Local Development
+## Production
+
+```bash
+npm run deploy:prod        # Build Docker images, push to GCR, deploy to Cloud Run
+npm run rollback:prod      # Roll back to previous revision
 ```
-npm run dev              # Start Firebase emulator + Ollama + worker
+
+Requires:
+- GCP project with Artifact Registry + Cloud Run enabled
+- Service account key at `GOOGLE_APPLICATION_CREDENTIALS` path in `.env.production`
+
+## Architecture
+
 ```
+Client → Pub/Sub topic → worker/index.js → MongoDB Atlas (RAG) → Ollama → Result
+```
+
+**Two model tiers:**
+
+| Topic | Model | GPUs |
+|-------|-------|------|
+| `llama3_2b_v1` | Llama 3.2 2B | 1× L4 |
+| `llama3_3_70b_v1` | Llama 3.3 70B | 2× L4 |
+
+Same `worker/index.js` runs both — configured entirely via env vars.
 
 ## Environment Variables
-```
-cp .env.example .env
-# fill in GCP_PROJECT_ID, MONGO_URI, etc.
-```
 
-## Message Format (Pub/Sub payload)
-```json
-{
-  "jobId": "unique-job-id",
-  "query": "What are the temperature requirements for hot food holding?",
-  "metadata": {
-    "userId": "optional",
-    "facilityId": "optional"
-  }
-}
-```
+See `.env.dev` (local) and `.env.production` (prod). Layering via `dotenv-flow`:
+- `.env` → `.env.dev` / `.env.production`
 
-## Result (saved to MongoDB `results` collection)
-```json
-{
-  "jobId": "unique-job-id",
-  "query": "...",
-  "answer": "...",
-  "model": "llama3.2:2b",
-  "subscription": "sub_llama3_2b_v1",
-  "createdAt": "2026-01-01T00:00:00Z"
-}
-```
+| Variable | Purpose |
+|----------|---------|
+| `GCP_PROJECT_ID` | GCP project |
+| `MONGO_URI` | MongoDB connection |
+| `MONGO_DB` | Database name |
+| `MONGO_COLLECTION` | Regulations collection |
+| `OLLAMA_MODEL` | Model to load |
+| `OLLAMA_NUM_PARALLEL` | Concurrency (2 for single GPU) |

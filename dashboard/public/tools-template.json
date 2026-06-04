@@ -1,0 +1,131 @@
+[
+  {
+    "name": "search_recipes",
+    "active": true,
+    "definition": {
+      "name": "search_recipes",
+      "description": "Search for recipes matching dietary requirements and ingredients",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Recipe name or ingredients to search for"
+          },
+          "dietary_restrictions": {
+            "type": "array",
+            "description": "List of dietary restrictions (vegetarian, vegan, gluten-free, etc.)",
+            "items": {
+              "type": "string"
+            }
+          },
+          "max_results": {
+            "type": "number",
+            "description": "Maximum number of recipes to return",
+            "default": 5
+          }
+        },
+        "required": ["query"]
+      }
+    }
+  },
+  {
+    "name": "get_nutritional_info",
+    "active": true,
+    "definition": {
+      "name": "get_nutritional_info",
+      "description": "Get nutritional information for a food item",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "food_item": {
+            "type": "string",
+            "description": "Name of the food item"
+          },
+          "serving_size": {
+            "type": "string",
+            "description": "Serving size (e.g., '100g', '1 cup')",
+            "default": "100g"
+          }
+        },
+        "required": ["food_item"]
+      }
+    }
+  },
+  {
+    "name": "check_allergies",
+    "active": true,
+    "definition": {
+      "name": "check_allergies",
+      "description": "Check if a food item contains common allergens",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "food_item": {
+            "type": "string",
+            "description": "Name of the food item to check"
+          },
+          "user_allergies": {
+            "type": "array",
+            "description": "List of allergens user is allergic to",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["food_item"]
+      }
+    }
+  },
+  {
+    "name": "calculate_macros",
+    "active": true,
+    "definition": {
+      "name": "calculate_macros",
+      "description": "Calculate macronutrient breakdown (protein, carbs, fat) for a meal",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ingredients": {
+            "type": "array",
+            "description": "List of ingredients with quantities",
+            "items": {
+              "type": "string"
+            }
+          },
+          "serving_size": {
+            "type": "number",
+            "description": "Number of servings"
+          }
+        },
+        "required": ["ingredients"]
+      }
+    }
+  },
+  {
+    "name": "store_meal_preference",
+    "active": false,
+    "definition": {
+      "name": "store_meal_preference",
+      "description": "Store user's meal preference for future recommendations (development only)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "Unique user identifier"
+          },
+          "preference_type": {
+            "type": "string",
+            "description": "Type of preference (favorite, dislike, allergic, etc.)"
+          },
+          "food_item": {
+            "type": "string",
+            "description": "Food item being stored"
+          }
+        },
+        "required": ["user_id", "preference_type", "food_item"]
+      }
+    }
+  }
+]

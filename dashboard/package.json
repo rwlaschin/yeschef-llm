@@ -1,0 +1,48 @@
+{
+  "name": "yeschef-llm-dashboard",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "nuxt dev --port 3200 --host",
+    "build": "nuxt build",
+    "preview": "nuxt preview",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@apollo/client": "^4.2.0",
+    "@google-cloud/pubsub": "^4.0.0",
+    "@graphiql/react": "^0.37.5",
+    "@headlessui/vue": "^1.7.23",
+    "@heroicons/vue": "^2.2.0",
+    "@leafygreen-ui/button": "^25.2.1",
+    "@nuxtjs/color-mode": "^3.3.0",
+    "@nuxtjs/tailwindcss": "^6.11.0",
+    "ajv": "^8.20.0",
+    "firebase": "^10.0.0",
+    "firebase-admin": "^12.0.0",
+    "firebaseui": "^6.1.0",
+    "graphiql": "^5.2.3",
+    "graphql": "^16.14.0",
+    "graphql-tag": "^2.12.6",
+    "graphql-voyager": "^2.1.0",
+    "jsoneditor": "^10.4.3",
+    "mongodb": "^6.0.0",
+    "neo4j-driver": "^5.15.0",
+    "nuxt": "^3.11.0",
+    "pino": "^8.17.0",
+    "primeicons": "^7.0.0",
+    "primevue": "^4.5.5",
+    "v-network-graph": "^0.9.22",
+    "vue": "^3.4.0",
+    "vue-apollo": "^3.1.2",
+    "vue-query-builder": "^0.8.2"
+  },
+  "devDependencies": {
+    "@nuxt/devtools": "latest",
+    "@tailwindcss/forms": "latest",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^3.4.0"
+  }
+}

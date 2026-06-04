@@ -22,7 +22,14 @@ COPY docker/slim/start.sh /start.sh
 RUN npm install && chmod +x /start.sh
 
 # Pull model at build time - baked into image, no cold-start pull
-RUN ollama serve & sleep 5 && ollama pull llama3.2:2b && pkill ollama || true
+RUN ollama serve & \
+    sleep 10 && \
+    for i in {1..30}; do \
+      curl -sf http://localhost:11434/api/tags >/dev/null && break || sleep 2; \
+    done && \
+    ollama pull llama3.2:2b && \
+    pkill -f "ollama serve" || true && \
+    sleep 2
 
 ENV OLLAMA_MODEL=llama3.2:2b
 ENV OLLAMA_HOST=http://localhost:11434

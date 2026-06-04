@@ -1,0 +1,261 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html.light {
+    color-scheme: light;
+  }
+}
+
+/* ============ BACKGROUNDS ============ */
+/* Light Mode */
+html.light {
+  @apply bg-white text-gray-900;
+}
+
+html.light main {
+  @apply bg-gray-50;
+}
+
+/* Dark Mode (Default) */
+html,
+html.dark {
+  @apply bg-gray-900 text-gray-50;
+}
+
+html main,
+html.dark main {
+  @apply bg-gray-900;
+}
+
+/* ============ GLASS MORPHISM ============ */
+html.light .glass {
+  @apply bg-white border-gray-200 border;
+}
+
+html .glass,
+html.dark .glass {
+  @apply bg-gray-800/40 border-white/10 backdrop-blur-md border;
+}
+
+.glass {
+  @apply rounded-lg transition-colors;
+}
+
+/* ============ PANELS & CONTAINERS ============ */
+.panel {
+  @apply rounded-xl transition-all duration-300;
+}
+
+html.light .panel {
+  @apply bg-white/60 backdrop-blur-xl;
+}
+
+html .panel,
+html.dark .panel {
+  @apply bg-gray-900/20 backdrop-blur-xl;
+}
+
+/* ============ FORM CONTROLS ============ */
+.form-input {
+  @apply px-3 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 transition-all;
+}
+
+html.light .form-input {
+  @apply bg-gray-100 border border-gray-300 text-gray-900 placeholder-gray-500;
+}
+
+html .form-input,
+html.dark .form-input {
+  @apply bg-gray-800/40 border-white/10 text-gray-100 placeholder-gray-400;
+}
+
+/* ============ TEXT COLORS ============ */
+.text-secondary {
+  @apply transition-colors;
+}
+
+html.light .text-secondary {
+  @apply text-gray-600;
+}
+
+html .text-secondary,
+html.dark .text-secondary {
+  @apply text-gray-300;
+}
+
+.text-primary {
+  @apply transition-colors;
+}
+
+html.light .text-primary {
+  @apply text-amber-600;
+}
+
+html .text-primary,
+html.dark .text-primary {
+  @apply text-amber-400;
+}
+
+.text-muted {
+  @apply transition-colors;
+}
+
+html.light .text-muted {
+  @apply text-gray-400;
+}
+
+html .text-muted,
+html.dark .text-muted {
+  @apply text-gray-500;
+}
+
+/* ============ STATUS COLORS ============ */
+.text-success {
+  @apply transition-colors;
+}
+
+html.light .text-success {
+  @apply text-green-600;
+}
+
+html .text-success,
+html.dark .text-success {
+  @apply text-green-400;
+}
+
+.text-error {
+  @apply transition-colors;
+}
+
+html.light .text-error {
+  @apply text-red-600;
+}
+
+html .text-error,
+html.dark .text-error {
+  @apply text-red-400;
+}
+
+/* ============ BORDERS ============ */
+.border-divider {
+  @apply border transition-colors;
+}
+
+html.light .border-divider {
+  @apply border-gray-200;
+}
+
+html .border-divider,
+html.dark .border-divider {
+  @apply border-gray-700/30;
+}
+
+/* ============ SCROLLBAR STYLING ============ */
+html.light ::-webkit-scrollbar {
+  @apply w-2 h-2;
+}
+
+html.light ::-webkit-scrollbar-track {
+  @apply bg-gray-100;
+}
+
+html.light ::-webkit-scrollbar-thumb {
+  @apply bg-gray-400 rounded hover:bg-gray-500;
+}
+
+html ::-webkit-scrollbar {
+  @apply w-2 h-2;
+}
+
+html ::-webkit-scrollbar-track {
+  @apply bg-gray-900;
+}
+
+html ::-webkit-scrollbar-thumb {
+  @apply bg-gray-700 rounded hover:bg-gray-600;
+}
+
+/* ============ PRIMEVUE THEMING ============ */
+:root {
+  --primary-color: #f5a623;
+  --primary-500: #f5a623;
+  --surface-ground: transparent;
+  --surface-section: transparent;
+  --surface-card: rgba(31, 41, 55, 0.4);
+  --surface-overlay: rgba(31, 41, 55, 0.8);
+  --surface-border: rgba(255, 255, 255, 0.1);
+  --text-color: rgb(243, 244, 246);
+  --text-color-secondary: rgb(209, 213, 219);
+}
+
+html.light {
+  --surface-card: rgba(255, 255, 255, 0.9);
+  --surface-overlay: rgba(255, 255, 255, 0.95);
+  --surface-border: rgba(229, 231, 235, 1);
+  --text-color: rgb(17, 24, 39);
+  --text-color-secondary: rgb(75, 85, 99);
+}
+
+:deep(.p-datatable) {
+  background: transparent;
+  border: none;
+}
+
+:deep(.p-datatable .p-datatable-thead > tr > th) {
+  background: rgba(0, 0, 0, 0.2);
+  color: rgb(209, 213, 219);
+  font-weight: 500;
+  font-size: 0.75rem;
+  padding: 12px 8px;
+}
+
+html.light :deep(.p-datatable .p-datatable-thead > tr > th) {
+  background: rgba(0, 0, 0, 0.05);
+  color: rgb(75, 85, 99);
+}
+
+:deep(.p-datatable .p-datatable-tbody > tr) {
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+:deep(.p-datatable .p-datatable-tbody > tr > td) {
+  padding: 12px 8px;
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+:deep(.p-datatable .p-datatable-tbody > tr:hover) {
+  background: rgba(245, 166, 35, 0.1);
+}
+
+html.light :deep(.p-datatable .p-datatable-tbody > tr:hover) {
+  background: rgba(245, 166, 35, 0.05);
+}
+
+:deep(.p-paginator) {
+  background: rgba(0, 0, 0, 0.2);
+  border: none;
+  padding: 8px 12px;
+}
+
+:deep(.p-paginator .p-paginator-current) {
+  color: rgb(209, 213, 219);
+  font-size: 0.75rem;
+}
+
+:deep(.p-paginator-pages .p-paginator-page) {
+  color: rgb(209, 213, 219);
+  min-width: 2rem;
+  height: 2rem;
+}
+
+:deep(.p-paginator-pages .p-paginator-page.p-paginator-page-active) {
+  background: #f5a623;
+  color: rgb(17, 24, 39);
+}

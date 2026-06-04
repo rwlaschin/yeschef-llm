@@ -3,7 +3,7 @@
 // - Pulls jobs from Pub/Sub
 // - Queries MongoDB Vector Search for RAG context
 // - Streams Ollama response chunks to Firestore in real-time
-// - Saves full result to MongoDB on completion
+// - Writes the final result to Firestore on completion (Mongo is RAG-only)
 // - Acks on success, nacks on failure (job returns to queue)
 // ============================================================
 
@@ -24,6 +24,9 @@ const {
   MONGO_INDEX = "vector_index",
   RAG_TOP_K = "5",
   FIREBASE_PROJECT_ID,
+  NEO4J_URI,
+  NEO4J_USERNAME,
+  NEO4J_PASSWORD,
 } = process.env;
 
 for (const [k, v] of Object.entries({
@@ -172,8 +175,20 @@ async function handleMessage(message) {
   try {
     await jobRef.update({ status: "streaming" });
 
-    const context = await retrieveContext(query);
-    console.log(`  RAG: ${parseInt(RAG_TOP_K)} chunks retrieved`);
+    // RAG is an OPTIONAL augmentation — it must never break a plain query.
+    // Default: just send the query. If a request opts in (metadata.rag) we try to
+    // augment, but missing/failed RAG is NOT fatal — we log and send the query as-is.
+    let context = "";
+    if (payload.rag === true || payload.metadata?.rag === true) {
+      try {
+        context = await retrieveContext(query);
+        console.log(`  RAG: ${parseInt(RAG_TOP_K)} chunks retrieved`);
+      } catch (e) {
+        console.warn(`  RAG unavailable (${e.message}) — sending query without context`);
+      }
+    } else {
+      console.log("  RAG: not requested");
+    }
 
     const flusher = makeChunkFlusher(db, jobId);
     const fullResponse = await streamInference(query, context, flusher.push.bind(flusher));
@@ -181,22 +196,13 @@ async function handleMessage(message) {
 
     console.log(`  Streaming complete`);
 
-    await Promise.all([
-      jobRef.update({
-        status:      "complete",
-        response:    fullResponse,
-        completedAt: FieldValue.serverTimestamp(),
-      }),
-      mongo.db(MONGO_DB).collection("results").insertOne({
-        jobId,
-        query,
-        answer:       fullResponse,
-        model:        OLLAMA_MODEL,
-        subscription: SUBSCRIPTION_NAME,
-        metadata:     payload.metadata || {},
-        createdAt:    new Date(),
-      }),
-    ]);
+    // Results live in Firestore only — clients react via onSnapshot.
+    // MongoDB is RAG-only; do NOT write results there.
+    await jobRef.update({
+      status:      "complete",
+      response:    fullResponse,
+      completedAt: FieldValue.serverTimestamp(),
+    });
 
     message.ack();
     console.log(`  Acked: ${jobId}`);
@@ -212,15 +218,18 @@ async function main() {
   await connectMongo();
 
   const pubsub = new PubSub({ projectId: GCP_PROJECT_ID });
-  const subscription = pubsub.subscription(SUBSCRIPTION_NAME, {
-    flowControl: { maxMessages: 2 },
-  });
+  const subscriptionNames = SUBSCRIPTION_NAME.split(',').map(s => s.trim());
 
-  subscription.on("message", handleMessage);
-  subscription.on("error", (err) => console.error("Subscription error:", err));
+  for (const subName of subscriptionNames) {
+    const subscription = pubsub.subscription(subName, {
+      flowControl: { maxMessages: 2 },
+    });
+    subscription.on("message", handleMessage);
+    subscription.on("error", (err) => console.error(`Subscription error (${subName}):`, err));
+    console.log(`  Listening: ${subName}`);
+  }
 
-  console.log(`Worker listening on : ${SUBSCRIPTION_NAME}`);
-  console.log(`Model               : ${OLLAMA_MODEL} @ ${OLLAMA_HOST}\n`);
+  console.log(`Model: ${OLLAMA_MODEL} @ ${OLLAMA_HOST}\n`);
 }
 
 main().catch((err) => {

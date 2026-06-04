@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build / framework output
+.nuxt/
+.output/
+dist/
+.cache/
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+**/.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# NOTE: .env files are intentionally NOT ignored (private repo).

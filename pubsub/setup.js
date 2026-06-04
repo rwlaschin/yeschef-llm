@@ -1,28 +1,15 @@
 // ============================================================
 // Pub/Sub Setup - Ollama LLM Infrastructure
-// Topics: query_llama3_3_70b_v1 (large), query_llama3_2b_v1 (slim)
 // Idempotent — safe to call on every deploy or dev start.
 // ============================================================
 
 import { PubSub } from "@google-cloud/pubsub";
+import { MODELS, subscriptionOf, deadLetterOf } from "../config/models.js";
 
-const CONFIG = {
-  slim: {
-    topic:        "query_llama3_2b_v1",
-    subscription: "sub_llama3_2b_v1",
-    deadLetter:   "dead_letter_llama3_2b_v1",
-    ackDeadlineSeconds: 40,
-    minRetryDelay: { seconds: 10 },
-    maxRetryDelay: { seconds: 30 },
-  },
-  large: {
-    topic:        "query_llama3_3_70b_v1",
-    subscription: "sub_llama3_3_70b_v1",
-    deadLetter:   "dead_letter_llama3_3_70b_v1",
-    ackDeadlineSeconds: 40,
-    minRetryDelay: { seconds: 10 },
-    maxRetryDelay: { seconds: 30 },
-  },
+const DEFAULT_SUB_CONFIG = {
+  ackDeadlineSeconds: 40,
+  minRetryDelay: { seconds: 10 },
+  maxRetryDelay: { seconds: 30 },
 };
 
 const MAX_DELIVERY_ATTEMPTS = 5;
@@ -68,11 +55,16 @@ export async function setup(projectId) {
   }
 
   console.log(`\nPub/Sub setup [${projectId}]\n`);
-  for (const [name, cfg] of Object.entries(CONFIG)) {
-    console.log(`[${name.toUpperCase()}]`);
-    await ensureTopic(cfg.deadLetter);
-    await ensureTopic(cfg.topic);
-    await ensureSubscription(cfg);
+  for (const m of MODELS) {
+    console.log(`[${m.key.toUpperCase()}]`);
+    await ensureTopic(deadLetterOf(m));
+    await ensureTopic(m.topic);
+    await ensureSubscription({
+      ...DEFAULT_SUB_CONFIG,
+      topic: m.topic,
+      subscription: subscriptionOf(m),
+      deadLetter: deadLetterOf(m),
+    });
     console.log();
   }
   console.log("Pub/Sub ready.\n");
