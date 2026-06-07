@@ -25,7 +25,8 @@ import { devModels, subscriptionOf, imageOf } from "../config/models.js";
 
 dotenvFlow.config();
 
-const { MONGO_URI, MONGO_DB, MONGO_COLLECTION } = process.env;
+const { MONGO_URI, MONGO_DB, MONGO_COLLECTION, OLLAMA_API_KEY } = process.env;
+const OPENCLAW_GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "openclaw-dev-token";
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "yeschef-c572a";
 const PUBSUB_EMULATOR_HOST = "localhost:8085";
 
@@ -38,7 +39,9 @@ const DEV_MODELS = devModels().map((m) => ({
   key: m.key,
   name: imageOf(m),
   model: m.model,
+  topic: m.topic,
   subscription: subscriptionOf(m),
+  gateway: m.gateway || "",
 }));
 const imageTag = (m) => `yeschef-${m.name}:dev`;
 const containerName = (m) => `yeschef-worker-${m.key}-dev`;
@@ -47,9 +50,20 @@ const processes = [];
 
 function start(name, cmd, args, env = {}) {
   console.log(`Starting ${name}...`);
-  const proc = spawn(cmd, args, { stdio: "inherit", env: { ...process.env, ...env }, shell: true });
+  // detached:true puts the child in its OWN process group. The terminal delivers
+  // Ctrl-C (SIGINT) to the foreground group only — i.e. just this parent — so the
+  // children are NOT killed out from under us. We trap the signal here and tear
+  // them down deliberately (SIGTERM the group → wait → SIGKILL fallback → exit),
+  // which is what lets the terminal be restored cleanly instead of left mid-line.
+  const proc = spawn(cmd, args, {
+    stdio: "inherit",
+    env: { ...process.env, ...env },
+    shell: true,
+    detached: true,
+  });
   proc.on("exit", (code) => {
-    if (code !== 0) {
+    // Ignore exits caused by our own shutdown (SIGTERM/SIGKILL → null/non-zero).
+    if (!shuttingDown && code !== 0) {
       console.error(`${name} exited with code ${code}`);
       shutdown();
     }
@@ -58,13 +72,56 @@ function start(name, cmd, args, env = {}) {
   return proc;
 }
 
-function shutdown() {
-  console.log("\nShutting down...");
-  for (const { name, proc } of processes) {
-    console.log(`  Stopping ${name}`);
-    proc.kill();
-  }
+let shuttingDown = false;
+
+// Kill the child's whole process group (negative pid). Because we spawned with
+// detached:true, proc.pid is the group leader, so this also reaps the shell and
+// any grandchildren (firebase's java, etc.) — a plain proc.kill() would orphan them.
+function killGroup(proc, signal) {
+  try { process.kill(-proc.pid, signal); }
+  catch { try { proc.kill(signal); } catch { /* already gone */ } }
+}
+
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  process.stdout.write("\n"); // line feed so ^C isn't left mid-line
+  console.log("Shutting down...");
+
+  // SIGTERM every child group, then WAIT for each to actually exit before we go
+  // (SIGKILL fallback after 4s). Waiting is what restores the terminal cleanly.
+  await Promise.all(
+    processes.map(({ proc }) =>
+      new Promise((resolve) => {
+        if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
+        let killer;
+        proc.once("exit", () => { clearTimeout(killer); resolve(); });
+        killGroup(proc, "SIGTERM");
+        killer = setTimeout(() => killGroup(proc, "SIGKILL"), 4000);
+      })
+    )
+  );
+
+  // Kill every worker container we started, so none linger after dev exits.
+  removeWorkerContainers();
+
+  process.stdout.write("\n"); // clean prompt on the next line
   process.exit(0);
+}
+
+// Remove ALL worker containers (this run + any leftovers from a previous one).
+// Leftover containers are the bug behind "my message isn't handled": a stale
+// container holding the name makes the waker think a worker is already up (so it
+// never wakes a fresh one), and it may be bound to a now-deleted subscription.
+function removeWorkerContainers() {
+  try {
+    const ids = execSync("docker ps -aq --filter name=yeschef-worker-", { stdio: "pipe" })
+      .toString().trim().split("\n").filter(Boolean);
+    if (ids.length) {
+      execSync(`docker rm -f ${ids.join(" ")}`, { stdio: "ignore" });
+      console.log(`Removed ${ids.length} worker container(s).`);
+    }
+  } catch { /* docker not running, or nothing to remove */ }
 }
 
 process.on("SIGINT", shutdown);
@@ -93,6 +150,7 @@ function buildImage(m) {
     parallel: 2,
     maxQueue: 5,
     subscriptions: [m.subscription],
+    gateway: m.gateway || "",
   });
   console.log(`\nBuilding ${tag} — bakes ${m.model}; first build is slow.\n`);
   execSync(`echo '${dockerfile.replace(/'/g, "'\\''")}' | docker build -f - -t ${tag} .`, { stdio: "inherit" });
@@ -107,6 +165,11 @@ async function main() {
     throw new Error("Docker is not running. Start Docker Desktop and retry.");
   }
 
+  // 0. Clean slate — remove any worker containers left over from a prior run
+  //    (e.g. a hard kill that skipped shutdown). A stale one bound to an old
+  //    subscription would otherwise block the waker from starting a fresh worker.
+  removeWorkerContainers();
+
   // 1. Pub/Sub emulator
   start("Pub/Sub Emulator", "firebase", [
     "emulators:start",
@@ -116,9 +179,11 @@ async function main() {
   console.log("Waiting for Pub/Sub emulator...");
   await sleep(5000);
 
-  // 2. Topics + subscriptions (emulator is ephemeral — every start)
+  // 2. Topics + subscriptions (emulator is ephemeral — every start).
+  //    Dev provisions ONLY dev-capable models (the gpu:1 tiers: slim + the two
+  //    OpenClaw tiers) — not the 70B (gpu:2) tiers, which need 2× L4.
   process.env.PUBSUB_EMULATOR_HOST = PUBSUB_EMULATOR_HOST;
-  await setupPubSub(GCP_PROJECT_ID);
+  await setupPubSub(GCP_PROJECT_ID, devModels());
 
   // 3. Build each dev model image if missing. A failed build (e.g. openclaw not
   //    pullable) is non-fatal — that model is skipped, others still run.
@@ -140,6 +205,7 @@ async function main() {
     image: imageTag(m),
     container: containerName(m),
     model: m.model,
+    gateway: m.gateway || "",
   }));
   start("Waker", "node", ["scripts/waker.js"], {
     PUBSUB_EMULATOR_HOST,
@@ -148,6 +214,9 @@ async function main() {
     MONGO_URI,
     MONGO_DB,
     MONGO_COLLECTION,
+    OLLAMA_API_KEY, // forwarded into each worker container for web_search/web_fetch
+    OPENCLAW_GATEWAY_TOKEN, // shared token for the OpenClaw gateway (gateway tiers)
+    DEPLOY_ENV: "dev", // worker loads inactive prompt_library entries too in dev
   });
 
   console.log("\n=== Dev environment ready ===");
@@ -156,11 +225,12 @@ async function main() {
   console.log(`  Models (on demand):`);
   for (const m of available) console.log(`    - ${m.model}  (${m.subscription} → ${containerName(m)})`);
   console.log(`  (70B/large omitted — needs 2× L4 GPUs)`);
+  const ex = available[0]; // derive the example from the actual dev model — never hard-code
   console.log("\nSend a test job (publishes to the emulator topic):");
-  console.log(`  PUBSUB_EMULATOR_HOST=${PUBSUB_EMULATOR_HOST} gcloud pubsub topics publish llama3_2b_v1 \\`);
+  console.log(`  PUBSUB_EMULATOR_HOST=${PUBSUB_EMULATOR_HOST} gcloud pubsub topics publish ${ex.topic} \\`);
   console.log(`    --message='{"jobId":"test-1","query":"List foods safe for a diabetic diet"}' \\`);
   console.log(`    --project=${GCP_PROJECT_ID}`);
-  console.log("\nRe-test cold start any time with:  docker stop yeschef-worker-slim-dev\n");
+  console.log(`\nRe-test cold start any time with:  docker stop ${containerName(ex)}\n`);
 }
 
 main().catch((err) => {

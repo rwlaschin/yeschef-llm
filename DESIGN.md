@@ -41,27 +41,70 @@ End-to-end architecture for LLM request handling: UI → Backend → Pub/Sub →
 
 Topics are named after the model only. No function type in topic name.
 
-```javascript
-// lib/llm/config.ts (in yeschef frontend)
-const LLM_CONFIG = {
-  openclaw: {
-    topic: "openclaw_v1",
-    model: "openclaw",
-  },
-  llama_slim: {
-    topic: "llama3_2b_v1",
-    model: "llama3.2:2b",
-  },
-  llama_large: {
-    topic: "llama3_3_70b_v1",
-    model: "llama3.3:70b-instruct-q4_K_M",
-  },
-};
+Single source of truth: `config/models.js` (imported everywhere via `#models`).
 
-export function getTopic(model: string) {
-  return LLM_CONFIG[model]?.topic;
-}
+```javascript
+// config/models.js — every model is a REAL Ollama tag (verified against the registry).
+export const MODELS = [
+  { key: "slim",     model: "llama3.2:3b",                  topic: "llama3_2_3b_v1",  dev: true  }, // no 2b tag exists
+  { key: "large",    model: "llama3.3:70b-instruct-q4_K_M", topic: "llama3_3_70b_v1", dev: false }, // 2× L4
+  // OpenClaw is a GATEWAY (`ollama launch openclaw --model <backing>`), not a model —
+  // it fronts a real backing model. `model` is that backing tag; `gateway` flags the
+  // worker to launch the gateway instead of plain `ollama serve`. Not yet wired.
+  { key: "openclaw", model: "kimi-k2.5:cloud", topic: "openclaw_v1", dev: false, gateway: "openclaw" },
+];
 ```
+
+Topic name (e.g. `llama3_2_3b_v1`) reflects the model and is the single value the
+dashboard/subscriptions derive from — change it in one place and everything follows.
+
+---
+
+## OpenClaw Gateway
+
+OpenClaw is **not a model** — it's a gateway/abstraction layer launched with
+`ollama launch openclaw --model <backing>` that sits in front of a real Ollama model
+and adds a tool layer. It can front **any** Ollama model, so we expose OpenClaw-wrapped
+tiers for `gemma4`, `llama3.2:3b`, and `llama3.3:70b`.
+
+**Backing model must be LOCAL/self-hosted.** Cloud tags (`kimi-k2.5:cloud`, etc.) are
+ruled out: regulated data can't leave our infra ("protected"), and per-token cost makes
+the product non-viable. Local models run on our own GPU boxes — $0 per request.
+
+### Features (all CLI/config-managed)
+
+| Capability | How | Notes |
+|---|---|---|
+| **web_search / web_fetch** | auto-on at launch; `openclaw configure --section web` | What we enable first. Uses Ollama's hosted search API (needs `OLLAMA_API_KEY`) — the *search query* leaves our infra even though the model is local. Self-host **SearXNG** if queries must stay internal. |
+| **MCP servers** | `openclaw mcp …` (`mcp doctor --probe` to verify) | Add any MCP server → its tools become available. The general path for adding arbitrary tools. |
+| **channels** | `openclaw configure --section channels` | Messaging I/O: WhatsApp, Telegram, Discord, Slack, iMessage. |
+| **plugins / skills** | `--section plugins` / `--section skills` | Bundled capabilities and higher-level workflows. |
+| **model / gateway / daemon / workspace / health** | `openclaw configure --section <x>` | Config sections (not tools). |
+
+### Registry shape (`config/models.js`)
+
+OpenClaw tiers carry `gateway: "openclaw"` and a `tools: [...]` list. The worker must
+launch the gateway (`ollama launch openclaw --model <backing>`) instead of plain
+`ollama serve` for these tiers. **That start.sh wiring is not implemented yet** — the
+OpenClaw tiers are `dev: false` until it is.
+
+### Integration (how the worker calls it) — implementation plan
+
+OpenClaw's gateway exposes an **OpenAI-compatible** endpoint (it's primarily a
+messaging-assistant gateway, but this is the programmatic path):
+
+- Endpoint: `POST http://localhost:18789/v1/chat/completions` (WS+HTTP on one port).
+- **Disabled by default** — enable `gateway.http.endpoints.chatCompletions.enabled=true`.
+- Auth: `Authorization: Bearer <token>` (gateway auth config).
+- Model routing: encode the agent in the OpenAI `model` field → `model: "openclaw:main"`.
+- Streaming: standard OpenAI SSE (`stream: true`).
+
+So for a `gateway: "openclaw"` tier the worker switches from Ollama's
+`POST /api/generate` to OpenClaw's `POST /v1/chat/completions` (OpenAI message format,
+bearer token, `openclaw:<agent>`), and `start.sh` runs `ollama launch openclaw --model
+<backing>` with the chat-completions endpoint + `web_search`/`web_fetch` enabled.
+Web search uses Ollama's hosted search (`OLLAMA_API_KEY`); swap to self-hosted SearXNG
+if search queries must stay on-infra.
 
 ---
 

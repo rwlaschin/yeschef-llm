@@ -8,6 +8,10 @@ export default defineNuxtConfig({
   alias: {
     "#models": fileURLToPath(new URL("../config/models.js", import.meta.url)),
   },
+  // The model registry lives outside the dashboard root, so Nitro doesn't hot-reload
+  // it by default — label/model edits wouldn't show until a manual restart. Watch it
+  // explicitly so registry changes restart the dev server and the UI always matches config.
+  watch: [fileURLToPath(new URL("../config/models.js", import.meta.url))],
   css: ["~/assets/css/main.css"],
   modules: [
     ["@nuxtjs/tailwindcss", {}],
@@ -66,6 +70,8 @@ export default defineNuxtConfig({
       environment: process.env.ENVIRONMENT || "local",
       graphqlEndpoint: process.env.GRAPHQL_ENDPOINT,
       graphqlEndpointProd: process.env.GRAPHQL_ENDPOINT_PROD,
+      firebaseApiKey: process.env.NUXT_PUBLIC_FIREBASE_API_KEY,
+      firebaseAuthDomain: process.env.NUXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
     },
   },
   hooks: {

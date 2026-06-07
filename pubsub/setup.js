@@ -14,7 +14,11 @@ const DEFAULT_SUB_CONFIG = {
 
 const MAX_DELIVERY_ATTEMPTS = 5;
 
-export async function setup(projectId) {
+// `models` defaults to the full registry (prod provisions everything). Dev passes
+// only its dev-capable models so we don't create topics/subs for tiers that can't
+// run here (large/70B, un-wired OpenClaw) — which would otherwise let the dashboard
+// queue messages no worker will ever consume.
+export async function setup(projectId, models = MODELS) {
   const client = new PubSub({ projectId });
 
   async function topicExists(name) {
@@ -54,8 +58,8 @@ export async function setup(projectId) {
     console.log(`  created: ${cfg.subscription} (ack ${cfg.ackDeadlineSeconds}s, dead-letter → ${cfg.deadLetter})`);
   }
 
-  console.log(`\nPub/Sub setup [${projectId}]\n`);
-  for (const m of MODELS) {
+  console.log(`\nPub/Sub setup [${projectId}] — ${models.length} model(s)\n`);
+  for (const m of models) {
     console.log(`[${m.key.toUpperCase()}]`);
     await ensureTopic(deadLetterOf(m));
     await ensureTopic(m.topic);

@@ -177,7 +177,7 @@
         <Menu v-else as="div" class="relative inline-flex">
           <button type="submit" class="px-3 py-1 rounded-l bg-amber-500 text-gray-900 hover:bg-amber-600 text-xs font-medium">Update</button>
           <MenuButton type="button" class="px-1.5 py-1 rounded-r bg-amber-600 text-gray-900 hover:bg-amber-700 text-xs font-medium border-l border-amber-700/40 flex items-center">▾</MenuButton>
-          <MenuItems class="absolute right-0 bottom-full mb-1.5 w-52 rounded-lg p-1 bg-gray-800 border border-gray-700 shadow-xl focus:outline-none z-50">
+          <MenuItems class="absolute right-0 bottom-full mb-1.5 w-52 rounded-lg p-1 bg-gray-950 border border-gray-700/60 shadow-xl focus:outline-none z-50">
             <MenuItem v-slot="{ active }">
               <button type="button" @click="handleSubmit(true)" :class="['w-full text-left px-2.5 py-2 rounded text-xs font-medium transition', active ? 'bg-amber-500/20 text-amber-300' : 'text-gray-200']">
                 Save as new version

@@ -102,7 +102,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref } from 'vue'
 
 const emit = defineEmits(["environment-changed"]);
 
@@ -135,9 +135,6 @@ const checkHealth = async () => {
   }
 };
 
-onMounted(() => {
-  checkHealth();
-  // Re-check every 5 seconds
-  setInterval(checkHealth, 5000);
-});
+// Self-cancelling, non-overlapping poll (no leaked interval on unmount).
+usePoll(checkHealth, 5000);
 </script>

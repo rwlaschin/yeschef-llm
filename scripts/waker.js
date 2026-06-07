@@ -33,6 +33,9 @@ const {
   MONGO_COLLECTION,
   FIREBASE_PROJECT_ID,
   GOOGLE_APPLICATION_CREDENTIALS, // SA key for writing to PROD Firestore in dev
+  OLLAMA_API_KEY, // web search creds for the ollama/openclaw runtime (command-line), not the worker
+  OPENCLAW_GATEWAY_TOKEN, // shared bearer token for the OpenClaw gateway (gateway tiers)
+  DEPLOY_ENV = "dev", // forwarded to the worker → loads inactive prompt_library entries in dev
   DOCKER_GPU, // e.g. "all" if an NVIDIA GPU is present; leave unset on Mac (CPU)
 } = process.env;
 
@@ -56,21 +59,30 @@ function containerRunning(container) {
   }
 }
 
-function containerExists(container) {
+// Exit code of a stopped container with this name ("0" = clean, "" = no such
+// container). Lets the waker tell a crash from a normal/cold state.
+function lastExitCode(container) {
   try {
-    return !!sh(`docker ps -aq --filter name=^${container}$`);
+    return sh(`docker inspect -f '{{.State.ExitCode}}' ${container}`);
   } catch {
-    return false;
+    return "";
+  }
+}
+
+function logsTail(container, n = 25) {
+  try {
+    return sh(`docker logs --tail ${n} ${container} 2>&1`);
+  } catch {
+    return "";
   }
 }
 
 function startContainer(m) {
-  if (containerExists(m.container)) {
-    console.log(`[waker:${m.model}] warm start: docker start ${m.container}`);
-    sh(`docker start ${m.container}`);
-    return;
-  }
-  console.log(`[waker:${m.model}] cold start: docker run ${m.image}`);
+  // ALWAYS recreate from current config: remove any existing container (running or
+  // exited) and `docker run` fresh. This guarantees the latest mounts/code/start.sh
+  // are applied every time — no stale "docker start", no manual `docker rm -f`.
+  try { sh(`docker rm -f ${m.container}`); } catch { /* nothing to remove */ }
+  console.log(`[waker:${m.model}] starting fresh: docker run ${m.image}`);
   const env = [
     `PUBSUB_EMULATOR_HOST=host.docker.internal:8085`,
     `GCP_PROJECT_ID=${GCP_PROJECT_ID}`,
@@ -81,20 +93,30 @@ function startContainer(m) {
     `MONGO_DB=${MONGO_DB}`,
     `MONGO_COLLECTION=${MONGO_COLLECTION}`,
     `FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID || GCP_PROJECT_ID}`,
+    `DEPLOY_ENV=${DEPLOY_ENV}`,
   ];
+  if (OLLAMA_API_KEY) env.push(`OLLAMA_API_KEY=${OLLAMA_API_KEY}`);
+  if (m.gateway) {
+    env.push(`GATEWAY=${m.gateway}`);
+    if (OPENCLAW_GATEWAY_TOKEN) env.push(`OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}`);
+  }
   if (GOOGLE_APPLICATION_CREDENTIALS) env.push(`GOOGLE_APPLICATION_CREDENTIALS=/secrets/sa.json`);
   const envFlags = env.map((e) => `-e ${e}`).join(" ");
   const credMount = GOOGLE_APPLICATION_CREDENTIALS
     ? `-v "${GOOGLE_APPLICATION_CREDENTIALS}":/secrets/sa.json:ro`
     : "";
   const gpuFlag = DOCKER_GPU ? `--gpus ${DOCKER_GPU}` : "";
-  // Mount live worker code over the baked copy so worker edits apply on a
+  // Mount live worker code + start.sh over the baked copies so edits apply on a
   // container restart — no image rebuild needed in dev.
   const workerMount = `-v "${process.cwd()}/worker":/app/worker`;
+  const startMount = `-v "${process.cwd()}/docker/common/start.sh":/start.sh`;
+  // The ollama base image sets ENTRYPOINT ["ollama"]; override it. Run the script
+  // explicitly as `sh /start.sh` so it works even when the bind-mounted file lacks
+  // the execute bit (a plain `--entrypoint /start.sh` fails with "permission denied").
   sh(
-    `docker run -d --name ${m.container} ` +
+    `docker run -d --name ${m.container} --entrypoint sh ` +
       `--add-host=host.docker.internal:host-gateway ` +
-      `${gpuFlag} ${envFlags} ${credMount} ${workerMount} ${m.image}`
+      `${gpuFlag} ${envFlags} ${credMount} ${workerMount} ${startMount} ${m.image} /start.sh`
   );
 }
 
@@ -126,15 +148,37 @@ async function main() {
   for (const m of models) console.log(`  - ${m.model}  (${m.subscription} → ${m.container})`);
   console.log(`[waker] prod equivalent → GCE MIG autoscaler per model on Pub/Sub backlog\n`);
 
+  const crash = new Map(); // container -> { fails, until } for crash backoff
+
   for (;;) {
     for (const m of models) {
       try {
-        if (containerRunning(m.container)) continue; // worker owns its sub while up
-        const subPath = subClient.subscriptionPath(GCP_PROJECT_ID, m.subscription);
-        if (await hasBacklog(subClient, subPath)) {
-          console.log(`[waker:${m.model}] backlog detected → waking worker`);
-          startContainer(m);
+        if (containerRunning(m.container)) {
+          crash.delete(m.container); // healthy → reset crash tracking
+          continue; // worker owns its sub while up
         }
+
+        // Respect a crash backoff window so a broken worker isn't hammered + spammed every poll.
+        const st = crash.get(m.container);
+        if (st && Date.now() < st.until) continue;
+
+        const subPath = subClient.subscriptionPath(GCP_PROJECT_ID, m.subscription);
+        if (!(await hasBacklog(subClient, subPath))) continue;
+
+        // Surface a previous crash (non-zero exit) with its logs, so failures are
+        // visible here instead of requiring a manual `docker logs`.
+        const exit = lastExitCode(m.container);
+        if (exit && exit !== "0") {
+          const fails = (st?.fails || 0) + 1;
+          const backoffMs = Math.min(30000, 3000 * fails);
+          crash.set(m.container, { fails, until: Date.now() + backoffMs });
+          console.error(`[waker:${m.model}] worker exited code ${exit} (attempt ${fails}). Last logs:`);
+          for (const line of logsTail(m.container).split("\n")) console.error(`    ${line}`);
+          console.error(`[waker:${m.model}] retrying after ${backoffMs / 1000}s backoff`);
+        }
+
+        console.log(`[waker:${m.model}] backlog detected → waking worker`);
+        startContainer(m);
       } catch (err) {
         console.error(`[waker:${m.model}] error:`, err.message);
       }

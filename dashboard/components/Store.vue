@@ -1,7 +1,7 @@
 <template>
   <div class="flex gap-4 h-full">
     <!-- Sidebar -->
-    <div class="w-48 space-y-2 overflow-y-auto glass p-4 flex flex-col">
+    <div class="w-48 shrink-0 space-y-2 overflow-y-auto glass p-4 flex flex-col">
       <!-- Database Selector -->
       <div class="space-y-2">
         <button
@@ -31,7 +31,7 @@
           @contextmenu.prevent
           :class="[
             'w-full text-left px-3 py-2 rounded text-sm transition',
-            openMongoCollections.some(tab => tab.collection === col)
+            activeCollection === col
               ? 'bg-amber-500/20 text-primary border border-amber-500/50'
               : 'text-gray-300 hover:text-primary hover:bg-gray-800/50'
           ]"
@@ -43,7 +43,7 @@
     </div>
 
     <!-- Content Area -->
-    <div class="flex-1 flex flex-col min-h-0 p-4 gap-4 glass">
+    <div class="flex-1 min-w-0 flex flex-col min-h-0 p-4 gap-4 glass">
       <!-- MongoDB: Full Compass Explorer -->
       <div v-if="selectedDb === 'MongoDB'" class="flex flex-col h-full min-h-0">
         <!-- Collection Tabs -->
@@ -251,7 +251,7 @@
               >
                 EXPORT DATA
               </button>
-              <div v-if="showExportMenu" class="absolute top-full left-0 mt-1 bg-gray-800 border border-white/20 rounded shadow-lg z-10 flex flex-col min-w-max">
+              <div v-if="showExportMenu" class="absolute top-full left-0 mt-1 bg-gray-950 border border-gray-700/60 rounded shadow-lg z-10 flex flex-col min-w-max">
                 <button class="text-left px-3 py-2 text-xs text-secondary hover:text-primary hover:bg-gray-700 transition">
                   Export query results
                 </button>
@@ -273,7 +273,7 @@
               </button>
               <div
                 v-if="showPageSizeMenu"
-                class="absolute top-full right-0 mt-1 bg-gray-800 border border-white/20 rounded shadow-lg z-50 flex flex-col min-w-max"
+                class="absolute top-full right-0 mt-1 bg-gray-950 border border-gray-700/60 rounded shadow-lg z-50 flex flex-col min-w-max"
               >
                 <button
                   v-for="size in [25, 50, 75, 100]"
@@ -313,7 +313,7 @@
               </button>
               <div
                 v-if="showMongoExpandMenu"
-                class="absolute top-full left-0 mt-1 bg-gray-800 border border-white/20 rounded shadow-lg z-50 flex flex-col min-w-max"
+                class="absolute top-full left-0 mt-1 bg-gray-950 border border-gray-700/60 rounded shadow-lg z-50 flex flex-col min-w-max"
               >
                 <button
                   @click="expandAllDocs"
@@ -744,6 +744,12 @@ const mongoCollections = ref([])
 const openMongoCollections = ref([])  // Array of { id: string, collection: string }
 const activeTabId = ref(null)  // Track which tab is currently active
 const tabIdCounter = ref(0)
+// The collection of the ACTIVE tab — drives sidebar highlight (only the
+// active collection lights up, not every open tab).
+const activeCollection = computed(() => {
+  const tab = openMongoCollections.value.find(t => t.id === activeTabId.value)
+  return tab ? tab.collection : null
+})
 const mongoFilter = ref('{}')
 const mongoFilterValid = ref(true)
 const mongoFilterError = ref('')
@@ -938,8 +944,14 @@ const selectMongoCollection = (collection, modifier = 'normal') => {
   queryMongo()
 }
 
+// Monotonic stamp so out-of-order / superseded responses can't paint the wrong
+// collection's docs under the active tab (the "showing both collections" bug).
+let mongoQuerySeq = 0
+
 const queryMongo = async () => {
   if (!mongoCollection.value) return
+  const seq = ++mongoQuerySeq
+  const queriedCollection = mongoCollection.value
   loadingMongo.value = true
   mongoError.value = ''
   mongoResults.value = []
@@ -965,17 +977,20 @@ const queryMongo = async () => {
     const res = await $fetch('/api/store/mongo', {
       method: 'POST',
       body: {
-        collection: mongoCollection.value,
+        collection: queriedCollection,
         query: filter,
         projection,
         limit: mongoLimit.value
       }
     })
+    // Drop this response if a newer query has since been issued.
+    if (seq !== mongoQuerySeq) return
     mongoResults.value = Array.isArray(res) ? res : [res]
   } catch (err) {
+    if (seq !== mongoQuerySeq) return
     mongoError.value = err.message || 'Query failed'
   } finally {
-    loadingMongo.value = false
+    if (seq === mongoQuerySeq) loadingMongo.value = false
   }
 }
 

@@ -72,13 +72,8 @@ export const useLogs = () => {
     logs.value = [];
   };
 
-  onMounted(() => {
-    loadLogs();
-
-    // Poll for new logs
-    const interval = setInterval(loadLogs, 1000);
-    onBeforeUnmount(() => clearInterval(interval));
-  });
+  // Poll for new logs; self-cancels on unmount (no leaked interval).
+  usePoll(loadLogs, 1000);
 
   return {
     logs,

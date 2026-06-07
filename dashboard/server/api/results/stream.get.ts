@@ -1,18 +1,5 @@
-import { MongoClient } from "mongodb";
-
-const mongoClients = new Map();
-
-async function getMongoClient(uri, environment) {
-  const key = `${environment}`;
-
-  if (!mongoClients.has(key)) {
-    const client = new MongoClient(uri);
-    await client.connect();
-    mongoClients.set(key, client);
-  }
-
-  return mongoClients.get(key);
-}
+// HMR-safe shared client (globalThis-cached) — see server/utils/mongo.ts.
+import { getMongoClient } from "../../utils/mongo";
 
 export default defineEventHandler(async (event) => {
   const query = getQuery(event);
@@ -29,7 +16,7 @@ export default defineEventHandler(async (event) => {
   setHeader(event, "Cache-Control", "no-cache");
   setHeader(event, "Connection", "keep-alive");
 
-  const client = await getMongoClient(mongoUri, environment);
+  const client = await getMongoClient(mongoUri);
   const db = client.db(mongoDb);
   const collection = db.collection("results");
 

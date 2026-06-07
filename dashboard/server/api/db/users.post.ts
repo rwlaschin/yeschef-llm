@@ -1,16 +1,5 @@
-import { MongoClient } from 'mongodb'
 import { resolveEnv } from '../../utils/envConfig'
-
-const clients: Record<string, MongoClient> = {}
-
-async function getMongoClient(uri: string) {
-  if (!clients[uri]) {
-    const client = new MongoClient(uri)
-    await client.connect()
-    clients[uri] = client
-  }
-  return clients[uri]
-}
+import { getMongoClient } from '../../utils/mongo'
 
 export default defineEventHandler(async (event) => {
   const body = await readBody(event)

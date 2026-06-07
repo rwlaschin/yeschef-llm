@@ -103,7 +103,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 
 const currentEnv = ref('local')
 const status = ref({
@@ -146,10 +146,9 @@ const checkHealth = async () => {
   }
 }
 
-onMounted(() => {
-  checkHealth()
-  setInterval(checkHealth, 5000)
-})
+// Self-cancelling, non-overlapping poll — was leaking a 5s interval on every
+// visit to this page; that congestion is what made fast nav land on a stale route.
+usePoll(checkHealth, 5000)
 
 watch(currentEnv, () => {
   checkHealth()

@@ -2,6 +2,13 @@
   <div class="flex gap-4 h-screen">
     <!-- Left Panel: Request History -->
     <div class="w-64 panel backdrop-blur-md p-4 overflow-y-auto flex flex-col min-h-0">
+      <button
+        type="button"
+        @click="newRequest"
+        class="mb-3 w-full px-3 py-2 rounded bg-amber-500 text-gray-900 hover:bg-amber-600 text-sm font-medium"
+      >
+        + New request
+      </button>
       <div class="space-y-2">
         <div v-if="activeRequests.length === 0" class="text-muted text-xs text-center py-4">
           No requests
@@ -11,14 +18,22 @@
           :key="req.jobId"
           @click="selectRequest(req.jobId)"
           :class="[
-            'p-2 rounded-lg cursor-pointer transition text-xs',
+            'group relative p-2 pr-6 rounded-lg cursor-pointer transition text-xs',
             selectedRequestId === req.jobId
               ? 'bg-amber-500/20 border border-amber-500'
               : 'hover:bg-amber-500/10 border border-transparent'
           ]"
         >
+          <button
+            type="button"
+            @click.stop="deleteRequest(req.jobId)"
+            title="Delete"
+            class="absolute top-1 right-1 w-5 h-5 rounded flex items-center justify-center text-muted opacity-0 group-hover:opacity-100 hover:bg-error/20 hover:text-error transition"
+          >×</button>
           <div class="text-primary font-mono">{{ req.jobId.slice(0, 8) }}</div>
-          <div class="text-xs capitalize" :class="req.status === 'complete' ? 'text-success' : 'text-primary'">
+          <div v-if="req.userPrompt" class="text-gray-400 truncate mt-0.5">{{ req.userPrompt }}</div>
+          <div class="text-xs capitalize mt-0.5 flex items-center gap-1.5" :class="req.status === 'complete' ? 'text-success' : 'text-primary'">
+            <span v-if="req.status === 'streaming'" class="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
             {{ req.status }}
           </div>
         </div>
@@ -39,7 +54,7 @@
               </ListboxButton>
               <ListboxOptions :class="[
                 'absolute z-50 w-full mt-1 rounded-lg p-2 space-y-1 border shadow-xl',
-                isDark ? 'bg-gray-800 border-amber-500/20' : 'bg-white border-gray-300'
+                isDark ? 'bg-gray-950 border-gray-700/60' : 'bg-white border-gray-300'
               ]">
                 <ListboxOption v-for="c in companies" :key="c._id" :value="c._id" :class="[
                   'px-3 py-2 rounded cursor-pointer text-sm',
@@ -70,7 +85,7 @@
               </ListboxButton>
               <ListboxOptions v-if="selectedCompanyId" :class="[
                 'absolute z-50 w-full mt-1 rounded-lg p-2 space-y-1 border',
-                isDark ? 'bg-gray-800 border-amber-500/20' : 'bg-white border-gray-300'
+                isDark ? 'bg-gray-950 border-gray-700/60' : 'bg-white border-gray-300'
               ]">
                 <ListboxOption v-for="u in filteredUsers" :key="u._id" :value="u._id" :class="[
                   'px-3 py-2 rounded cursor-pointer text-sm',
@@ -119,21 +134,26 @@
             @click="activeTab = 'results'"
             :class="[
               'px-4 py-2 text-sm font-medium transition-colors duration-300 relative z-10',
-              isDark
-                ? activeTab === 'results' ? 'text-amber-400' : 'text-gray-300 hover:text-gray-200'
-                : activeTab === 'results' ? 'text-amber-600' : 'text-gray-600 hover:text-gray-700'
+              activeTab === 'results'
+                ? 'text-amber-600 dark:text-amber-400'
+                : 'text-gray-600 hover:text-gray-700 dark:text-gray-300 dark:hover:text-gray-200'
             ]"
           >
             Results
+            <span
+              v-if="selectedRequestData && selectedRequestData.status === 'streaming'"
+              class="ml-1.5 inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse align-middle"
+              title="Streaming…"
+            ></span>
           </button>
           <button
             ref="messageBtn"
             @click="activeTab = 'message'"
             :class="[
               'px-4 py-2 text-sm font-medium transition-colors duration-300 relative z-10',
-              isDark
-                ? activeTab === 'message' ? 'text-amber-400' : 'text-gray-300 hover:text-gray-200'
-                : activeTab === 'message' ? 'text-amber-600' : 'text-gray-600 hover:text-gray-700'
+              activeTab === 'message'
+                ? 'text-amber-600 dark:text-amber-400'
+                : 'text-gray-600 hover:text-gray-700 dark:text-gray-300 dark:hover:text-gray-200'
             ]"
           >
             Message
@@ -143,9 +163,9 @@
             @click="activeTab = 'prompt'"
             :class="[
               'px-4 py-2 text-sm font-medium transition-colors duration-300 relative z-10',
-              isDark
-                ? activeTab === 'prompt' ? 'text-amber-400' : 'text-gray-300 hover:text-gray-200'
-                : activeTab === 'prompt' ? 'text-amber-600' : 'text-gray-600 hover:text-gray-700'
+              activeTab === 'prompt'
+                ? 'text-amber-600 dark:text-amber-400'
+                : 'text-gray-600 hover:text-gray-700 dark:text-gray-300 dark:hover:text-gray-200'
             ]"
           >
             Prompt
@@ -160,7 +180,7 @@
                 <span class="truncate">{{ selectedModelLabel }}</span>
                 <span class="text-xs opacity-60">▼</span>
               </ListboxButton>
-              <ListboxOptions class="absolute z-50 w-full mt-1 rounded-lg p-2 space-y-1 glass border-amber-500/20">
+              <ListboxOptions class="absolute z-50 w-full mt-1 rounded-lg p-2 space-y-1 bg-gray-950 border border-gray-700/60 shadow-xl">
                 <ListboxOption
                   v-for="m in models"
                   :key="m.value"
@@ -174,11 +194,31 @@
             </div>
           </Listbox>
         </div>
+
+        <!-- Message type (shared list — same source as the prompt editor) -->
+        <div class="w-40">
+          <Listbox v-model="selectedType">
+            <div class="relative">
+              <ListboxButton class="w-full form-input border-0 text-left text-sm flex items-center justify-between">
+                <span class="truncate">{{ selectedType || 'Type' }}</span>
+                <span class="text-xs opacity-60">▼</span>
+              </ListboxButton>
+              <ListboxOptions class="absolute z-50 w-full mt-1 rounded-lg p-2 space-y-1 bg-gray-950 border border-gray-700/60 shadow-xl">
+                <ListboxOption
+                  v-for="t in messageTypes"
+                  :key="t"
+                  :value="t"
+                  :class="['px-3 py-2 rounded cursor-pointer text-sm', isDark ? 'hover:bg-amber-500/20' : 'hover:bg-gray-100']"
+                >{{ t }}</ListboxOption>
+              </ListboxOptions>
+            </div>
+          </Listbox>
+        </div>
       </div>
 
       <!-- Content -->
       <div class="flex-1 overflow-auto p-4 min-h-0">
-        <!-- Request Tab -->
+        <!-- Request Tab — always-editable compose box; prefilled when a request is selected -->
         <div v-show="activeTab === 'request'" class="h-full flex flex-col">
           <textarea
             v-model="userPrompt"
@@ -188,23 +228,18 @@
           />
         </div>
 
-        <!-- Prompt Tab -->
+        <!-- Prompt Tab — live preview of what the worker will build (system + request) -->
         <div v-show="activeTab === 'prompt'" class="h-full flex flex-col">
-          <div v-if="!selectedRequestId" class="text-muted text-sm text-center flex items-center justify-center h-full">
-            Select a request to view prompt
-          </div>
-          <div v-else-if="selectedRequestData" class="p-3 rounded text-xs whitespace-pre-wrap font-mono overflow-auto flex-1 glass">
-            {{ selectedRequestData.prompt || selectedRequestData.userPrompt || 'No prompt' }}
-          </div>
+          <div class="p-3 rounded text-xs whitespace-pre-wrap break-words font-mono overflow-auto flex-1 glass">{{ promptPreview }}</div>
         </div>
 
         <!-- Message Tab -->
         <div v-show="activeTab === 'message'" class="h-full flex flex-col">
-          <div v-if="!selectedRequestId" :class="isDark ? 'text-gray-500' : 'text-gray-400'" class="text-sm text-center flex items-center justify-center h-full">
+          <div v-if="!selectedRequestId" class="text-gray-400 dark:text-gray-500 text-sm text-center flex items-center justify-center h-full">
             Select a request to view message
           </div>
           <div v-else-if="selectedRequestData" :class="[
-            'p-3 rounded text-xs whitespace-pre-wrap font-mono overflow-auto flex-1',
+            'p-3 rounded text-xs whitespace-pre-wrap break-words font-mono overflow-auto flex-1',
             isDark ? 'bg-black/20 text-gray-100' : 'bg-gray-100 text-gray-900 border border-gray-200'
           ]">
             {{ selectedRequestData.userPrompt || 'No message' }}
@@ -213,7 +248,7 @@
 
         <!-- Results Tab -->
         <div v-show="activeTab === 'results'" class="h-full flex flex-col">
-          <div v-if="!selectedRequestId" :class="isDark ? 'text-gray-500' : 'text-gray-400'" class="text-sm text-center flex items-center justify-center h-full">
+          <div v-if="!selectedRequestId" class="text-gray-400 dark:text-gray-500 text-sm text-center flex items-center justify-center h-full">
             Select a request to view results
           </div>
           <div v-else-if="selectedRequestData" class="flex flex-col h-full min-h-0">
@@ -222,17 +257,21 @@
             </div>
             <div v-else-if="selectedRequestData.status === 'streaming'" class="flex flex-col min-h-0 flex-1">
               <div class="text-primary text-xs font-medium mb-2">Streaming...</div>
-              <div class="p-3 rounded text-xs whitespace-pre-wrap font-mono overflow-auto flex-1 glass">
+              <div class="p-3 rounded text-xs whitespace-pre-wrap break-words font-mono overflow-auto flex-1 glass">
                 {{ selectedRequestData.response }}
               </div>
             </div>
             <div v-else-if="selectedRequestData.status === 'complete'" class="flex flex-col min-h-0 flex-1">
               <div class="text-success text-xs font-medium mb-2">✓ Complete</div>
-              <div class="p-3 rounded text-xs whitespace-pre-wrap font-mono overflow-auto flex-1 glass">
+              <div class="p-3 rounded text-xs whitespace-pre-wrap break-words font-mono overflow-auto flex-1 glass">
                 {{ selectedRequestData.response }}
               </div>
             </div>
-            <div v-else-if="selectedRequestData.error" class="text-error text-sm">
+            <div
+              v-else-if="selectedRequestData.error"
+              title="Hover to show the full error"
+              class="text-error text-sm whitespace-pre-wrap break-words line-clamp-3 hover:line-clamp-none cursor-help overflow-auto"
+            >
               Error: {{ selectedRequestData.error }}
             </div>
           </div>
@@ -245,7 +284,7 @@
   <!-- Floating Submit Button (Fixed) -->
   <button
     @click="submitRequest"
-    :disabled="loading || !selectedCompanyId || !selectedUserId || !userPrompt.trim()"
+    :disabled="!canSubmit"
     class="fixed bottom-6 right-6 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-gray-900 font-bold p-4 rounded-full transition focus:outline-none focus:ring-2 focus:ring-amber-500 shadow-lg z-50"
     title="Submit query (Shift+Enter)"
   >
@@ -303,7 +342,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { Listbox, ListboxLabel, ListboxButton, ListboxOptions, ListboxOption } from '@headlessui/vue'
 import { PaperAirplaneIcon } from '@heroicons/vue/20/solid'
-import { onSnapshot, doc } from 'firebase/firestore'
+import { collection, query, orderBy, limit, onSnapshot, doc } from 'firebase/firestore'
 import { getDb } from '~/lib/firebase'
 
 const { success, error: showError } = useToast()
@@ -319,6 +358,8 @@ const selectedModel = ref('openclaw_v1')
 const selectedModelLabel = computed(
   () => models.value.find((m) => m.value === selectedModel.value)?.label || selectedModel.value
 )
+const messageTypes = ref([])           // shared list from /api/llm/types (no duplicate)
+const selectedType = ref('query')
 const userPrompt = ref('')
 const loading = ref(false)
 const showCreateCompany = ref(false)
@@ -328,6 +369,56 @@ const activeRequests = ref([])
 const selectedRequestId = ref('')
 const selectedRequestData = ref(null)
 const activeTab = ref('request')
+
+// Live preview of the FULL prompt the worker will build: the system prompt assembled
+// from the current prompt_library (for the selected type) + the user request. This is
+// NOT the worker's stored snapshot, so it always reflects your latest library edits.
+const systemPrompt = ref('')
+const promptPreview = computed(() => {
+  const parts = []
+  if (systemPrompt.value) parts.push(systemPrompt.value)
+  if (userPrompt.value) parts.push(userPrompt.value)
+  return parts.join('\n\n')
+})
+
+// Submit is enabled only with company + user + model + prompt. When a past request
+// is selected, it stays disabled until the prompt is edited — then submitting it
+// creates a NEW request (we never mutate an existing one).
+const canSubmit = computed(() => {
+  if (loading.value) return false
+  if (!selectedCompanyId.value || !selectedUserId.value || !selectedModel.value || !userPrompt.value.trim()) return false
+  if (selectedRequestId.value && selectedRequestData.value) {
+    return userPrompt.value !== (selectedRequestData.value.userPrompt || '')
+  }
+  return true
+})
+
+// Remove a history item: delete its Firestore doc (so onSnapshot won't re-add it),
+// drop the optimistic copy, and prune the in-memory list. If it was selected,
+// reset to a fresh request.
+const deleteRequest = async (jobId) => {
+  try {
+    await $fetch(`/api/llm/${jobId}`, { method: 'DELETE' })
+  } catch (err) {
+    showError('Delete failed', err.message)
+    return
+  }
+  saveLocal(loadLocal().filter((r) => r.jobId !== jobId))
+  activeRequests.value = activeRequests.value.filter((r) => r.jobId !== jobId)
+  if (selectedRequestId.value === jobId) newRequest()
+}
+
+// Clear everything for a fresh request: selection, prompt, company, user, model.
+const newRequest = () => {
+  if (docUnsub) { docUnsub(); docUnsub = null }
+  selectedRequestId.value = ''
+  selectedRequestData.value = null
+  userPrompt.value = ''
+  selectedCompanyId.value = ''
+  selectedUserId.value = ''
+  selectedModel.value = ''
+  activeTab.value = 'request'
+}
 
 const requestBtn = ref(null)
 const resultsBtn = ref(null)
@@ -409,41 +500,85 @@ watch(currentEnv, () => {
   selectedUserId.value = ''
   loadCompanies()
   loadUsers()
+  loadModels() // model list differs by env (dev shows only dev-capable tiers)
 })
+
+// --- History: optimistic localStorage + client-side Firestore (your pattern) ---
+const HISTORY_KEY = 'yeschef-llm-history'
+const loadLocal = () => { try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]') } catch { return [] } }
+const saveLocal = (a) => { try { localStorage.setItem(HISTORY_KEY, JSON.stringify(a)) } catch { /* ignore */ } }
+const addLocal = (item) => { const a = loadLocal().filter((x) => x.jobId !== item.jobId); a.unshift(item); saveLocal(a) }
+
+const resultsCollection = () => useRuntimeConfig().public.firestoreCollectionResults || 'llmResults'
+
+let historyUnsub = null
+let docUnsub = null
+
+const startHistory = () => {
+  // Show optimistic items immediately (survives reload), then reconcile with Firestore.
+  activeRequests.value = loadLocal()
+  const q = query(collection(getDb(), resultsCollection()), orderBy('createdAt', 'desc'), limit(50))
+  historyUnsub = onSnapshot(
+    q,
+    (snap) => {
+      const remote = snap.docs.map((d) => {
+        const x = d.data()
+        return {
+          jobId: x.jobId || d.id,
+          type: x.type || 'query',
+          userPrompt: x.userPrompt || '',
+          model: x.model || '',
+          companyId: x.companyId || '',
+          userId: x.userId || '',
+          status: x.status || 'pending',
+          createdAt: x.createdAt?.toMillis?.() ?? 0,
+        }
+      })
+      // localStorage holds optimistic items not yet in Firestore — drop the confirmed ones.
+      const remoteIds = new Set(remote.map((r) => r.jobId))
+      const local = loadLocal().filter((l) => !remoteIds.has(l.jobId))
+      saveLocal(local)
+      activeRequests.value = [...local, ...remote].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    },
+    (err) => showError('History read failed', err.message)
+  )
+}
 
 const submitRequest = async () => {
   if (!selectedCompanyId.value || !selectedUserId.value || !userPrompt.value.trim()) {
     showError('Missing required fields')
     return
   }
-
+  const promptText = userPrompt.value
   loading.value = true
   try {
-    const response = await $fetch('/api/llm/request', {
+    const { jobId } = await $fetch('/api/llm/request', {
       method: 'POST',
+      // Hard timeout so a stalled server-side publish/write can NEVER hang the UI.
+      // The submit only POSTs here; the server does the Firestore write + Pub/Sub
+      // publish, so if that stalls we surface an error instead of locking the button.
+      timeout: 15000,
       body: {
         userId: selectedUserId.value,
         companyId: selectedCompanyId.value,
-        type: 'query',
-        userPrompt: userPrompt.value,
+        type: selectedType.value,
+        userPrompt: promptText,
         model: selectedModel.value,
         env: currentEnv.value,
         metadata: {},
       },
     })
-
-    const { jobId } = response
     success('Request submitted', `Job ID: ${jobId.slice(0, 8)}`)
 
-    activeRequests.value.unshift({
-      jobId,
-      type: 'query',
-      status: 'pending',
-    })
+    // Optimistic: persist to localStorage + show now; the Firestore snapshot
+    // reconciles (and removes the local copy) once the doc appears.
+    const item = { jobId, type: selectedType.value, userPrompt: promptText, model: selectedModel.value, companyId: selectedCompanyId.value, userId: selectedUserId.value, status: 'pending', createdAt: Date.now() }
+    addLocal(item)
+    activeRequests.value = [item, ...activeRequests.value.filter((r) => r.jobId !== jobId)]
 
     userPrompt.value = ''
     selectRequest(jobId)
-    activeTab.value = 'results'
+    activeTab.value = 'results' // switch to Results so the response streams in view
   } catch (err) {
     showError('Submit failed', err.message)
   } finally {
@@ -451,37 +586,48 @@ const submitRequest = async () => {
   }
 }
 
+// Reflect a request's saved company/user/model in the selectors.
+const applySelectors = (data) => {
+  if (!data) return
+  if (data.companyId) selectedCompanyId.value = data.companyId
+  if (data.userId) selectedUserId.value = data.userId
+  if (data.model) selectedModel.value = data.model
+  if (data.type) selectedType.value = data.type
+}
+
 const selectRequest = (jobId) => {
   selectedRequestId.value = jobId
-  activeTab.value = 'results'
 
-  if (window.__requestUnsubscribe) {
-    window.__requestUnsubscribe()
-  }
+  // Restore from the in-memory item immediately (so it works even if the live read
+  // is slow): prefill the editable compose box + restore company/user/model.
+  // Fall back to the optimistic localStorage copy, which always carries the prompt.
+  const local = activeRequests.value.find((r) => r.jobId === jobId)
+    || loadLocal().find((r) => r.jobId === jobId)
+    || null
+  selectedRequestData.value = local
+  if (local?.userPrompt) userPrompt.value = local.userPrompt
+  applySelectors(local)
 
-  const db = getDb()
-  const config = useRuntimeConfig()
-  const collection_name = config.public.firestoreCollectionResults || 'llmResults'
-  const docRef = doc(db, collection_name, jobId)
+  // Jump to Results for items that already have (or are producing) output; otherwise
+  // show the Request tab so you can see/edit the inputs.
+  activeTab.value = local && (local.status === 'complete' || local.status === 'streaming') ? 'results' : 'request'
 
-  window.__requestUnsubscribe = onSnapshot(docRef, (docSnap) => {
-    if (docSnap.exists()) {
-      const data = docSnap.data()
+  if (docUnsub) docUnsub()
+  // Client-side real-time read enriches it (status/response/prompt) when the doc loads.
+  docUnsub = onSnapshot(doc(getDb(), resultsCollection(), jobId), (snap) => {
+    if (snap.exists()) {
+      const data = snap.data()
       selectedRequestData.value = data
-      userPrompt.value = data.userPrompt || userPrompt.value
-
-      const req = activeRequests.value.find(r => r.jobId === jobId)
-      if (req) {
-        req.status = data.status
-      }
+      if (data.userPrompt) userPrompt.value = data.userPrompt
+      applySelectors(data)
     }
-  })
+  }, (err) => showError('Could not read request', err.message))
 }
 
 const handleQueryKeydown = (event) => {
   if (event.shiftKey && event.key === 'Enter') {
     event.preventDefault()
-    submitRequest()
+    if (canSubmit.value) submitRequest()
   }
 }
 
@@ -500,27 +646,61 @@ const updateUnderline = () => {
   }
 }
 
-watch(activeTab, () => {
+watch(activeTab, (tab) => {
   nextTick(() => updateUnderline())
+  if (tab === 'prompt') loadSystemPrompt() // re-pull in case the library changed
 })
 
 const loadModels = async () => {
   try {
-    models.value = await $fetch('/api/llm/models')
+    models.value = await $fetch('/api/llm/models', { query: { env: currentEnv.value } })
+    // Keep the selection valid: prod-only models aren't offered in dev, so if the
+    // current pick isn't in the list, fall back to the first available model.
+    if (!models.value.some((m) => m.value === selectedModel.value)) {
+      selectedModel.value = models.value[0]?.value || ''
+    }
   } catch (err) {
     console.error('Failed to load models:', err)
   }
 }
 
+// Message types come from the SAME shared endpoint the prompt editor uses — no
+// duplicated list. /api/llm/types → config/models.js MESSAGE_TYPES.
+const loadTypes = async () => {
+  try {
+    messageTypes.value = await $fetch('/api/llm/types')
+    if (!messageTypes.value.includes(selectedType.value)) selectedType.value = messageTypes.value[0] || 'query'
+  } catch (err) {
+    console.error('Failed to load types:', err)
+  }
+}
+
+// Assemble the system prompt for the current type from the live prompt_library.
+const loadSystemPrompt = async () => {
+  try {
+    systemPrompt.value = await $fetch('/api/llm/system-prompt', { query: { type: selectedType.value } })
+  } catch (err) {
+    console.error('Failed to load system prompt:', err)
+    systemPrompt.value = ''
+  }
+}
+// Refresh when the type changes (selecting a past request also sets the type).
+watch(selectedType, loadSystemPrompt)
+
 onMounted(() => {
   loadModels()
+  loadTypes()
+  loadSystemPrompt()
   loadCompanies()
   loadUsers()
+  startHistory()
   updateUnderline()
   window.addEventListener('resize', updateUnderline)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', updateUnderline)
+  if (historyUnsub) historyUnsub()
+  if (docUnsub) docUnsub()
 })
 </script>

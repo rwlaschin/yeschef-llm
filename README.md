@@ -29,7 +29,7 @@ npm run dev                # Firebase emulator + Ollama + worker
 
 Test with:
 ```bash
-gcloud pubsub topics publish llama3_2b_v1 \
+gcloud pubsub topics publish llama3_2_3b_v1 \
   --message='{"jobId":"test-1","query":"List foods safe for a diabetic diet"}' \
   --project=demo-ollama
 ```
@@ -55,7 +55,7 @@ Client → Pub/Sub topic → worker/index.js → MongoDB Atlas (RAG) → Ollama 
 
 | Topic | Model | GPUs |
 |-------|-------|------|
-| `llama3_2b_v1` | Llama 3.2 2B | 1× L4 |
+| `llama3_2_3b_v1` | Llama 3.2 3B | 1× L4 |
 | `llama3_3_70b_v1` | Llama 3.3 70B | 2× L4 |
 
 Same `worker/index.js` runs both — configured entirely via env vars.

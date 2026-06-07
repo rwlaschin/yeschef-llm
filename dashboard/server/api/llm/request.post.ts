@@ -54,7 +54,7 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  // `model` from the UI is the topic name (e.g. llama3_2b_v1). Validate against
+  // `model` from the UI is the topic name (e.g. llama3_2_3b_v1). Validate against
   // the shared registry; the topic is the model's topic.
   const known = byTopic(model)
   if (!known) {

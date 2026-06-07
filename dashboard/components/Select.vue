@@ -5,7 +5,7 @@
         <span :class="selectedLabel ? '' : 'text-gray-500'">{{ selectedLabel || placeholder }}</span>
         <span class="text-xs opacity-60 ml-1">▼</span>
       </ListboxButton>
-      <ListboxOptions class="absolute z-50 w-full mt-1 rounded-lg p-1 space-y-0.5 glass border border-amber-500/20 max-h-60 overflow-auto">
+      <ListboxOptions class="absolute z-50 w-full mt-1 rounded-lg p-1 space-y-0.5 bg-gray-950 border border-gray-700/60 shadow-xl max-h-60 overflow-auto">
         <ListboxOption
           v-for="opt in normalizedOptions"
           :key="opt.value"

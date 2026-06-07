@@ -6,10 +6,15 @@
 
 FROM ollama/ollama:latest
 
-RUN apt-get update && apt-get install -y curl && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+# Node 22 (OpenClaw requires >=22.19) + git (OpenClaw self-install needs it).
+RUN apt-get update && apt-get install -y curl git && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
     apt-get clean
+<% if (gateway === 'openclaw') { %>
+# OpenClaw gateway tier: bake the CLI so cold starts don't re-download it (~82MB).
+RUN npm install -g openclaw
+<% } %>
 
 WORKDIR /app
 
@@ -19,14 +24,25 @@ COPY docker/common/start.sh /start.sh
 
 RUN npm install && chmod +x /start.sh
 
-# Pull model at build time - baked into image, no cold-start pull
+# Store models OUTSIDE /root/.ollama: the base ollama image declares that path as
+# a VOLUME, and Docker discards build-time writes to volume paths — so pulling
+# there leaves the model OUT of the image (cold starts would re-pull GBs every
+# time). /models is a normal layer, so the baked model persists. This ENV also
+# applies at runtime, so `ollama serve` reads the baked model from the same path.
+ENV OLLAMA_MODELS=/models
+
+# Pull model at build time - baked into image, no cold-start pull.
+# IMPORTANT: a failed `ollama pull` MUST fail the build (don't mask it with
+# `|| true`, or you ship a model-less image that "built fine"). The `|| true`
+# is scoped to pkill only. After pull, assert the model is actually present.
 RUN ollama serve & \
     sleep 10 && \
     for i in {1..30}; do \
       curl -sf http://localhost:11434/api/tags >/dev/null && break || sleep 2; \
     done && \
     ollama pull <%= model %> && \
-    pkill -f "ollama serve" || true && \
+    ollama list | grep -q "<%= model %>" && \
+    { pkill -f "ollama serve" || true; } && \
     sleep 2
 
 ENV OLLAMA_MODEL=<%= model %>
@@ -35,4 +51,7 @@ ENV OLLAMA_NUM_PARALLEL=<%= parallel %>
 ENV OLLAMA_MAX_QUEUE=<%= maxQueue %>
 ENV SUBSCRIPTION_NAME=<%= subscriptions.join(',') %>
 
+# The ollama base image sets ENTRYPOINT ["ollama"]; clear it so /start.sh runs
+# (otherwise CMD becomes `ollama /start.sh` → "unknown command").
+ENTRYPOINT []
 CMD ["/start.sh"]

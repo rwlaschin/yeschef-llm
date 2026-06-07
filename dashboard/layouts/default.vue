@@ -16,6 +16,9 @@
           <NuxtLink to="/tools" :class="$route.path === '/tools' ? 'text-primary' : 'text-secondary'" class="text-sm font-medium hover:text-primary transition-colors duration-200">
             Tools
           </NuxtLink>
+          <NuxtLink to="/prompts" :class="$route.path === '/prompts' ? 'text-primary' : 'text-secondary'" class="text-sm font-medium hover:text-primary transition-colors duration-200">
+            Prompts
+          </NuxtLink>
         </nav>
 
         <!-- Right Side Controls -->
@@ -82,7 +85,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 const route = useRoute()
@@ -141,10 +144,9 @@ const checkHealth = async () => {
   }
 }
 
-onMounted(() => {
-  checkHealth()
-  setInterval(checkHealth, 5000)
-})
+// Self-cancelling, non-overlapping poll — clears on unmount (HMR-safe) and
+// won't stack requests if /api/health is slow.
+usePoll(checkHealth, 5000)
 
 watch(currentEnv, () => {
   checkHealth()
