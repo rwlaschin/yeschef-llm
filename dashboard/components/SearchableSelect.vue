@@ -20,8 +20,9 @@
         <ComboboxOptions class="absolute z-50 w-full mt-1 surface-overlay rounded-lg p-1 space-y-0.5 max-h-72 overflow-auto origin-top">
           <div v-if="!filtered.length" class="px-2 py-1 text-xs text-muted">No matches</div>
           <template v-for="g in grouped" :key="g.name">
-            <!-- Region header (only when not searching, and only if options carry a `group`). -->
-            <div v-if="g.name" class="px-2 pt-2 pb-0.5 text-[10px] uppercase tracking-wide text-muted sticky top-0 surface-overlay">{{ g.name }}</div>
+            <!-- Region header — sticky, on an OPAQUE surface (surface-solid) so scrolling rows don't
+                 ghost through. Bleeds to the popover edges (-mx-1) and sits above rows (z-10). -->
+            <div v-if="g.name" class="sticky top-0 z-10 -mx-1 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted surface-solid">{{ g.name }}</div>
             <ComboboxOption v-for="opt in g.items" :key="opt.value" :value="opt.value" v-slot="{ active, selected }">
               <div :class="['px-2 py-1 rounded cursor-pointer text-xs truncate', active ? 'bg-amber-500/20' : '', selected ? 'text-primary font-medium' : 'text-secondary']">
                 {{ opt.label }}

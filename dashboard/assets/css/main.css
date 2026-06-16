@@ -189,6 +189,18 @@ html .surface-2,
 html.dark .surface-2 {
   @apply bg-gray-800/40;
 }
+/* Opaque surface — for sticky headers over a scrolling list, where the translucent surfaces would
+   let rows ghost through. Defined per mode so there's no light-default-under-dark flash. */
+.surface-solid {
+  @apply transition-colors;
+}
+html.light .surface-solid {
+  @apply bg-gray-100;
+}
+html .surface-solid,
+html.dark .surface-solid {
+  @apply bg-gray-900;
+}
 .surface-2-soft {
   @apply transition-colors;
 }
