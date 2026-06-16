@@ -1,9 +1,3 @@
-import { readdir } from 'fs/promises'
-import { join, dirname } from 'path'
-import { fileURLToPath } from 'url'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-
 export default defineEventHandler(async (event) => {
   const query = getQuery(event)
   const env = (query.env as string) || 'local'
@@ -15,6 +9,7 @@ export default defineEventHandler(async (event) => {
       neo4j: { ok: false, error: '' },
     },
     pubsub: { ok: false, error: '' },
+    orchestrator: { ok: false, error: '' },
     models: {},
   }
 
@@ -91,7 +86,15 @@ export default defineEventHandler(async (event) => {
       }
     }
   } catch (e: any) {
-    status.databases.neo4j = { ok: false, error: e.message || 'Connection failed' }
+    // Bolt failed — ask the Aura API why. A suspended/resuming Free instance is the common case;
+    // show that plainly instead of the routing error.
+    const state = await auraStatus(config.neo4jUri, env === 'production')
+    const label = state === 'paused' || state === 'suspended' ? 'Paused — instance suspended (resume to use)'
+      : state === 'resuming' ? 'Resuming… (~1 min)'
+      : state === 'suspending' ? 'Suspending…'
+      : (state && state !== 'running') ? `Instance ${state}`
+      : (e.message || 'Connection failed')
+    status.databases.neo4j = { ok: false, error: label }
   }
 
   // Check Pub/Sub
@@ -104,29 +107,66 @@ export default defineEventHandler(async (event) => {
         projectId: config.gcpProjectId,
         apiEndpoint: config.pubsubEmulatorHost ? `http://${config.pubsubEmulatorHost}` : undefined,
       })
-      await pubsub.getTopic('test').exists()
+      await pubsub.topic('test').exists()
       status.pubsub = { ok: true, error: '' }
     }
   } catch (e: any) {
     status.pubsub = { ok: false, error: e.message || 'Connection failed' }
   }
 
-  // Check Models from docker/shared folder
+  // Check Orchestrator (/ai function — the plan backend). Use 127.0.0.1 for the local
+  // emulator: this fetch is server-side (Node), where `localhost` may resolve to IPv6 ::1
+  // while the emulator listens on IPv4.
   try {
-    const sharedPath = join(__dirname, '..', '..', '..', '..', 'docker', 'shared')
-    const files = await readdir(sharedPath)
+    const cfg = useRuntimeConfig(event).public
+    const base = String(env === 'production' ? cfg.aiBaseUrl : cfg.aiBaseUrlLocal).replace('localhost', '127.0.0.1')
+    const res: any = await $fetch(`${base}/health`, { timeout: 3000 })
+    status.orchestrator = res?.status === 'ok' ? { ok: true, error: '' } : { ok: false, error: 'unexpected response' }
+  } catch (e: any) {
+    status.orchestrator = { ok: false, error: e.message || 'Not reachable' }
+  }
 
-    for (const file of files) {
-      const filePath = join(sharedPath, file)
+  // Check Models — source of truth is config/models.js (MODELS), NOT a folder scan.
+  //  • local/dev: Ollama runs INSIDE each model's worker container (no host port is
+  //    published), so the model is reachable iff its container is running. We ask Docker
+  //    directly — the same signal the waker uses. Only dev models exist locally (the 70B
+  //    tiers need 2× L4). A model that's "cold" (no recent traffic) is simply not running.
+  //  • production: a model is "ok" if its per-model Pub/Sub topic exists (i.e. deployed).
+  try {
+    const { MODELS, containerOf } = await import('#models') as { MODELS: any[]; containerOf: (m: any) => string }
+
+    if (env === 'production') {
+      const { PubSub } = await import('@google-cloud/pubsub')
+      const pubsub = config.gcpProjectId ? new PubSub({ projectId: config.gcpProjectId }) : null
+      await Promise.all(MODELS.map(async (m) => {
+        if (!pubsub) { status.models[m.label] = { ok: false, error: 'Project ID not configured' }; return }
+        try {
+          const [exists] = await pubsub.topic(m.topic).exists()
+          status.models[m.label] = { ok: exists, error: exists ? '' : `topic ${m.topic} not deployed` }
+        } catch (e: any) {
+          status.models[m.label] = { ok: false, error: e.message || 'check failed' }
+        }
+      }))
+    } else {
+      // One `docker ps` → the set of running container names; membership = up.
+      let running = new Set<string>()
+      let dockerErr = ''
       try {
-        const content = await Bun.file(filePath).text()
-        status.models[file] = { ok: !content.includes('error'), error: content.trim() }
+        const { execFileSync } = await import('node:child_process')
+        const out = execFileSync('docker', ['ps', '--format', '{{.Names}}', '--filter', 'status=running'], {
+          encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'],
+        })
+        running = new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))
       } catch {
-        status.models[file] = { ok: false, error: 'Could not read' }
+        dockerErr = 'Docker not reachable'
+      }
+      for (const m of MODELS.filter((m) => m.dev)) {
+        const ok = running.has(containerOf(m))
+        status.models[m.label] = { ok, error: ok ? '' : (dockerErr || 'container not running (cold)') }
       }
     }
-  } catch {
-    // ./shared folder doesn't exist or is empty - no models yet
+  } catch (e: any) {
+    // models config unavailable — leave models empty rather than failing the whole check
   }
 
   return status

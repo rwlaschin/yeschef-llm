@@ -1,0 +1,14 @@
+# Tests + docs must NEVER ship in deployed worker images. The Dockerfile bakes `COPY worker/`,
+# which would otherwise include *.test.js and any *.md docs. Excluding them from the build
+# context keeps them out. (Docs live in /design at the repo root — never inside worker/.)
+**/*.test.js
+**/*.spec.js
+**/__tests__/
+**/*.md
+
+# Build-context hygiene: the image runs its own `npm install`, so host deps aren't needed, and
+# these only bloat/slow the build context. (Worker images COPY only package.json, worker/,
+# config/, and docker/common/start.sh.)
+**/node_modules
+.git
+*.log

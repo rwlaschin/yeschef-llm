@@ -15,14 +15,14 @@ export default defineEventHandler(async (event) => {
     const existing = await collection.findOne({ _id: objectId })
     if (!existing) throw createError({ statusCode: 404, statusMessage: 'Prompt not found' })
 
-    await collection.updateOne({ _id: objectId }, {
-      $set: {
-        mapping: body?.mapping && typeof body.mapping === 'object' ? body.mapping : {},
-        active: !!body?.active,
-        content: body?.content || '',
-        updatedAt: new Date(),
-      },
-    })
+    const update: Record<string, any> = {
+      mapping: body?.mapping && typeof body.mapping === 'object' ? body.mapping : {},
+      active: !!body?.active,
+      content: body?.content || '',
+      updatedAt: new Date(),
+    }
+    if (body?.modelOverride !== undefined) update.modelOverride = body.modelOverride  // null = explicitly cleared
+    await collection.updateOne({ _id: objectId }, { $set: update })
     return await collection.findOne({ _id: objectId })
   } catch (error: any) {
     throw createError({

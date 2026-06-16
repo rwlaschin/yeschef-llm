@@ -41,7 +41,7 @@ export default defineEventHandler(async (event) => {
   const targetEnv = env === 'production' ? 'production' : 'local'
   if (targetEnv === 'local') {
     process.env.PUBSUB_EMULATOR_HOST =
-      process.env.PUBSUB_EMULATOR_HOST || (config.public.firebaseEmulatorHost as string) || 'localhost:8085'
+      process.env.PUBSUB_EMULATOR_HOST || (config.public.firebaseEmulatorHost as string) || 'localhost:8185'
   } else {
     delete process.env.PUBSUB_EMULATOR_HOST
   }
@@ -54,7 +54,7 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  // `model` from the UI is the topic name (e.g. llama3_2_3b_v1). Validate against
+  // `model` from the UI is the topic name (e.g. llama3_1_8b_v1). Validate against
   // the shared registry; the topic is the model's topic.
   const known = byTopic(model)
   if (!known) {

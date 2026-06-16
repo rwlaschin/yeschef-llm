@@ -1,21 +1,23 @@
 {
   "emulators": {
-    "pubsub": { "port": 8085 },
-    "ui": { "enabled": false }
+    "hub": { "port": 4410 },
+    "logging": { "port": 4510 },
+    "ui": { "enabled": false, "port": 4010 },
+    "functions": { "port": 5101 },
+    "pubsub": { "port": 8185 },
+    "eventarc": { "port": 9399 },
+    "tasks": { "port": 9599 },
+    "singleProjectMode": true
   },
   "firestore": {
     "indexes": "firestore.indexes.json"
   },
-  "hosting": {
-    "source": ".",
-    "ignore": [
-      "firebase.json",
-      "**/.*",
-      "**/node_modules/**"
-    ],
-    "frameworksBackend": {
-      "region": "us-central1",
-      "runtime": "nodejs22"
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "orchestrator",
+      "runtime": "nodejs22",
+      "ignore": ["node_modules", ".git", "**/*.log"]
     }
-  }
+  ]
 }

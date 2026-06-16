@@ -1,0 +1,129 @@
+// Bind one job from the results collection (default `llmResults`), per the spec layout:
+//
+//   llmResults/{id}                       (the request: message, plan[] defs, cursor, status)
+//     └─ steps/{pubsubMsgId}              (one RUN per doc, uniform shape — keyed by msg id)
+//          { step, message, prompt, response, status, isDeleted }
+//
+// `step` = "plan" (the planner run) | 0 | 1 … (an executable step's run). Definitions live in
+// the job's `plan[]`; a run is joined to its definition by `step`. Soft-deleted runs are
+// filtered out (we show only the active run per step).
+import { ref, computed, onScopeDispose } from 'vue'
+import { doc, collection, onSnapshot } from 'firebase/firestore'
+import { getDb } from '~/lib/firebase'
+
+export function useJob() {
+  const resultsCollection = useRuntimeConfig().public.firestoreCollectionResults || 'llmResults'
+  const jobId = ref('')
+  const job = ref<any>(null)
+  const runs = ref<any[]>([]) // active (non-deleted) run docs under steps/
+  let unsubs: Array<() => void> = []
+
+  function clear() {
+    unsubs.forEach((u) => u())
+    unsubs = []
+    job.value = null
+    runs.value = []
+    jobId.value = ''
+  }
+
+  function bind(id: string) {
+    clear()
+    if (!id) return
+    jobId.value = id
+    const db = getDb()
+    console.log(`[ui/job] bind ${resultsCollection}/${id}`)
+
+    let lastStatus: string | undefined
+    unsubs.push(onSnapshot(doc(db, resultsCollection, id), (s) => {
+      job.value = s.exists() ? s.data() : null
+      const st = job.value?.status
+      if (st !== lastStatus) {
+        lastStatus = st
+        console.log(`[ui/job] ${id} status=${st ?? '(no doc)'}${job.value?.error ? ` error=${JSON.stringify(job.value.error)}` : ''} stepCount=${job.value?.stepCount ?? 0}`)
+      }
+    }))
+
+    // All runs under steps/ — one component renders any of them. Filter out soft-deleted.
+    unsubs.push(onSnapshot(collection(db, resultsCollection, id, 'steps'), (snap) => {
+      runs.value = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((r: any) => !r.isDeleted)
+    }))
+  }
+
+  // Active run for a step (`"plan"` or an index). One active run is expected after soft-delete;
+  // if more, take the most recent by createdAt.
+  const runFor = (step: any) => {
+    const matches = runs.value.filter((r: any) => r.step === step)
+    if (!matches.length) return null
+    return matches.sort((a: any, b: any) => (b.createdAt?.seconds ?? 0) - (a.createdAt?.seconds ?? 0))[0]
+  }
+
+  // Runtime in seconds = updatedAt − createdAt (the worker bumps updatedAt through completion, so
+  // this is the true end-to-end time). null until both stamps exist.
+  const runtimeOf = (run: any) => {
+    const a = run?.createdAt?.toMillis?.(), b = run?.updatedAt?.toMillis?.()
+    return a != null && b != null ? Math.max(0, (b - a) / 1000) : null
+  }
+
+  // Effective status — the SINGLE source of truth the UI renders. A failure reason (`outcome`)
+  // is only ever written for a run that FAILED, so if one is present the run failed, full stop —
+  // even if a redelivered retry briefly reset `status` back to "running" before failing again
+  // (that race is fixed at the source in the worker, but a doc already in that state, or any
+  // future write skew, must never render as both). The reason wins: status and outcome can never
+  // visually contradict. No outcome → trust `status`. No run yet → "pending".
+  const statusOf = (run: any) => (run?.outcome ? 'fail' : (run?.status || 'pending'))
+
+  // The planner run (steps/ doc with step:"plan") — the ONLY place the plan lives. No fallback
+  // to a top-doc `response`: that shape is legacy and new code never writes it, so a fallback
+  // wouldn't add safety, it would mask a broken planner-run write (you'd render a stale plan
+  // instead of "no plan"). No planner run → plan is null and the UI says so. `status` is
+  // normalized here so the plan header can't show a fail-reason next to "running" either.
+  const plan = computed(() => {
+    const run = runFor('plan')
+    return run ? { ...run, status: statusOf(run) } : null
+  })
+
+  // All active runs for a step, in UNIT order (doc id = `${step}-${unit}`, zero-padded). A fan-out or
+  // chain step has one run PER UNIT, all sharing the step index — we must surface them ALL, not one.
+  const runsFor = (step: any) =>
+    runs.value.filter((r: any) => r.step === step).sort((a: any, b: any) => String(a.id).localeCompare(String(b.id)))
+
+  // Fold a step's unit-runs into the single view the card renders: response (and message/prompt) joined
+  // in unit order, status aggregated (any fail → fail; any still going → running; else success), runtime
+  // = the longest unit. Empty when no unit has run yet. Single-unit steps pass through unchanged.
+  const aggregate = (unitRuns: any[]) => {
+    if (!unitRuns.length) return { run: null, response: '', message: '', prompt: '', status: 'pending', outcome: '', runtime: null }
+    const join = (field: string) => unitRuns.map((r: any) => r[field] || '').filter(Boolean).join('\n\n').trim()
+    const sts = unitRuns.map(statusOf)
+    const runtimes = unitRuns.map(runtimeOf).filter((x): x is number => x != null)
+    return {
+      run: unitRuns[0],                                   // representative — drives hasRun / the ▷ control
+      response: join('response'),
+      message: join('message'),
+      prompt: join('prompt'),
+      status: sts.includes('fail') ? 'fail' : sts.some((s) => s === 'running' || s === 'pending') ? 'running' : 'success',
+      outcome: unitRuns.map((r: any) => r.outcome).filter(Boolean).join('; '),
+      runtime: runtimes.length ? Math.max(...runtimes) : null,
+    }
+  }
+
+  // Plan definitions joined with ALL their unit-runs → the uniform step view the UI renders.
+  const steps = computed(() =>
+    ((job.value?.plan as any[]) || []).map((def, index) => ({
+      ...def,
+      index,
+      displayAs: def.includeInResults ? 'output' : 'thinking',
+      ...aggregate(runsFor(index)),
+    }))
+  )
+  const hasRun = (s: any) => !!s.run
+  const output = computed(() => steps.value.filter((s) => s.displayAs === 'output' && hasRun(s)))
+  const investigating = computed(() => steps.value.filter((s) => s.displayAs === 'thinking' && hasRun(s)))
+  // The job's overall status is the job doc's `status` field — the single source of truth, now
+  // written terminal on EVERY path: the cascade finalizes via step.js, and a debug run finalizes
+  // via the `finalize` orchestrate action (roll-up, no advance). pending → running → success | fail,
+  // plus `paused` (idle with the tail cleared by a debug ▷).
+  const jobStatus = computed(() => job.value?.status || 'pending')
+
+  onScopeDispose(clear)
+  return { jobId, job, runs, plan, steps, output, investigating, jobStatus, runtimeOf, bind, clear }
+}

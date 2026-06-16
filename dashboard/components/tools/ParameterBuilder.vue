@@ -2,7 +2,7 @@
   <div class="space-y-6">
     <!-- Header with Context -->
     <div>
-      <h3 class="text-sm font-semibold text-gray-200 mb-2">Parameters</h3>
+      <h3 class="text-sm font-semibold text-strong mb-2">Parameters</h3>
       <p class="text-xs text-gray-400">
         Define the inputs your tool accepts. These tell Ollama what information to send when calling this tool.
       </p>
@@ -19,26 +19,26 @@
       <div v-for="(param, idx) in parameters" :key="idx" class="p-4 rounded border border-amber-500/20 bg-amber-500/5 space-y-4">
         <!-- Name (Required) -->
         <div>
-          <label class="text-xs font-semibold text-gray-300 block mb-2">
+          <label class="text-xs font-semibold text-secondary block mb-2">
             Parameter Name <span class="text-red-400">*</span>
           </label>
           <input
             v-model="param.name"
             type="text"
             placeholder="e.g., query, ingredients, max_results"
-            class="w-full px-3 py-2 rounded bg-gray-800 text-white border border-gray-700 text-xs focus:border-amber-500 focus:outline-none"
+            class="w-full px-3 py-2 rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 text-xs focus:border-amber-500 focus:outline-none"
           />
           <p class="text-xs text-gray-500 mt-1">How Ollama will reference this input</p>
         </div>
 
         <!-- Type (Required) -->
         <div>
-          <label class="text-xs font-semibold text-gray-300 block mb-2">
+          <label class="text-xs font-semibold text-secondary block mb-2">
             Type <span class="text-red-400">*</span>
           </label>
           <select
             v-model="param.type"
-            class="w-full px-3 py-2 rounded bg-gray-800 text-white border border-gray-700 text-xs focus:border-amber-500 focus:outline-none"
+            class="w-full px-3 py-2 rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 text-xs focus:border-amber-500 focus:outline-none"
           >
             <option value="string">string — Text input</option>
             <option value="number">number — Decimal numbers</option>
@@ -50,28 +50,28 @@
 
         <!-- Description (Required) -->
         <div>
-          <label class="text-xs font-semibold text-gray-300 block mb-2">
+          <label class="text-xs font-semibold text-secondary block mb-2">
             Description <span class="text-red-400">*</span>
           </label>
           <textarea
             v-model="param.description"
             placeholder="Explain what this parameter is for. Ollama uses this to decide when to send it."
-            class="w-full px-3 py-2 rounded bg-gray-800 text-white border border-gray-700 text-xs focus:border-amber-500 focus:outline-none resize-none"
+            class="w-full px-3 py-2 rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 text-xs focus:border-amber-500 focus:outline-none resize-none"
             rows="3"
           />
           <p class="text-xs text-gray-500 mt-1">Be clear and specific so Ollama knows when to use this</p>
         </div>
 
         <!-- Required Checkbox -->
-        <div class="flex items-start gap-3 p-3 rounded bg-gray-800/50">
+        <div class="flex items-start gap-3 p-3 rounded surface-2">
           <input
             :id="`required-${idx}`"
             v-model="param.required"
             type="checkbox"
-            class="w-4 h-4 rounded border-gray-600 bg-gray-900 mt-1 cursor-pointer"
+            class="w-4 h-4 rounded border-gray-300 bg-white dark:border-gray-600 dark:bg-gray-900 mt-1 cursor-pointer accent-amber-500"
           />
           <div>
-            <label :for="`required-${idx}`" class="text-xs font-semibold text-gray-300 cursor-pointer block">
+            <label :for="`required-${idx}`" class="text-xs font-semibold text-secondary cursor-pointer block">
               Required
             </label>
             <p class="text-xs text-gray-500 mt-1">
@@ -95,7 +95,7 @@
     <button
       type="button"
       @click="addParameter"
-      class="w-full px-4 py-3 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 transition border border-gray-700 text-sm font-medium"
+      class="w-full px-4 py-3 rounded btn-muted transition border border-gray-200 dark:border-gray-700 text-sm font-medium"
     >
       + Add Parameter
     </button>

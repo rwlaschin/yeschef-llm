@@ -18,17 +18,34 @@
 import dotenvFlow from "dotenv-flow";
 import { spawn, execSync } from "child_process";
 import { setTimeout as sleep } from "timers/promises";
+import crypto from "node:crypto";
 import fs from "fs";
 import ejs from "ejs";
 import { setup as setupPubSub } from "../pubsub/setup.js";
-import { devModels, subscriptionOf, imageOf } from "../config/models.js";
+import { devModels, subscriptionOf, imageOf, containerOf } from "../config/models.js";
 
 dotenvFlow.config();
 
 const { MONGO_URI, MONGO_DB, MONGO_COLLECTION, OLLAMA_API_KEY } = process.env;
 const OPENCLAW_GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "openclaw-dev-token";
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID || "yeschef-c572a";
-const PUBSUB_EMULATOR_HOST = "localhost:8085";
+
+// Emulator ports come from firebase.json (the single source of truth) so the printed
+// test command + the orchestrator URL never go stale when ports change. Defaults match
+// firebase.json's current values in case the file/keys are missing.
+function emulatorPort(name, fallback) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(new URL("../firebase.json", import.meta.url), "utf8"));
+    return cfg.emulators?.[name]?.port ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+const PUBSUB_EMULATOR_HOST = `localhost:${emulatorPort("pubsub", 8185)}`;
+const FUNCTIONS_EMULATOR_PORT = emulatorPort("functions", 5101);
+// The orchestrator's local URL (the `ai` function in the functions emulator). The
+// orchestrator points its `orchestrate` push subscription at <this>/events.
+const AI_BASE_URL = `http://localhost:${FUNCTIONS_EMULATOR_PORT}/${GCP_PROJECT_ID}/us-central1/ai`;
 
 for (const [k, v] of Object.entries({ MONGO_URI, MONGO_DB, MONGO_COLLECTION })) {
   if (!v) throw new Error(`${k} env var is required — check .env or .env.dev`);
@@ -36,7 +53,6 @@ for (const [k, v] of Object.entries({ MONGO_URI, MONGO_DB, MONGO_COLLECTION })) 
 
 // Dev-capable models, derived from config/models.js (large/70B excluded via dev:false).
 const DEV_MODELS = devModels().map((m) => ({
-  key: m.key,
   name: imageOf(m),
   model: m.model,
   topic: m.topic,
@@ -44,9 +60,26 @@ const DEV_MODELS = devModels().map((m) => ({
   gateway: m.gateway || "",
 }));
 const imageTag = (m) => `yeschef-${m.name}:dev`;
-const containerName = (m) => `yeschef-worker-${m.key}-dev`;
+const containerName = containerOf; // single source of truth — see config/models.js
 
 const processes = [];
+
+// Prefix each line of a child stream with a local HH:MM:SS.mmm stamp, then forward
+// it to our own stdout/stderr. Buffers partial lines so a stamp never lands mid-line.
+function stampLines(src, dest) {
+  if (!src) return;
+  let buf = "";
+  src.setEncoding("utf8");
+  src.on("data", (chunk) => {
+    buf += chunk;
+    const lines = buf.split("\n");
+    buf = lines.pop(); // keep the trailing partial line for the next chunk
+    const ts = () => new Date().toISOString().slice(11, 23); // HH:MM:SS.mmm
+    // Leave blank lines bare — a lone timestamp on an empty line is just noise.
+    for (const line of lines) dest.write(line === "" ? "\n" : `${ts()} ${line}\n`);
+  });
+  src.on("end", () => { if (buf) dest.write(`${new Date().toISOString().slice(11, 23)} ${buf}\n`); });
+}
 
 function start(name, cmd, args, env = {}) {
   console.log(`Starting ${name}...`);
@@ -56,11 +89,16 @@ function start(name, cmd, args, env = {}) {
   // them down deliberately (SIGTERM the group → wait → SIGKILL fallback → exit),
   // which is what lets the terminal be restored cleanly instead of left mid-line.
   const proc = spawn(cmd, args, {
-    stdio: "inherit",
+    // stdin inherited; stdout/stderr piped so we can stamp each line with a local
+    // timestamp (the emulator/worker/ollama lines have none, which makes timing
+    // bugs — e.g. Pub/Sub ack-deadline redelivery — impossible to read from a log).
+    stdio: ["inherit", "pipe", "pipe"],
     env: { ...process.env, ...env },
     shell: true,
     detached: true,
   });
+  stampLines(proc.stdout, process.stdout);
+  stampLines(proc.stderr, process.stderr);
   proc.on("exit", (code) => {
     // Ignore exits caused by our own shutdown (SIGTERM/SIGKILL → null/non-zero).
     if (!shuttingDown && code !== 0) {
@@ -139,21 +177,48 @@ function imageExists(tag) {
   }
 }
 
-// Build a model's image from the shared Dockerfile.ejs (bakes the model → no pull at run).
-function buildImage(m) {
-  const tag = imageTag(m);
+// The rendered Dockerfile for a model — encodes everything BAKED into its image (the model tag,
+// gateway, parallel/maxQueue, and the template itself). Worker code is mounted at run-time, so
+// it's NOT in here — which is exactly why editing worker code does NOT trigger a rebuild, but
+// changing a model (or the Dockerfile) DOES.
+function renderDockerfile(m) {
   const template = fs.readFileSync("docker/Dockerfile.ejs", "utf-8");
-  const dockerfile = ejs.render(template, {
+  return ejs.render(template, {
     name: m.name,
     model: m.model,
     gpu: 1,
-    parallel: 2,
-    maxQueue: 5,
+    // ENV-sourced (dotenv-flow: .env.dev → .env), not hard-coded. Changing the value in
+    // .env.dev changes the recipe hash → the image auto-rebuilds on next `npm run dev`.
+    parallel: process.env.OLLAMA_NUM_PARALLEL || 2,
+    maxQueue: process.env.OLLAMA_MAX_QUEUE || 5,
     subscriptions: [m.subscription],
     gateway: m.gateway || "",
   });
+}
+
+// The image's "recipe" = a short hash of its rendered Dockerfile PLUS package.json. Stamped on the
+// image as a label at build time, then compared on startup: if a model's recipe changed in
+// config/models.js (or the Dockerfile changed), the hash differs and we rebuild automatically.
+// package.json is included because the Dockerfile only COPYs it (the text never changes) — without
+// hashing its CONTENTS, adding/bumping a dep wouldn't flip the image to stale and `npm install`
+// would never re-run.
+const recipeHash = (m) =>
+  crypto.createHash("sha256").update(renderDockerfile(m)).update(fs.readFileSync("package.json")).digest("hex").slice(0, 12);
+function imageRecipeHash(tag) {
+  try { return sh(`docker inspect --format '{{ index .Config.Labels "yeschef.recipe" }}' ${tag}`); }
+  catch { return ""; }
+}
+
+// Build a model's image from the shared Dockerfile.ejs (bakes the model → no pull at run),
+// stamping the recipe hash so a later run can tell when config has drifted from the baked image.
+function buildImage(m) {
+  const tag = imageTag(m);
+  const dockerfile = renderDockerfile(m);
   console.log(`\nBuilding ${tag} — bakes ${m.model}; first build is slow.\n`);
-  execSync(`echo '${dockerfile.replace(/'/g, "'\\''")}' | docker build -f - -t ${tag} .`, { stdio: "inherit" });
+  execSync(
+    `echo '${dockerfile.replace(/'/g, "'\\''")}' | docker build -f - -t ${tag} --label yeschef.recipe=${recipeHash(m)} .`,
+    { stdio: "inherit" }
+  );
 }
 
 async function main() {
@@ -170,14 +235,31 @@ async function main() {
   //    subscription would otherwise block the waker from starting a fresh worker.
   removeWorkerContainers();
 
-  // 1. Pub/Sub emulator
-  start("Pub/Sub Emulator", "firebase", [
+  // 0b. The orchestrator (/ai) runs in the functions emulator alongside Pub/Sub.
+  //     Install its deps on first run (the emulator needs functions/node_modules).
+  if (!fs.existsSync("functions/node_modules")) {
+    console.log("Installing orchestrator (functions) deps...");
+    execSync("npm install", { cwd: "functions", stdio: "inherit" });
+  }
+
+  // 1. Pub/Sub emulator + the /ai orchestrator (functions emulator), together.
+  //    The orchestrator's startup creates the `orchestrate` topic + a push sub to
+  //    its own /ai/events. Firestore stays PROD (no Firestore emulator) — the
+  //    function writes there via the inherited GOOGLE_APPLICATION_CREDENTIALS, same as the workers.
+  start("Emulators (Pub/Sub + /ai orchestrator)", "firebase", [
     "emulators:start",
-    "--only=pubsub",
+    "--only=pubsub,functions",
     `--project=${GCP_PROJECT_ID}`,
-  ]);
-  console.log("Waiting for Pub/Sub emulator...");
-  await sleep(5000);
+  ], {
+    GCP_PROJECT_ID,
+    FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID,
+    AI_BASE_URL, // point the orchestrate push sub at the local /ai/events
+    MONGO_URI, // the /ai function reads/writes the Step Library (plan_library) in Mongo
+    MONGO_DB,
+    DEPLOY_ENV: "dev",
+  });
+  console.log("Waiting for emulators (Pub/Sub + functions)...");
+  await sleep(8000);
 
   // 2. Topics + subscriptions (emulator is ephemeral — every start).
   //    Dev provisions ONLY dev-capable models (the gpu:1 tiers: slim + the two
@@ -185,16 +267,25 @@ async function main() {
   process.env.PUBSUB_EMULATOR_HOST = PUBSUB_EMULATOR_HOST;
   await setupPubSub(GCP_PROJECT_ID, devModels());
 
-  // 3. Build each dev model image if missing. A failed build (e.g. openclaw not
-  //    pullable) is non-fatal — that model is skipped, others still run.
+  // 3. Build each dev model image if MISSING or STALE. Stale = its baked recipe (model tag /
+  //    gateway / Dockerfile) no longer matches config — so changing a model in config/models.js
+  //    auto-rebuilds that image here, no manual `docker rmi`. (Worker code is mounted, not baked,
+  //    so code edits never trigger a rebuild.) A failed build is non-fatal — skip that model.
   const available = [];
   for (const m of DEV_MODELS) {
     try {
-      if (!imageExists(imageTag(m))) buildImage(m);
-      else console.log(`✓ Image present: ${imageTag(m)}`);
+      const tag = imageTag(m);
+      if (!imageExists(tag)) {
+        buildImage(m);
+      } else if (imageRecipeHash(tag) !== recipeHash(m)) {
+        console.log(`↻ ${tag} is STALE (model/recipe changed in config) — rebuilding`);
+        buildImage(m);
+      } else {
+        console.log(`✓ Image present: ${tag}`);
+      }
       available.push(m);
     } catch (err) {
-      console.warn(`⚠️  Skipping ${m.key} — image build failed: ${err.message}`);
+      console.warn(`⚠️  Skipping ${m.model} — image build failed: ${err.message}`);
     }
   }
   if (available.length === 0) throw new Error("No dev model images available — cannot start waker.");
@@ -215,12 +306,15 @@ async function main() {
     MONGO_DB,
     MONGO_COLLECTION,
     OLLAMA_API_KEY, // forwarded into each worker container for web_search/web_fetch
+    BRAVE_API_KEY: process.env.BRAVE_API_KEY,   // optional web_search pool provider
+    TAVILY_API_KEY: process.env.TAVILY_API_KEY, // optional web_search pool provider
     OPENCLAW_GATEWAY_TOKEN, // shared token for the OpenClaw gateway (gateway tiers)
     DEPLOY_ENV: "dev", // worker loads inactive prompt_library entries too in dev
   });
 
   console.log("\n=== Dev environment ready ===");
   console.log(`  Pub/Sub Emulator : ${PUBSUB_EMULATOR_HOST}`);
+  console.log(`  Orchestrator /ai : ${AI_BASE_URL}`);
   console.log(`  Firestore        : PROD (${process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID})`);
   console.log(`  Models (on demand):`);
   for (const m of available) console.log(`    - ${m.model}  (${m.subscription} → ${containerName(m)})`);

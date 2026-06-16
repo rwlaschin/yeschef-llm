@@ -18,30 +18,45 @@
           :key="req.jobId"
           @click="selectRequest(req.jobId)"
           :class="[
-            'group relative p-2 pr-6 rounded-lg cursor-pointer transition text-xs',
+            'group relative p-2 rounded-lg cursor-pointer transition text-xs',
             selectedRequestId === req.jobId
               ? 'bg-amber-500/20 border border-amber-500'
               : 'hover:bg-amber-500/10 border border-transparent'
           ]"
         >
-          <button
-            type="button"
-            @click.stop="deleteRequest(req.jobId)"
-            title="Delete"
-            class="absolute top-1 right-1 w-5 h-5 rounded flex items-center justify-center text-muted opacity-0 group-hover:opacity-100 hover:bg-error/20 hover:text-error transition"
-          >×</button>
-          <div class="text-primary font-mono">{{ req.jobId.slice(0, 8) }}</div>
-          <div v-if="req.userPrompt" class="text-gray-400 truncate mt-0.5">{{ req.userPrompt }}</div>
-          <div class="text-xs capitalize mt-0.5 flex items-center gap-1.5" :class="req.status === 'complete' ? 'text-success' : 'text-primary'">
-            <span v-if="req.status === 'streaming'" class="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
-            {{ req.status }}
+          <!-- Line 1: title + delete -->
+          <div class="flex items-center gap-1">
+            <div class="flex-1 min-w-0 truncate text-gray-400">{{ req.userPrompt || req.type }}</div>
+            <button
+              type="button"
+              @click.stop="deleteRequest(req.jobId)"
+              title="Delete"
+              class="shrink-0 w-5 h-5 rounded flex items-center justify-center text-muted opacity-0 group-hover:opacity-100 hover:bg-error/20 hover:text-error active:scale-90 transition"
+            >×</button>
+          </div>
+          <!-- Line 2: date -->
+          <div class="text-[11px] text-muted mt-0.5">{{ fmtDate(req.createdAt) }}</div>
+          <!-- Line 3: copy · id (grows) · status (far right) — copy kept LEFT, never between id and status -->
+          <div class="mt-0.5 flex items-center gap-1.5">
+            <button
+              type="button"
+              @click.stop="copy(req.jobId, 'Job ID copied')"
+              title="Copy job ID"
+              class="shrink-0 w-4 h-4 rounded flex items-center justify-center text-muted hover:text-amber-400 active:scale-90 transition"
+            ><ClipboardDocumentIcon class="w-3.5 h-3.5" /></button>
+            <span class="font-mono text-gray-50 flex-1 min-w-0">{{ req.jobId.slice(0, 8) }}</span>
+            <span class="capitalize flex items-center gap-1 shrink-0"
+              :class="statusFor(req) === 'success' ? 'text-success' : statusFor(req) === 'fail' ? 'text-error' : statusFor(req) === 'running' ? 'text-primary' : 'text-muted'">
+              <span v-if="statusFor(req) === 'running'" class="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+              {{ statusFor(req) }}
+            </span>
           </div>
         </div>
       </div>
     </div>
 
     <!-- Right Panel: Settings + Query/Results -->
-    <div class="flex-1 panel overflow-hidden flex flex-col min-h-0">
+    <div class="flex-1 min-w-0 panel overflow-clip flex flex-col min-h-0">
       <!-- Settings Row: Company & User -->
       <div class="border-b border-divider p-4 flex gap-3">
         <!-- Company -->
@@ -141,9 +156,9 @@
           >
             Results
             <span
-              v-if="selectedRequestData && selectedRequestData.status === 'streaming'"
+              v-if="selectedRequestId && liveStatus === 'running'"
               class="ml-1.5 inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse align-middle"
-              title="Streaming…"
+              title="Running…"
             ></span>
           </button>
           <button
@@ -180,7 +195,7 @@
                 <span class="truncate">{{ selectedModelLabel }}</span>
                 <span class="text-xs opacity-60">▼</span>
               </ListboxButton>
-              <ListboxOptions class="absolute z-50 w-full mt-1 rounded-lg p-2 space-y-1 bg-gray-950 border border-gray-700/60 shadow-xl">
+              <ListboxOptions class="absolute z-50 w-full mt-1 rounded-lg p-2 space-y-1 bg-white border border-gray-200 dark:bg-gray-950 dark:border-gray-700/60 shadow-xl">
                 <ListboxOption
                   v-for="m in models"
                   :key="m.value"
@@ -203,7 +218,7 @@
                 <span class="truncate">{{ selectedType || 'Type' }}</span>
                 <span class="text-xs opacity-60">▼</span>
               </ListboxButton>
-              <ListboxOptions class="absolute z-50 w-full mt-1 rounded-lg p-2 space-y-1 bg-gray-950 border border-gray-700/60 shadow-xl">
+              <ListboxOptions class="absolute z-50 w-full mt-1 rounded-lg p-2 space-y-1 bg-white border border-gray-200 dark:bg-gray-950 dark:border-gray-700/60 shadow-xl">
                 <ListboxOption
                   v-for="t in messageTypes"
                   :key="t"
@@ -228,53 +243,56 @@
           />
         </div>
 
-        <!-- Prompt Tab — live preview of what the worker will build (system + request) -->
+        <!-- Prompt Tab — ONLY the ASSEMBLED prompt the worker sent to the model (system +
+             tools + subtypes + request), per planner job then each step→unit. This is the
+             model INPUT only — the response/output is NOT shown here (see the Results tab). -->
         <div v-show="activeTab === 'prompt'" class="h-full flex flex-col">
-          <div class="p-3 rounded text-xs whitespace-pre-wrap break-words font-mono overflow-auto flex-1 glass">{{ promptPreview }}</div>
+          <div v-if="!selectedRequestId" class="text-gray-400 dark:text-gray-500 text-sm text-center flex items-center justify-center h-full">
+            Select a request to view the prompt
+          </div>
+          <div v-else class="overflow-auto flex-1 space-y-3">
+            <div v-for="m in messageLog" :key="m.id" class="rounded glass overflow-hidden">
+              <div class="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-white/10">
+                <span class="text-[11px] font-mono text-amber-400 truncate" :title="m.id">
+                  <span class="uppercase text-gray-500 mr-1">{{ m.kind }}</span>{{ m.id }}
+                </span>
+                <span class="text-[11px] font-mono shrink-0" :class="m.status === 'success' ? 'text-green-400' : m.status === 'fail' ? 'text-red-400' : 'text-gray-400'">{{ m.status }}</span>
+              </div>
+              <div class="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">{{ m.label }} — prompt sent</div>
+              <CollapsibleSections :text="m.prompt" :class="['px-3 pb-2', isDark ? 'text-gray-100' : 'text-gray-900']" />
+            </div>
+          </div>
         </div>
 
-        <!-- Message Tab -->
+        <!-- Message Tab — the REQUEST that was published to each worker: the planner's user
+             prompt, then each step→unit's instructions. (The full assembled prompt the model
+             received is shown in the Prompt tab.) -->
         <div v-show="activeTab === 'message'" class="h-full flex flex-col">
           <div v-if="!selectedRequestId" class="text-gray-400 dark:text-gray-500 text-sm text-center flex items-center justify-center h-full">
-            Select a request to view message
+            Select a request to view messages
           </div>
-          <div v-else-if="selectedRequestData" :class="[
-            'p-3 rounded text-xs whitespace-pre-wrap break-words font-mono overflow-auto flex-1',
-            isDark ? 'bg-black/20 text-gray-100' : 'bg-gray-100 text-gray-900 border border-gray-200'
-          ]">
-            {{ selectedRequestData.userPrompt || 'No message' }}
+          <div v-else class="overflow-auto flex-1 space-y-3">
+            <div v-for="m in messageLog" :key="m.id" class="rounded glass overflow-hidden">
+              <div class="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-white/10">
+                <span class="text-[11px] font-mono text-amber-400 truncate" :title="m.id">
+                  <span class="uppercase text-gray-500 mr-1">{{ m.kind }}</span>{{ m.id }}
+                </span>
+                <span class="text-[11px] font-mono shrink-0" :class="m.status === 'success' ? 'text-green-400' : m.status === 'fail' ? 'text-red-400' : 'text-gray-400'">{{ m.status }}</span>
+              </div>
+              <div class="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-500">{{ m.label }} — message sent</div>
+              <CollapsibleSections :text="m.message" :class="['px-3 pb-2', isDark ? 'text-gray-100' : 'text-gray-900']" />
+            </div>
           </div>
         </div>
 
         <!-- Results Tab -->
-        <div v-show="activeTab === 'results'" class="h-full flex flex-col">
+        <div v-show="activeTab === 'results'" class="min-h-full flex flex-col">
           <div v-if="!selectedRequestId" class="text-gray-400 dark:text-gray-500 text-sm text-center flex items-center justify-center h-full">
             Select a request to view results
           </div>
-          <div v-else-if="selectedRequestData" class="flex flex-col h-full min-h-0">
-            <div v-if="selectedRequestData.status === 'pending'" class="text-primary text-sm">
-              Waiting for worker...
-            </div>
-            <div v-else-if="selectedRequestData.status === 'streaming'" class="flex flex-col min-h-0 flex-1">
-              <div class="text-primary text-xs font-medium mb-2">Streaming...</div>
-              <div class="p-3 rounded text-xs whitespace-pre-wrap break-words font-mono overflow-auto flex-1 glass">
-                {{ selectedRequestData.response }}
-              </div>
-            </div>
-            <div v-else-if="selectedRequestData.status === 'complete'" class="flex flex-col min-h-0 flex-1">
-              <div class="text-success text-xs font-medium mb-2">✓ Complete</div>
-              <div class="p-3 rounded text-xs whitespace-pre-wrap break-words font-mono overflow-auto flex-1 glass">
-                {{ selectedRequestData.response }}
-              </div>
-            </div>
-            <div
-              v-else-if="selectedRequestData.error"
-              title="Hover to show the full error"
-              class="text-error text-sm whitespace-pre-wrap break-words line-clamp-3 hover:line-clamp-none cursor-help overflow-auto"
-            >
-              Error: {{ selectedRequestData.error }}
-            </div>
-          </div>
+          <!-- Grows to content; the outer content wrapper (overflow-auto) does the scrolling,
+               so the Plan opens to full height instead of into a nested inner scroll box. -->
+          <JobResults v-else :jobId="selectedRequestId" />
         </div>
       </div>
 
@@ -294,17 +312,17 @@
   <!-- Create Company modal -->
   <Teleport to="body">
     <div v-if="showCreateCompany" class="fixed inset-0 bg-black/60 flex items-center justify-center z-[60]" @click.self="showCreateCompany = false">
-      <div class="w-full max-w-sm mx-4 rounded-lg p-5 bg-gray-900 border border-amber-500/30">
+      <div class="w-full max-w-sm mx-4 rounded-lg p-5 bg-white dark:bg-gray-900 border border-amber-500/30">
         <h2 class="text-lg font-serif text-primary mb-3">New Company</h2>
         <input
           v-model="newCompanyName"
           type="text"
           placeholder="Company name"
-          class="w-full px-3 py-2 rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500 focus:outline-none text-sm"
+          class="w-full px-3 py-2 rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500 focus:outline-none text-sm"
           @keyup.enter="createCompany"
         />
         <div class="flex gap-2 justify-end mt-4">
-          <button type="button" @click="showCreateCompany = false" class="px-3 py-1.5 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 text-sm">Cancel</button>
+          <button type="button" @click="showCreateCompany = false" class="px-3 py-1.5 rounded btn-muted text-sm">Cancel</button>
           <button type="button" @click="createCompany" :disabled="!newCompanyName.trim()" class="px-3 py-1.5 rounded bg-amber-500 text-gray-900 hover:bg-amber-600 text-sm font-medium disabled:opacity-50">Create</button>
         </div>
       </div>
@@ -314,23 +332,23 @@
   <!-- Create User modal -->
   <Teleport to="body">
     <div v-if="showCreateUser" class="fixed inset-0 bg-black/60 flex items-center justify-center z-[60]" @click.self="showCreateUser = false">
-      <div class="w-full max-w-sm mx-4 rounded-lg p-5 bg-gray-900 border border-amber-500/30">
+      <div class="w-full max-w-sm mx-4 rounded-lg p-5 bg-white dark:bg-gray-900 border border-amber-500/30">
         <h2 class="text-lg font-serif text-primary mb-1">New User</h2>
         <p class="text-xs text-gray-400 mb-3">In {{ selectedCompany?.name || 'selected company' }}</p>
         <input
           v-model="newUsername"
           type="text"
           placeholder="Username"
-          class="w-full px-3 py-2 rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500 focus:outline-none text-sm mb-2"
+          class="w-full px-3 py-2 rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500 focus:outline-none text-sm mb-2"
           @keyup.enter="createUser"
         />
-        <select v-model="newUserRole" class="w-full px-3 py-2 rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500 focus:outline-none text-sm">
+        <select v-model="newUserRole" class="w-full px-3 py-2 rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500 focus:outline-none text-sm">
           <option value="chef">chef</option>
           <option value="rdn">rdn</option>
           <option value="admin">admin</option>
         </select>
         <div class="flex gap-2 justify-end mt-4">
-          <button type="button" @click="showCreateUser = false" class="px-3 py-1.5 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 text-sm">Cancel</button>
+          <button type="button" @click="showCreateUser = false" class="px-3 py-1.5 rounded btn-muted text-sm">Cancel</button>
           <button type="button" @click="createUser" :disabled="!newUsername.trim()" class="px-3 py-1.5 rounded bg-amber-500 text-gray-900 hover:bg-amber-600 text-sm font-medium disabled:opacity-50">Create</button>
         </div>
       </div>
@@ -342,10 +360,12 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { Listbox, ListboxLabel, ListboxButton, ListboxOptions, ListboxOption } from '@headlessui/vue'
 import { PaperAirplaneIcon } from '@heroicons/vue/20/solid'
+import { ClipboardDocumentIcon } from '@heroicons/vue/24/outline'
 import { collection, query, orderBy, limit, onSnapshot, doc } from 'firebase/firestore'
 import { getDb } from '~/lib/firebase'
 
 const { success, error: showError } = useToast()
+const { copy } = useClipboard()
 const { isDark } = useTheme()
 
 const companies = ref([])
@@ -354,7 +374,7 @@ const selectedCompanyId = ref('')
 const selectedUserId = ref('')
 const { env: currentEnv } = useEnvironment()
 const models = ref([])
-const selectedModel = ref('openclaw_v1')
+const selectedModel = ref('openclaw_gemma4_12b_v1')
 const selectedModelLabel = computed(
   () => models.value.find((m) => m.value === selectedModel.value)?.label || selectedModel.value
 )
@@ -370,15 +390,49 @@ const selectedRequestId = ref('')
 const selectedRequestData = ref(null)
 const activeTab = ref('request')
 
-// Live preview of the FULL prompt the worker will build: the system prompt assembled
-// from the current prompt_library (for the selected type) + the user request. This is
-// NOT the worker's stored snapshot, so it always reflects your latest library edits.
-const systemPrompt = ref('')
-const promptPreview = computed(() => {
-  const parts = []
-  if (systemPrompt.value) parts.push(systemPrompt.value)
-  if (userPrompt.value) parts.push(userPrompt.value)
-  return parts.join('\n\n')
+
+// Live runs for the selected request — the SAME source the Results tab uses. Every LLM run
+// (the planner + each step) is one uniform doc under steps/, so the Message tab is just the
+// list of runs, each with its message (input), prompt (assembled), and response (output).
+const { job: liveJob, runs: liveRuns, jobStatus: liveStatus, bind: bindJob, clear: clearJob } = useJob()
+watch(selectedRequestId, (id) => { id ? bindJob(id) : clearJob() }, { immediate: true })
+
+// Status to show for a history item. For the SELECTED request we trust the live, step-derived
+// status (useJob.jobStatus) over the doc's `status` field, which goes stale after a debug re-run.
+const statusFor = (req) => (req.jobId === selectedRequestId.value ? liveStatus.value : req.status)
+const fmtDate = (ms) => (ms ? new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '')
+
+const messageLog = computed(() => {
+  if (!selectedRequestId.value) return []
+  // Order: planner first, then steps by index.
+  const sortKey = (r) => (r.step === 'plan' ? -1 : Number(r.step))
+  const list = [...(liveRuns.value || [])]
+    .sort((a, b) => sortKey(a) - sortKey(b))
+    .map((r) => ({
+      id: r.id,
+      kind: r.step === 'plan' ? 'planner' : 'step',
+      label: r.step === 'plan' ? 'planner' : `step ${r.step}`,
+      status: r.status || 'pending',
+      message: r.message || '(no message yet)',     // input (Pub/Sub message)
+      prompt: r.prompt || '(prompt not built yet)',  // assembled prompt sent to the LLM
+      response: r.response || '',                    // output
+    }))
+  if (list.length) return list
+
+  // No run docs under steps/ — covers legacy/one-shot jobs that streamed straight onto the
+  // job doc, AND the worker cold-start window before the planner's run doc exists. Fall back
+  // to the job doc's own message/prompt/response so the tabs aren't blank.
+  const j = liveJob.value
+  if (!j) return []
+  return [{
+    id: selectedRequestId.value,
+    kind: j.type || 'request',
+    label: j.type || 'request',
+    status: j.status || 'pending',
+    message: j.message || j.userPrompt || '(no message)',
+    prompt: j.prompt || '(prompt not built yet)',
+    response: j.response || '',
+  }]
 })
 
 // Submit is enabled only with company + user + model + prompt. When a past request
@@ -550,24 +604,28 @@ const submitRequest = async () => {
     return
   }
   const promptText = userPrompt.value
+  // Follow the local/production toggle — same switch as Pub/Sub emulator vs real GCP.
+  const cfg = useRuntimeConfig().public
+  const aiBaseUrl = currentEnv.value === 'production' ? cfg.aiBaseUrl : cfg.aiBaseUrlLocal
+  const planUrl = `${aiBaseUrl.replace(/\/$/, '')}/plan`
   loading.value = true
   try {
-    const { jobId } = await $fetch('/api/llm/request', {
+    // The orchestrator REPLACES the old /api/llm/request: POST the request to /ai/plan,
+    // which launches the planner and returns the jobId. Hard timeout so a stalled
+    // publish/write can never hang the UI.
+    console.log(`[ui/request] → POST ${planUrl}`, { companyId: selectedCompanyId.value, userId: selectedUserId.value, model: selectedModel.value, promptLen: promptText.length })
+    const { jobId } = await $fetch(planUrl, {
       method: 'POST',
-      // Hard timeout so a stalled server-side publish/write can NEVER hang the UI.
-      // The submit only POSTs here; the server does the Firestore write + Pub/Sub
-      // publish, so if that stalls we surface an error instead of locking the button.
       timeout: 15000,
       body: {
         userId: selectedUserId.value,
         companyId: selectedCompanyId.value,
-        type: selectedType.value,
         userPrompt: promptText,
         model: selectedModel.value,
-        env: currentEnv.value,
         metadata: {},
       },
     })
+    console.log(`[ui/request] ✓ jobId=${jobId} (watch Firestore llmResults/${jobId})`)
     success('Request submitted', `Job ID: ${jobId.slice(0, 8)}`)
 
     // Optimistic: persist to localStorage + show now; the Firestore snapshot
@@ -580,6 +638,7 @@ const submitRequest = async () => {
     selectRequest(jobId)
     activeTab.value = 'results' // switch to Results so the response streams in view
   } catch (err) {
+    console.error(`[ui/request] ✗ POST ${planUrl} failed:`, err?.message || err)
     showError('Submit failed', err.message)
   } finally {
     loading.value = false
@@ -610,10 +669,10 @@ const selectRequest = (jobId) => {
 
   // Jump to Results for items that already have (or are producing) output; otherwise
   // show the Request tab so you can see/edit the inputs.
-  activeTab.value = local && (local.status === 'complete' || local.status === 'streaming') ? 'results' : 'request'
+  activeTab.value = local && (local.status === 'running' || local.status === 'success' || local.status === 'fail') ? 'results' : 'request'
 
   if (docUnsub) docUnsub()
-  // Client-side real-time read enriches it (status/response/prompt) when the doc loads.
+  // Client-side real-time read enriches it (status/prompt) when the doc loads.
   docUnsub = onSnapshot(doc(getDb(), resultsCollection(), jobId), (snap) => {
     if (snap.exists()) {
       const data = snap.data()
@@ -646,9 +705,8 @@ const updateUnderline = () => {
   }
 }
 
-watch(activeTab, (tab) => {
+watch(activeTab, () => {
   nextTick(() => updateUnderline())
-  if (tab === 'prompt') loadSystemPrompt() // re-pull in case the library changed
 })
 
 const loadModels = async () => {
@@ -675,22 +733,9 @@ const loadTypes = async () => {
   }
 }
 
-// Assemble the system prompt for the current type from the live prompt_library.
-const loadSystemPrompt = async () => {
-  try {
-    systemPrompt.value = await $fetch('/api/llm/system-prompt', { query: { type: selectedType.value } })
-  } catch (err) {
-    console.error('Failed to load system prompt:', err)
-    systemPrompt.value = ''
-  }
-}
-// Refresh when the type changes (selecting a past request also sets the type).
-watch(selectedType, loadSystemPrompt)
-
 onMounted(() => {
   loadModels()
   loadTypes()
-  loadSystemPrompt()
   loadCompanies()
   loadUsers()
   startHistory()

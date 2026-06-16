@@ -22,6 +22,7 @@
     "@nuxtjs/tailwindcss": "^6.11.0",
     "ajv": "^8.20.0",
     "codemirror": "^6.0.2",
+    "dayjs": "^1.11.21",
     "firebase": "^10.0.0",
     "firebase-admin": "^12.0.0",
     "firebaseui": "^6.1.0",

@@ -1,5 +1,5 @@
 <template>
-  <div class="glass p-6">
+  <div class="glass p-6" :class="editing ? 'h-full flex flex-col min-h-0' : ''">
     <div v-if="!editing" class="flex items-center justify-between mb-6">
       <h1 class="text-2xl font-serif text-primary">Prompt Library</h1>
       <button
@@ -15,6 +15,7 @@
       <PromptForm
         :prompt="editing"
         :available-types="types"
+        :available-models="models"
         :default-types="editing._id ? [] : [selectedType]"
         @save="savePrompt"
         @cancel="editing = null"
@@ -34,8 +35,8 @@
           </button>
           <template v-if="typeOpen">
             <div class="fixed inset-0 z-40" @click="typeOpen = false"></div>
-            <div class="absolute z-50 w-full mt-1 rounded-lg bg-gray-950 border border-gray-700/60 shadow-xl overflow-hidden">
-              <div class="p-2 border-b border-gray-700/40">
+            <div class="absolute z-50 w-full mt-1 rounded-lg bg-white border border-gray-200 dark:bg-gray-950 dark:border-gray-700/60 shadow-xl overflow-hidden">
+              <div class="p-2 border-b border-gray-200 dark:border-gray-700/40">
                 <input v-model="typeSearch" placeholder="Search types…" class="w-full form-input text-sm" />
               </div>
               <div class="max-h-40 overflow-auto p-1">
@@ -79,7 +80,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { PlusIcon } from '@heroicons/vue/24/outline'
 import PromptsList from '~/components/prompts/PromptsList.vue'
 import PromptForm from '~/components/prompts/PromptForm.vue'
@@ -88,6 +89,7 @@ import { lexBetween } from '~/utils/lexBetween'
 
 const prompts = ref([])
 const types = ref([])
+const models = ref([])   // [{value,label}] for the prompt's model override
 const selectedType = ref('query') // which type's prompts the list is focused on
 const typeOpen = ref(false)
 const typeSearch = ref('')
@@ -95,6 +97,7 @@ const hideInactive = ref(false)
 const editing = ref(null)
 const confirmDialog = ref(null)
 const toast = useToast()
+const { env: currentEnv } = useEnvironment()
 
 // How many prompts map to a given type (shown next to each type).
 const countFor = (t) => prompts.value.filter((p) => p.mapping && p.mapping[t] != null).length
@@ -120,8 +123,16 @@ const fetchTypes = async () => {
     if (types.value.length && !types.value.includes(selectedType.value)) selectedType.value = types.value[0]
   } catch (e) { console.error('Failed to fetch types:', e) }
 }
+const fetchModels = async () => {
+  // Override picker follows the env toggle: dev shows only dev-capable tiers (their
+  // topics are the only ones provisioned), so prod-only models (e.g. 70B) don't appear in dev.
+  try { models.value = await $fetch('/api/llm/models', { query: { env: currentEnv.value } }) }
+  catch (e) { console.error('Failed to fetch models:', e) }
+}
+// Re-fetch when the environment toggle changes.
+watch(currentEnv, fetchModels)
 
-const startCreate = () => { editing.value = { active: false, content: '', mapping: {} } }
+const startCreate = () => { editing.value = { active: false, content: '', mapping: {}, modelOverride: null } }
 const editPrompt = (p) => { editing.value = JSON.parse(JSON.stringify(p)) }
 
 // Order key placing a prompt at the END of `type`'s stack.
@@ -141,7 +152,7 @@ const savePrompt = async (data) => {
       // keep current order for types the prompt already had; append new ones
       mapping[type] = existing[type] != null ? String(existing[type]) : endOrderForType(type)
     }
-    const body = { active: data.active, content: data.content, mapping }
+    const body = { active: data.active, content: data.content, mapping, modelOverride: data.modelOverride ?? null }
     const isEdit = !!data._id
     await $fetch(isEdit ? `/api/admin/prompt?id=${data._id}` : '/api/admin/prompt', {
       method: isEdit ? 'PUT' : 'POST',
@@ -158,7 +169,7 @@ const savePrompt = async (data) => {
 }
 
 const persist = (p) =>
-  $fetch(`/api/admin/prompt?id=${p._id}`, { method: 'PUT', body: { active: p.active, content: p.content, mapping: p.mapping } })
+  $fetch(`/api/admin/prompt?id=${p._id}`, { method: 'PUT', body: { active: p.active, content: p.content, mapping: p.mapping, modelOverride: p.modelOverride ?? null } })
 
 const onReorder = async ({ id, type, order }) => {
   const p = prompts.value.find((x) => x._id === id)
@@ -184,5 +195,5 @@ const deletePrompt = async (id) => {
   catch (e) { console.error('Failed to delete prompt:', e) }
 }
 
-onMounted(() => { fetchPrompts(); fetchTypes() })
+onMounted(() => { fetchPrompts(); fetchTypes(); fetchModels() })
 </script>

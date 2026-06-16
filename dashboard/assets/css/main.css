@@ -63,16 +63,16 @@ html.dark .panel {
 
 /* ============ FORM CONTROLS ============ */
 .form-input {
-  @apply px-3 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 transition-all;
+  @apply px-3 py-2 rounded-lg min-h-[2.5rem] focus:outline-none focus:ring-2 transition-colors;
 }
 
 html.light .form-input {
-  @apply bg-gray-100 border border-gray-300 text-gray-900 placeholder-gray-500;
+  @apply bg-gray-100 border border-gray-300 text-gray-900 placeholder-gray-500 focus:ring-gray-400/50;
 }
 
 html .form-input,
 html.dark .form-input {
-  @apply bg-gray-800/40 border-white/10 text-gray-100 placeholder-gray-400;
+  @apply bg-gray-800/40 border-white/10 text-gray-100 placeholder-gray-400 focus:ring-white/20;
 }
 
 /* ============ TEXT COLORS ============ */
@@ -154,6 +154,85 @@ html.light .border-divider {
 html .border-divider,
 html.dark .border-divider {
   @apply border-gray-700/30;
+}
+
+/* ============ SEMANTIC SURFACES (theme-aware) ============
+   Base = light values, dark: = the original dark values, so dark mode is
+   unchanged and light mode finally has real contrast. Use these instead of
+   hardcoding bg-gray-700/text-gray-300/etc., which assume a dark background. */
+
+/* App header bar (sticky top) */
+.app-header {
+  @apply bg-white/80 border-b border-gray-200 dark:bg-gray-900/40 dark:border-white/5 transition-colors;
+}
+
+/* High-contrast text — active tabs, strong labels sitting on a surface */
+.text-strong {
+  @apply text-gray-900 dark:text-white transition-colors;
+}
+
+/* Muted control / secondary button */
+.btn-muted {
+  @apply bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600 transition-colors;
+}
+
+/* Secondary surfaces — query bars, table headers, option panels.
+   Scoped html.light/html.dark (NOT a light default under a dark: override) so focus/repaint
+   never flashes the near-white base before the dark value resolves. */
+.surface-2 {
+  @apply transition-colors;
+}
+html.light .surface-2 {
+  @apply bg-gray-100;
+}
+html .surface-2,
+html.dark .surface-2 {
+  @apply bg-gray-800/40;
+}
+.surface-2-soft {
+  @apply transition-colors;
+}
+html.light .surface-2-soft {
+  @apply bg-gray-50;
+}
+html .surface-2-soft,
+html.dark .surface-2-soft {
+  @apply bg-gray-800/20;
+}
+
+/* Row hover for lists / table rows */
+.row-hover {
+  @apply transition-colors;
+}
+.row-hover:hover {
+  @apply bg-gray-100 dark:bg-gray-800/50;
+}
+
+/* Active sidebar / list item */
+.row-active {
+  @apply bg-gray-200 text-gray-900 dark:bg-gray-700/60 dark:text-white;
+}
+
+/* Dropdown / popover overlay panel — scoped (no light default under a dark: override → no flash). */
+.surface-overlay {
+  @apply shadow-lg transition-colors;
+}
+html.light .surface-overlay {
+  @apply bg-white border border-gray-200;
+}
+html .surface-overlay,
+html.dark .surface-overlay {
+  @apply bg-gray-950 border border-gray-700/60;
+}
+
+/* Code / JSON block */
+.code-block {
+  @apply bg-gray-100 text-gray-800 dark:bg-gray-800/30 dark:text-gray-300 transition-colors;
+}
+
+/* Inline tag / pill */
+.tag-muted {
+  @apply bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300;
 }
 
 /* ============ SCROLLBAR STYLING ============ */

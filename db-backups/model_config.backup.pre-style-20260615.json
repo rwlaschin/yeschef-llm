@@ -1,0 +1,19 @@
+[
+  {
+    "_id": "_default",
+    "createdAt": "2026-06-10T19:37:57.765Z",
+    "params": {
+      "temperature": 0.8,
+      "top_p": 0.9,
+      "top_k": 40,
+      "min_p": 0,
+      "repeat_penalty": 1.1,
+      "repeat_last_n": 64,
+      "mirostat": 0,
+      "mirostat_tau": 5,
+      "mirostat_eta": 0.1,
+      "seed": 0
+    },
+    "updatedAt": "2026-06-10T19:37:57.765Z"
+  }
+]

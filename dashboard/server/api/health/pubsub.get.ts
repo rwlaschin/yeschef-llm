@@ -4,7 +4,7 @@ export default defineEventHandler(async (event) => {
   try {
     // Use emulator if in dev
     if (process.env.NODE_ENV === "development") {
-      process.env.PUBSUB_EMULATOR_HOST = "localhost:8085";
+      process.env.PUBSUB_EMULATOR_HOST = "localhost:8185";
     }
 
     const pubsub = new PubSub({ projectId: "yeschef-c572a" });

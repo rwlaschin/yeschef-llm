@@ -1,6 +1,9 @@
 // Shared dev/prod toggle state. The ConfigPanel writes it; pages/components
-// (e.g. the Request page) read it and pass `env` to the server so requests
-// target local (emulator) or production (real GCP) accordingly.
+// (e.g. the Request page) read it to choose WHICH backend the UI calls — the dev
+// (emulator) stack or the production stack. It's a UI pass-through switch only.
+//
+// The backend itself never toggles: each orchestrator/worker instance is fixed to
+// its environment by ENV values (dotenv-flow / NODE_ENV), because it doesn't switch.
 export type AppEnv = "local" | "production";
 
 let hydrated = false;

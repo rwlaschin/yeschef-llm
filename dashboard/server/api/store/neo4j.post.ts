@@ -12,7 +12,13 @@ function getDriver() {
       throw new Error('Neo4j credentials not configured')
     }
 
-    driver = neo4j.driver(uri, neo4j.auth.basic(username, password))
+    // Tight timeouts: a paused/unreachable instance must fail FAST, never hang the Nitro server.
+    driver = neo4j.driver(uri, neo4j.auth.basic(username, password), {
+      connectionTimeout: 5000,
+      connectionAcquisitionTimeout: 8000,
+      maxConnectionPoolSize: 5,
+      maxTransactionRetryTime: 5000,
+    })
   }
   return driver
 }
@@ -46,7 +52,12 @@ export default defineEventHandler(async (event) => {
 
     return records
   } catch (err) {
-    console.error('Neo4j query failed:', err)
+    console.error('Neo4j query failed:', err.message)
+    // If the instance is paused/resuming, say so plainly (the bolt error is cryptic).
+    const state = await auraStatus(process.env.NEO4J_URI)
+    if (state && state !== 'running') {
+      throw createError({ statusCode: 503, statusMessage: `Neo4j is ${state} — resume the instance and retry.` })
+    }
     throw createError({
       statusCode: 500,
       statusMessage: `Neo4j query failed: ${err.message}`,

@@ -9,6 +9,7 @@ export default defineEventHandler(async (event) => {
       mapping: body?.mapping && typeof body.mapping === 'object' ? body.mapping : {},
       active: !!body?.active,
       content: body?.content || '',
+      modelOverride: body?.modelOverride ?? null,   // null → use the request's model
       isDeleted: false,
       createdAt: new Date(),
       updatedAt: new Date(),

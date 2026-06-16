@@ -1,0 +1,182 @@
+[
+  {
+    "_id": "6a2caac3817b5236ffd8bb7a",
+    "name": "Build Daily Recipes",
+    "subtype": "recipe",
+    "kind": "chain",
+    "mapOf": "",
+    "active": true,
+    "includeInOutput": true,
+    "requiredFlags": [],
+    "context": [
+      "Build Seasonal Menus"
+    ],
+    "tools": [
+      "web_search",
+      "web_fetch"
+    ],
+    "failStep": "",
+    "successStep": "",
+    "order": "v",
+    "fail": "A menu dish has no recipe; a recipe scales a diet variant to the full {{residents}} instead of its share, or multiplies the serving size by the headcount; a recipe is missing batch yield / critical temps / hold temps; a recipe omits its diet or texture label or includes a banned ingredient; or it departs from the menu — wrong diet, wrong texture, a substituted dish, or a swapped ingredient.",
+    "pass": "Every dish on the day's menu has a complete recipe: a normal single-serving portion, a batch that yields only that diet's share of ~{{residents}} residents (plus a small buffer) with ingredient totals scaled to that batch, prep and service steps, HACCP critical temps, and hold temps. Across a meal's diet variants the portions sum to about {{residents}}, not {{residents}} each. Each recipe is labeled with its diet and texture, matches the dish the menu specified (same diet, same texture), and contains no banned ingredient.",
+    "inputs": [
+      "residents"
+    ],
+    "instruction": "Write every kitchen recipe needed for day {{day}} ({{weekday (date day)}}, {{date day}}). The day's full menu is provided as context — it already settles which dishes to cook and has applied diet, season, texture, and restriction rules. Produce one complete recipe for each distinct dish on it (all meals), exactly as specified — same dish, same diet, same texture; do not substitute, re-season, or swap ingredients.\n\nPortioning — about {{residents}} residents eat each meal in TOTAL, split across the diet variants. Distribute that headcount across the diets by their typical statistical share, then add a small buffer. Each recipe's batch yields only ITS diet's slice — never the full {{residents}}; all variants of one meal sum to roughly {{residents}} (+ buffer). Set a normal single-serving portion (e.g. 1 cup of a casserole; a side salad with ~¼ cup tomatoes) and scale only the INGREDIENT totals up to that batch's portion count — never multiply the serving size by the headcount.\n\nWhere dishes share components, reuse the same prep so the order list stays tight. Cost tier: {{costTier}}.",
+    "model": "llama3_1_8b_v1",
+    "createdAt": "2026-06-13T00:56:35.768Z",
+    "updatedAt": "2026-06-13T17:53:55.382Z",
+    "modelProd": "llama3_3_70b_v1"
+  },
+  {
+    "_id": "6a2caac3817b5236ffd8bb7b",
+    "subtype": "menu_plan",
+    "kind": "fanout",
+    "active": true,
+    "requiredFlags": [],
+    "context": [
+      "Fetch Legal "
+    ],
+    "tools": [
+      "web_search",
+      "web_fetch"
+    ],
+    "order": "r",
+    "mapOf": "days as |day|",
+    "inputs": [
+      "institution",
+      "diets",
+      "restrictions",
+      "legals",
+      "meals"
+    ],
+    "name": "Build Seasonal Menus",
+    "fail": "Any of: a missing meal; a meal that does not give every diet ({{join diets \", \"}}) its own suitable dish; a meal with no beverages; a banned or restricted ingredient present; a legal/safety or {{costTier}} budget violation; an out-of-season item for {{season (date day)}}{{#if flags.pureed}}; or any dish with an ingredient that will not puree smooth{{/if}}.",
+    "pass": "For day {{day}}: every meal ({{join meals \", \"}}) is present, and within each meal EVERY diet ({{join diets \", \"}}) has its own suitable dish — never one dish covering all diets. Each meal includes appropriate beverages. No banned or restricted ingredient appears. Every dish stays within the legal and food-safety requirements in the context above and within the {{costTier}} budget, and uses produce in season for {{season (date day)}}{{#if flags.pureed}}; every dish uses only blendable ingredients — nothing with bones, shells, pits, hard seeds, or gristle{{/if}}.",
+    "instruction": "Plan day {{day}} of {{itemCount}} ({{date day}}) for {{residents}} residents at a {{join institution \", \"}} facility — provide {{join Meals \", \"}}.\n\nHonor EVERY diet: {{join diets \", \"}}. Stay within the legal and food-safety requirements in the context above. Keep it within a {{costTier}} budget.\nResidents per diet: {{#each (allocate diets residents) as |d|}}{{d.diet}} {{d.demand}}{{#unless @last}}, {{/unless}}{{/each}} (total {{residents}}).\n{{#if (season (date day))}}\nUse produce that is in season for {{season (date day)}}{{#if region}} in {{region}}{{/if}}.\n{{/if}}\n{{#if region}}{{#eq (weekday (date day)) \"Friday\"}}\nMake today's dinner a {{region}} regional theme.\n{{/eq}}{{/if}}\n{{#if flags.pureed}}\nEvery dish must be safe to blend — use only ingredients that can go in a blender (no bones, shells, pits, hard seeds, gristle, or anything that won't puree smooth).\n{{/if}}\n\nThe only functions you may call are: {{join tools \", \"}}. Never call or emit a function/tool call for any other name (e.g. meal_plan, menu_planner) — output your meal plan as plain YAML content, not as a {\"name\": ..., \"parameters\": ...} object.\n",
+    "failStep": "",
+    "successStep": "",
+    "includeInOutput": true,
+    "model": "llama3_1_8b_v1",
+    "createdAt": "2026-06-13T00:56:35.768Z",
+    "updatedAt": "2026-06-13T17:53:48.452Z",
+    "modelProd": "llama3_3_70b_v1"
+  },
+  {
+    "_id": "6a2caac3817b5236ffd8bb7c",
+    "name": "Build Inventory",
+    "subtype": "inventory",
+    "kind": "chain",
+    "mapOf": "",
+    "active": true,
+    "includeInOutput": true,
+    "requiredFlags": [],
+    "inputs": [
+      "residents"
+    ],
+    "context": [
+      "Build Daily Recipes"
+    ],
+    "tools": [
+      "normalize_ingredients"
+    ],
+    "model": "llama3_1_8b_v1",
+    "failStep": "",
+    "successStep": "",
+    "order": "x",
+    "fail": "Any of: an ingredient from day {{day}}'s recipes with no row; a row missing its unit or quantity; a quantity not scaled to the day's portion counts; a missing used_in; an unconverted \"to taste\"/\"pinch\"/\"smidgen\" amount; or a row for an ingredient not present in the day's recipes.",
+    "pass": "Every ingredient used in day {{day}}'s recipes appears as exactly one row, each with its unit and a quantity scaled to that day's portion counts (diet distribution: {{#each (allocate diets residents) as |d|}}{{d.diet}} {{d.pct}}%{{#unless @last}}, {{/unless}}{{/each}}), plus a used_in naming the recipes or meals it comes from. Any \"to taste\", \"a pinch\", or \"a smidgen\" amount has been converted to 0.25 tsp. No row exists for an ingredient that is not in the day's recipes.",
+    "instruction": "This is day {{day}} for {{residents}} residents with {{count diets}} diets, distribution: {{#each (allocate diets residents) as |d|}}{{d.diet}} {{d.pct}}%{{#unless @last}}, {{/unless}}{{/each}}.\n\nPlease do the following conversion when there is no measurable amount — \"to taste\", \"a pinch\", \"a smidgen\", or the equivalent in ANY language → amount 0.25, unit \"tsp\".\n",
+    "createdAt": "2026-06-13T00:56:35.768Z",
+    "updatedAt": "2026-06-13T17:54:10.740Z",
+    "modelProd": "llama3_3_70b_v1"
+  },
+  {
+    "_id": "6a2caac3817b5236ffd8bb7d",
+    "name": "Fetch Legal ",
+    "kind": "fanout",
+    "active": true,
+    "requiredFlags": [],
+    "inputs": [
+      "institution",
+      "legals"
+    ],
+    "context": [],
+    "tools": [
+      "web_search",
+      "web_fetch"
+    ],
+    "order": "V",
+    "mapOf": "Legals as |legal|",
+    "subtype": "compliance",
+    "failStep": "",
+    "successStep": "",
+    "includeInOutput": true,
+    "model": "llama3_1_8b_v1",
+    "fail": "Any of: a rule with no code; a fabricated, guessed, or memory-supplied code; a code that does not match its rule's content; a bullet that is only a heading or category label rather than an actual followable rule; any preamble, narrative, or commentary beyond the headings and their bulleted rules; or an INCOMPLETE result that omits a requirement which legally applies (e.g. beverages/fluids served with meals) or treats the example areas as an exhaustive list.",
+    "pass": "Output is ONLY area headings, each followed by its bulleted rules — no preamble, narrative, closing remarks, or commentary. Each bullet is ONE concrete, followable rule paired with the real regulatory code that governs it (e.g. a CFR section or F-tag), retrieved from an authoritative source and never invented, with the code matching the content of its rule. The headings and bullets COMPREHENSIVELY cover the food, meal, and nutrition requirements that apply to {{legal}} — including beverages/fluids served with meals and any area not explicitly named in the task — not merely the example areas.",
+    "instruction": "Find EVERY regulation that governs meals, food, and nutrition service for {{#eq Institution 1}}a{{/eq}} \"{{join Institution \", \"}}\" facilit{{#ne Institution 1}}ies{{/ne}}{{#eq Institution 1}}y{{/eq}} under {{legal}} — the complete set, not a sample. The areas below are EXAMPLES to orient your search, NOT a limit: dietary restrictions, menus and meal patterns, beverages and fluids offered with meals, food preparation, cooking, handling, sanitation, storage, and temperature. Include any requirement that legally applies to feeding residents even if it is not named here; never drop one just because it was not listed.\n\nGroup the rules under short area headings (e.g. Beverages & Fluids, Food Preparation, Storage & Temperature, Sanitation). Under each heading, list each rule as a bullet: the rule text followed by its regulatory code in parentheses. Output ONLY the headings and their bulleted rules — no preamble, narrative, or commentary.",
+    "createdAt": "2026-06-13T00:56:35.768Z",
+    "updatedAt": "2026-06-13T17:53:41.113Z",
+    "modelProd": "llama3_3_70b_v1"
+  },
+  {
+    "_id": "6a2ccc90b64a693b981892d7",
+    "name": "Analyze Daily Nutrition",
+    "subtype": "nutrition",
+    "kind": "chain",
+    "mapOf": "",
+    "active": true,
+    "includeInOutput": true,
+    "requiredFlags": [],
+    "context": [
+      "Build Daily Recipes"
+    ],
+    "tools": [
+      "web_search",
+      "web_fetch"
+    ],
+    "failStep": "",
+    "successStep": "",
+    "order": "w",
+    "inputs": [
+      "residents"
+    ],
+    "model": "llama3_1_8b_v1",
+    "instruction": "Produce the nutritional analysis for day {{day}}'s recipes. The day's recipes are provided as context above — analyze them exactly as written; do not invent, substitute, or re-portion any dish.\n\nFor EACH recipe, give a per-serving nutritional profile: calories, protein, carbohydrates, total fat, saturated fat, sodium, potassium, phosphorus, fiber, and added sugar, in the units of the user's locale. Base every number on that recipe's actual ingredients and portion — do not guess.\n\nThen, for EACH diet present ({{join diets \", \"}}), state explicitly whether the day's meals fall within that diet's clinical limits, and name any recipe and nutrient that exceeds one — e.g. low-sodium: sodium per meal/day within limit; renal: potassium and phosphorus within limit; diabetic: carbohydrates and added sugar within limit.",
+    "pass": "Every recipe in day {{day}}'s context has a per-serving nutritional profile covering calories, protein, carbohydrates, total fat, saturated fat, sodium, potassium, phosphorus, fiber, and added sugar, in locale-appropriate units, with numbers grounded in that recipe's actual ingredients and portion. Each diet present ({{join diets \", \"}}) has an explicit within-limits-or-exceeds verdict tied to its clinical targets (low-sodium → sodium, renal → potassium & phosphorus, diabetic → carbohydrates & added sugar), and every exceedance names the offending recipe and nutrient.",
+    "fail": "Any of: a recipe with no nutritional profile or a missing nutrient field; a diet present ({{join diets \", \"}}) with no within-limits verdict; an exceedance that does not name the recipe and nutrient; numbers fabricated rather than derived from the recipe's ingredients and portion; or analysis of dishes that are not in day {{day}}'s recipes.",
+    "createdAt": "2026-06-13T03:20:47.415Z",
+    "updatedAt": "2026-06-13T17:54:18.207Z",
+    "modelProd": "llama3_3_70b_v1"
+  },
+  {
+    "_id": "6a2f0e33a58659898eb33166",
+    "name": "Build Order Form",
+    "subtype": "procurement",
+    "kind": "chain",
+    "mapOf": "",
+    "active": true,
+    "includeInOutput": true,
+    "requiredFlags": [],
+    "inputs": [],
+    "context": [
+      "Build Inventory"
+    ],
+    "tools": [
+      "web_search",
+      "web_fetch"
+    ],
+    "model": "llama3_1_8b_v1",
+    "modelProd": "llama3_3_70b_v1",
+    "order": "y",
+    "failStep": "",
+    "successStep": "",
+    "instruction": "Build the purchasing order form for day {{day}} from the inventory ingredient list provided as context above.\n\nGroup every item by category (produce | protein | dairy | dry goods | beverage | other). For each ingredient, convert the recipe-scaled amount into the vendor BULK order unit and round the quantity UP to the next whole vendor unit — you cannot buy a partial case.\n\nUse web_search / web_fetch to find a real vendor, SKU, vendor URL, contact, and unit price, then set price = unit price × quantity. If you cannot verify a vendor, SKU, or price, leave that field as ~ and say why in notes — NEVER invent one. Carry through used_in from the inventory list.",
+    "pass": "Every ingredient in day {{day}}'s inventory list appears in the order form exactly once, grouped under a valid category, with the quantity expressed in whole vendor bulk units (rounded up) and used_in carried from the inventory. Each procurement field (sku, vendor, vendor url, contact, price) is either backed by a web source — with price equal to unit price × quantity — or left ~ with a notes flag explaining why. No inventory ingredient is dropped and nothing is added that was not in the inventory list.",
+    "fail": "Any of: an inventory ingredient missing from the order form or appearing more than once; an item with no category or an invalid one; a quantity not in whole vendor units or not rounded up; a fabricated sku/vendor/price not backed by a web source and not flagged ~; a price that is not unit price × quantity; a missing used_in; or an item that was not in the day's inventory list.",
+    "createdAt": "2026-06-14T20:25:22.905Z",
+    "updatedAt": "2026-06-14T20:25:22.905Z"
+  }
+]

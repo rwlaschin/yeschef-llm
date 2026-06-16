@@ -1,5 +1,7 @@
 <template>
-  <div>
+  <div class="flex flex-col h-full min-h-0">
+    <!-- scrollable body -->
+    <div class="flex-1 overflow-y-auto min-h-0 pr-1">
     <div class="flex items-center justify-between mb-6">
       <h2 class="text-xl font-serif text-primary">{{ form._id ? 'Edit Prompt' : 'New Prompt' }}</h2>
       <div class="flex items-center gap-2">
@@ -22,8 +24,8 @@
         </button>
         <template v-if="open">
           <div class="fixed inset-0 z-40" @click="open = false"></div>
-          <div class="absolute z-50 w-full mt-1 rounded-lg bg-gray-950 border border-gray-700/60 shadow-xl overflow-hidden">
-            <div class="p-2 border-b border-gray-700/40">
+          <div class="absolute z-50 w-full mt-1 rounded-lg bg-white border border-gray-200 dark:bg-gray-950 dark:border-gray-700/60 shadow-xl overflow-hidden">
+            <div class="p-2 border-b border-gray-200 dark:border-gray-700/40">
               <input v-model="typeSearch" placeholder="Search types…" class="w-full form-input text-sm" />
             </div>
             <div class="max-h-40 overflow-auto p-1">
@@ -44,11 +46,22 @@
       </div>
     </div>
 
+    <!-- model override: pin a model for this prompt; otherwise the request's model is used -->
+    <div class="mb-5 max-w-md">
+      <label class="block text-sm text-secondary mb-1">Model override</label>
+      <select v-model="form.modelOverride" class="w-full form-input text-sm">
+        <option :value="null">Not set — use the request's model</option>
+        <option v-for="m in availableModels" :key="m.value" :value="m.value">{{ m.label }}</option>
+      </select>
+    </div>
+
     <!-- WYSIWYG editor (client-only, isolated; content stored as markdown) -->
     <label class="block text-sm text-secondary mb-1">Content</label>
     <MarkdownEditor v-model="form.content" />
+    </div>
 
-    <div class="flex gap-2 mt-4">
+    <!-- fixed footer — Save stays reachable without scrolling a long prompt -->
+    <div class="shrink-0 flex gap-2 pt-2">
       <button
         type="button"
         @click="onSave"
@@ -58,7 +71,7 @@
       <button
         type="button"
         @click="$emit('cancel')"
-        class="px-4 py-2 bg-gray-800 text-gray-300 rounded-lg hover:bg-gray-700 transition"
+        class="px-4 py-2 btn-muted rounded-lg transition"
       >Cancel</button>
     </div>
   </div>
@@ -70,12 +83,13 @@ import Toggle from '~/components/Toggle.vue'
 
 const props = defineProps({
   prompt: { type: Object, required: true },
-  availableTypes: { type: Array, default: () => [] }, // predetermined message types
-  defaultTypes: { type: Array, default: () => [] },   // preselect these on a new prompt
+  availableTypes: { type: Array, default: () => [] },  // predetermined message types
+  availableModels: { type: Array, default: () => [] }, // [{value,label}] for the model override
+  defaultTypes: { type: Array, default: () => [] },    // preselect these on a new prompt
 })
 const emit = defineEmits(['save', 'cancel'])
 
-const form = ref({ active: false, content: '', ...JSON.parse(JSON.stringify(props.prompt)) })
+const form = ref({ active: false, content: '', modelOverride: null, ...JSON.parse(JSON.stringify(props.prompt)) })
 // Existing prompt → its mapped types; new prompt → the type currently in focus.
 const initialTypes = Object.keys(props.prompt.mapping || {})
 const selected = ref(initialTypes.length ? initialTypes : [...props.defaultTypes])
@@ -100,6 +114,7 @@ const onSave = () => {
     _id: form.value._id,
     active: !!form.value.active,
     content: form.value.content || '',
+    modelOverride: form.value.modelOverride || null,
     types: selected.value, // page builds mapping from these; deselected types are dropped (order cleared)
   })
 }

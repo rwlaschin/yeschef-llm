@@ -89,7 +89,7 @@ const getLevelBg = (level) => {
 
 const formatTime = (timestamp) => {
   try {
-    return new Date(timestamp).toLocaleTimeString();
+    return new Date(timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   } catch {
     return timestamp;
   }

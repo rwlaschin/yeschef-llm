@@ -17,7 +17,7 @@
 // ============================================================
 
 import pubsubLib from "@google-cloud/pubsub";
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
 import { setTimeout as sleep } from "timers/promises";
 
 const { PubSub, v1 } = pubsubLib;
@@ -34,6 +34,8 @@ const {
   FIREBASE_PROJECT_ID,
   GOOGLE_APPLICATION_CREDENTIALS, // SA key for writing to PROD Firestore in dev
   OLLAMA_API_KEY, // web search creds for the ollama/openclaw runtime (command-line), not the worker
+  BRAVE_API_KEY,  // optional web_search pool provider (search-pool.js)
+  TAVILY_API_KEY, // optional web_search pool provider (search-pool.js)
   OPENCLAW_GATEWAY_TOKEN, // shared bearer token for the OpenClaw gateway (gateway tiers)
   DEPLOY_ENV = "dev", // forwarded to the worker → loads inactive prompt_library entries in dev
   DOCKER_GPU, // e.g. "all" if an NVIDIA GPU is present; leave unset on Mac (CPU)
@@ -77,6 +79,70 @@ function logsTail(container, n = 25) {
   }
 }
 
+// Stream a container's stdout/stderr into THIS process's console (prefixed), so the
+// worker's [worker] logs are visible in `npm run dev` instead of hidden in the container.
+// `docker run -d` is detached; without this you're blind to the entire LLM stage.
+const logStreams = new Map(); // container -> child process running `docker logs -f`
+function streamLogs(container, label) {
+  const prior = logStreams.get(container); // replace any stale follower (e.g. previous run)
+  if (prior) { try { prior.kill(); } catch { /* already gone */ } }
+
+  // Fresh container each wake (we docker rm -f + run), so `--tail all` = its whole life:
+  // Ollama boot, model load, cold-start errors, then the [worker] job logs.
+  const child = spawn("docker", ["logs", "-f", "--tail", "all", container], { stdio: ["ignore", "pipe", "pipe"] });
+  const prefix = `\x1b[35m[${label}]\x1b[0m `; // magenta so worker lines stand out from waker/functions
+
+  // llama.cpp (Ollama's embedded runner) is a firehose: a full model-metadata dump
+  // on cold start (print_info:/load_tensors:/llama_model_loader:…) and an access line
+  // per request (srv/slot …). None of it is actionable — it just buries the [worker]
+  // job logs. Drop those prefixes by default; WAKER_VERBOSE=1 shows the raw firehose
+  // for debugging a model-load failure. The error|warn|fail guard means we never hide
+  // a real problem even if it rode in on a noisy prefix.
+  const VERBOSE = process.env.WAKER_VERBOSE === "1";
+  const NOISE = /^(srv\s|slot\s|print_info:|load_tensors:|load:\s|llama_model_loader:|llama_(context|kv_cache|memory|model_load|init)|graph_reserve:|set_n_threads:|system_info:|build:\s|main:\s|init:\s|common_init)/;
+  const pump = (stream) => {
+    let buf = "";
+    stream.on("data", (d) => {
+      buf += d.toString();
+      const lines = buf.split("\n");
+      buf = lines.pop() || "";
+      for (const line of lines) {
+        if (!VERBOSE && NOISE.test(line) && !/error|warn|fail/i.test(line)) continue;
+        console.log(prefix + line);
+      }
+    });
+  };
+  pump(child.stdout);
+  pump(child.stderr);
+  child.on("exit", () => { if (logStreams.get(container) === child) logStreams.delete(container); });
+  logStreams.set(container, child);
+}
+
+function stopAllLogStreams() {
+  for (const c of logStreams.values()) { try { c.kill(); } catch { /* ignore */ } }
+  logStreams.clear();
+}
+
+// Tear down the worker containers the waker started. A worker is a long-lived process that
+// loaded its code at container start, so a SURVIVING container keeps running STALE code no
+// matter how the mounted source changes — it must be killed so the next run boots fresh. The
+// waker OWNS these containers, so it kills them when it stops. Project-scoped by the
+// `yeschef-worker-` name prefix (won't touch other projects' containers).
+function killWorkerContainers() {
+  try {
+    const ids = sh(`docker ps -aq --filter name=yeschef-worker-`).split("\n").filter(Boolean);
+    if (ids.length) sh(`docker rm -f ${ids.join(" ")}`);
+  } catch { /* docker down, or nothing to remove */ }
+}
+
+function cleanupAndExit() {
+  stopAllLogStreams();
+  killWorkerContainers();
+  process.exit(0);
+}
+process.on("SIGINT", cleanupAndExit);
+process.on("SIGTERM", cleanupAndExit);
+
 function startContainer(m) {
   // ALWAYS recreate from current config: remove any existing container (running or
   // exited) and `docker run` fresh. This guarantees the latest mounts/code/start.sh
@@ -84,7 +150,7 @@ function startContainer(m) {
   try { sh(`docker rm -f ${m.container}`); } catch { /* nothing to remove */ }
   console.log(`[waker:${m.model}] starting fresh: docker run ${m.image}`);
   const env = [
-    `PUBSUB_EMULATOR_HOST=host.docker.internal:8085`,
+    `PUBSUB_EMULATOR_HOST=host.docker.internal:8185`,
     `GCP_PROJECT_ID=${GCP_PROJECT_ID}`,
     `SUBSCRIPTION_NAME=${m.subscription}`,
     `OLLAMA_MODEL=${m.model}`,
@@ -96,6 +162,8 @@ function startContainer(m) {
     `DEPLOY_ENV=${DEPLOY_ENV}`,
   ];
   if (OLLAMA_API_KEY) env.push(`OLLAMA_API_KEY=${OLLAMA_API_KEY}`);
+  if (BRAVE_API_KEY) env.push(`BRAVE_API_KEY=${BRAVE_API_KEY}`);
+  if (TAVILY_API_KEY) env.push(`TAVILY_API_KEY=${TAVILY_API_KEY}`);
   if (m.gateway) {
     env.push(`GATEWAY=${m.gateway}`);
     if (OPENCLAW_GATEWAY_TOKEN) env.push(`OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}`);
@@ -109,6 +177,7 @@ function startContainer(m) {
   // Mount live worker code + start.sh over the baked copies so edits apply on a
   // container restart — no image rebuild needed in dev.
   const workerMount = `-v "${process.cwd()}/worker":/app/worker`;
+  const configMount = `-v "${process.cwd()}/config":/app/config`; // shared config/models.js (subtypes, tools)
   const startMount = `-v "${process.cwd()}/docker/common/start.sh":/start.sh`;
   // The ollama base image sets ENTRYPOINT ["ollama"]; override it. Run the script
   // explicitly as `sh /start.sh` so it works even when the bind-mounted file lacks
@@ -116,8 +185,11 @@ function startContainer(m) {
   sh(
     `docker run -d --name ${m.container} --entrypoint sh ` +
       `--add-host=host.docker.internal:host-gateway ` +
-      `${gpuFlag} ${envFlags} ${credMount} ${workerMount} ${startMount} ${m.image} /start.sh`
+      `${gpuFlag} ${envFlags} ${credMount} ${workerMount} ${configMount} ${startMount} ${m.image} /start.sh`
   );
+  // Pipe this container's logs into the dev console so worker [worker]/Ollama output is
+  // visible live (not buried in `docker logs`). Follows the fresh container we just ran.
+  streamLogs(m.container, m.model);
 }
 
 async function hasBacklog(subClient, subPath) {

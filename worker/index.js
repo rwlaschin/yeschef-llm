@@ -11,6 +11,34 @@ import { PubSub } from "@google-cloud/pubsub";
 import { MongoClient } from "mongodb";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { processDay } from "./lib/inventory.js";
+// Single source of truth (config/models.js, copied into the image + mounted in dev) — the
+// planner's subtype list and default tools live here, NOT hardcoded in the worker.
+import { SUBTYPES, DEFAULT_TOOLS, MODELS, unitDocId, defaultSampler, temperatureForStyle, DEFAULT_STYLE, STYLE_TEMPS } from "../config/models.js";
+// Step builders live under steps/ — one file per step kind (see worker/ARCHITECTURE.md).
+// Pure / dependency-injected modules, unit-tested in steps/*.test.js.
+import { buildMessages, buildStepMessages, sizeNumCtx, TerminalError } from "./steps/step.js";
+import { buildPlannerMessages } from "./steps/planner.js";
+import { buildComplianceMessages } from "./steps/compliance.js";
+import { visibleResponse, splitOutcome } from "./steps/outcome.js";
+// Leaseless, idempotent dispatch decisions (design/distributed-dispatch.md). Pure + unit-tested
+// in admission.test.js. shouldRun gates the receive; completionWrite is the first-writer-wins CAS.
+import { shouldRun, completionWrite } from "./admission.js";
+// Ollama HTTP transport (extracted + unit-tested in ollama.test.js).
+import { chatRound } from "./ollama.js";
+// In-process generation concurrency gate (pure + unit-tested in semaphore.test.js).
+import { createSemaphore } from "./semaphore.js";
+// Free-tier web_search provider pool (Ollama/Brave/Tavily/DDG) — replaces Ollama's metered hosted
+// search. Weighted-random pick, Firestore-tracked rolling-30-day quota. See search-pool.js.
+import { searchPool, fetchPage } from "./tools/search-pool.js";
+
+// ---- Worker version stamp ----------------------------------
+// Printed the instant the worker starts, so you can SEE which code is running. The version is
+// part of the SOURCE: stale/baked code prints its OLD value (or no line at all, if it predates
+// this); current code prints this. Bump it by hand on meaningful worker changes — the string
+// travels with the code, so it identifies the code regardless of file timestamps.
+const WORKER_VERSION = "2026-06-09 run-doc + steps/ model";
+console.log(`[worker] VERSION ${WORKER_VERSION} | pid ${process.pid}`);
 
 // ---- Config ------------------------------------------------
 const {
@@ -33,18 +61,55 @@ const {
   OLLAMA_API_KEY,                                   // web_search/web_fetch (both paths). Required.
   OLLAMA_WEB_BASE = "https://ollama.com/api",       // hosted search/fetch endpoints
   MAX_TOOL_ROUNDS = "4",                            // safety cap on tool-call loops (raw path)
+  WEB_TOOL_FALLBACK,                                 // when on, a non-retryable web-tool failure (429 quota /
+                                                     // 401/403 auth) DEGRADES to one tool-free round (model
+                                                     // answers from its own knowledge) instead of terminal-
+                                                     // failing. Default depends on DEPLOY_ENV (see
+                                                     // WEB_TOOL_FALLBACK_ON below); set "true"/"false" to override.
   DEPLOY_ENV = "production",                         // "dev" → also load inactive prompts
   PROMPT_COLLECTION = "prompt_library",
+  TOOL_COLLECTION = "llmtools",
+  MODEL_CONFIG_COLLECTION = "model_config",          // sampler params: `_default` doc + per-model overrides
   OLLAMA_NUM_CTX = "8192",                           // context window; Ollama defaults to a tiny 2-4k which
                                                      // a long system prompt fills, starving the output
   OLLAMA_NUM_PREDICT = "-1",                          // max output tokens; -1 = until done or context full
+  OUTPUT_RESERVE_TOKENS = "4096",                     // tokens kept free for the model's OUTPUT when sizing num_ctx
+  WEB_SEARCH_MAX,                                     // hard cap on web_search results (model's max_results is clamped to this)
+  GEN_TIMEOUT_MS,                                     // abort a chat round after this many ms of no output — a hung
+                                                       // generation must FAIL (and recover), never lock the worker
 } = process.env;
+
+// This worker serves ONE model (OLLAMA_MODEL). Its max context window — the cap we must not
+// exceed — comes from the single source of truth (config/models.js). null if not found → no cap.
+const MODEL_MAX_CTX = MODELS.find((m) => m.model === OLLAMA_MODEL)?.ctx ?? null;
 
 for (const [k, v] of Object.entries({
   GCP_PROJECT_ID, SUBSCRIPTION_NAME, OLLAMA_MODEL, MONGO_URI, MONGO_DB, MONGO_COLLECTION,
   OLLAMA_API_KEY, // web search is on for every tier — no key, no run
 })) {
   if (!v) throw new Error(`${k} env var is required`);
+}
+
+// ---- Orchestrator report -----------------------------------
+// Orchestrated jobs carry a `report` kind ("build" | "step"). When set, the worker
+// publishes to the `orchestrate` topic on completion so the orchestrator advances.
+// Legacy one-shot jobs have no `report` and skip this entirely.
+const ORCHESTRATE_TOPIC = process.env.ORCHESTRATE_TOPIC || "orchestrate";
+let _reportPubsub;
+async function reportToOrchestrator(payload) {
+  if (!payload.report) {
+    console.log(`[worker]   ${payload.jobId} no report flag → not an orchestrated job, skipping orchestrate ping`);
+    return;
+  }
+  if (!_reportPubsub) _reportPubsub = new PubSub({ projectId: GCP_PROJECT_ID });
+  // `action` = the orchestrate verb (build | step) — payload.report carries which. (Not to be
+  // confused with a step's `kind` = fanout|chunks|aggregation.) `status` = the terminal run status
+  // (success | fail) so the orchestrator can branch success → advance / fail → stop; `outcome` =
+  // the failure reason when fail (null on success).
+  await _reportPubsub.topic(ORCHESTRATE_TOPIC).publishMessage({
+    json: { jobId: payload.jobId, action: payload.report, step: payload.step, runId: payload.runId, status: payload.runStatus ?? "success", outcome: payload.outcome ?? null },
+  });
+  console.log(`[worker] → reported to "${ORCHESTRATE_TOPIC}" action=${payload.report} status=${payload.runStatus ?? "success"}${payload.outcome ? ` outcome=${payload.outcome}` : ""} jobId=${payload.jobId}`);
 }
 
 // ---- Firebase Admin ----------------------------------------
@@ -55,6 +120,40 @@ function getFirestoreClient() {
     initializeApp({ projectId: FIREBASE_PROJECT_ID || GCP_PROJECT_ID });
   }
   return getFirestore();
+}
+
+// ---- Resilient Firestore writes ----------------------------
+// Every Firestore write goes through fsWrite so a TRANSIENT failure self-heals instead of failing
+// the job (or crashing the worker). Mirrors the resilience already wired for Mongo (retryReads +
+// timeouts) and Pub/Sub (lease re-extension, ack-not-nack). Transient = an auth token the SDK minted
+// but the server rejected (ACCESS_TOKEN_EXPIRED — e.g. the Docker VM clock briefly skewed on host
+// resume so a freshly-minted token's iat/exp looked invalid) or a gRPC blip (UNAVAILABLE/
+// DEADLINE_EXCEEDED/ABORTED). The SDK does NOT retry writes on these, so we do: re-running the op
+// mints a fresh, now-valid token and the write lands — that is the "catch AND fix" (not catch & die).
+// A PERSISTENT failure (bad creds, permission denied, missing doc) is NOT transient → it throws after
+// the cap so the caller fails just THAT job, never the whole consumer.
+const FS_TRANSIENT_CODES = new Set([4, 10, 14]); // gRPC DEADLINE_EXCEEDED, ABORTED, UNAVAILABLE
+function isTransientFirestore(err) {
+  const reason = err?.errorInfo?.reason || err?.cause?.errorInfo?.reason || "";
+  if (reason === "ACCESS_TOKEN_EXPIRED") return true;
+  if (FS_TRANSIENT_CODES.has(err?.code)) return true;
+  return /ACCESS_TOKEN_EXPIRED|token (?:has )?expired|UNAVAILABLE|DEADLINE_EXCEEDED|socket hang up|ECONNRESET|EAI_AGAIN/i.test(
+    `${err?.message || ""} ${err?.cause?.message || ""}`
+  );
+}
+// Run a Firestore op with exponential backoff on transient failures. `label` names the write in logs.
+async function fsWrite(label, op, { tries = 5 } = {}) {
+  let delay = 250;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      if (attempt >= tries || !isTransientFirestore(err)) throw err;
+      console.warn(`[worker]   firestore "${label}" transient failure (attempt ${attempt}/${tries}): ${err.message} — retry in ${delay}ms`);
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, 5000);
+    }
+  }
 }
 
 // ---- MongoDB -----------------------------------------------
@@ -72,12 +171,16 @@ const mongo = new MongoClient(MONGO_URI, {
 });
 let ragCollection;
 let promptCollection;
+let toolCollection;
+let modelConfigCollection;
 
 async function connectMongo() {
   await mongo.connect();
   ragCollection = mongo.db(MONGO_DB).collection(MONGO_COLLECTION);
   promptCollection = mongo.db(MONGO_DB).collection(PROMPT_COLLECTION);
-  console.log(`MongoDB connected: ${MONGO_DB} (rag=${MONGO_COLLECTION}, prompts=${PROMPT_COLLECTION})`);
+  toolCollection = mongo.db(MONGO_DB).collection(TOOL_COLLECTION);
+  modelConfigCollection = mongo.db(MONGO_DB).collection(MODEL_CONFIG_COLLECTION);
+  console.log(`MongoDB connected: ${MONGO_DB} (rag=${MONGO_COLLECTION}, prompts=${PROMPT_COLLECTION}, tools=${TOOL_COLLECTION}, modelConfig=${MODEL_CONFIG_COLLECTION})`);
 }
 
 // ---- Prompt library (Mongo-backed, cached) -----------------
@@ -87,10 +190,24 @@ async function connectMongo() {
 //   - cached with NO TTL; ~5% of requests re-query to pick up edits eventually.
 //   - for a type: join all matching prompts, sorted ASC by the lexBetween order key
 //     via plain code-unit compare (matches the dashboard's drag-drop ordering).
-const INCLUDE_INACTIVE = DEPLOY_ENV !== "production";
+// Match "prod"/"production" in any case — never an exact-string env compare.
+const IS_PROD = /prod(uction)?/i.test(DEPLOY_ENV || "");
+const INCLUDE_INACTIVE = !IS_PROD;
+
+// In-process generation gate. Pub/Sub flow control (maxMessages — see main()) is the INTENDED
+// bound, but it isn't sufficient on its own: the dev emulator ignores maxMessages and delivers a
+// whole step's fanout at once, and in prod a redelivery can overlap a live run — either way we can
+// be asked to run more concurrent generations than Ollama has run-slots, which floods a CPU box into
+// first-token stalls. This gate caps concurrent generations at OLLAMA_NUM_PARALLEL (the Ollama
+// server's run-slot count, baked into the image); the excess QUEUES in-process while its Pub/Sub
+// lease keeps extending. It is NOT a lease and NOT cross-server correctness — duplicate concurrent
+// runs of one unit remain harmless via the first-writer-wins CAS (completionWrite). See
+// design/distributed-dispatch.md.
+const GEN_LIMIT = Math.max(1, parseInt(process.env.OLLAMA_NUM_PARALLEL, 10) || (IS_PROD ? 2 : 1));
+const genGate = createSemaphore(GEN_LIMIT);
+console.log(`[worker] generation gate: max ${GEN_LIMIT} concurrent (OLLAMA_NUM_PARALLEL=${process.env.OLLAMA_NUM_PARALLEL ?? "unset"})`);
+
 let promptCache = null;
-let promptCacheAt = 0;
-const PROMPT_CACHE_TTL_MS = 15000; // re-query at most this often, so newly-added/edited prompts appear within ~15s
 
 async function loadPrompts() {
   const filter = { isDeleted: { $ne: true } };          // never load soft-deleted
@@ -98,11 +215,12 @@ async function loadPrompts() {
   return promptCollection.find(filter).toArray();
 }
 
+// Pull once, then ~5% of lookups re-query to pick up edits eventually (no TTL). Dev
+// (INCLUDE_INACTIVE) always re-pulls so prompt edits show immediately while developing.
 async function getPrompts() {
-  if (!promptCache || Date.now() - promptCacheAt > PROMPT_CACHE_TTL_MS) {
+  if (!promptCache || INCLUDE_INACTIVE || Math.random() < 0.05) {
     try {
       promptCache = await loadPrompts();
-      promptCacheAt = Date.now();
       console.log(`  prompt_library: ${promptCache.length} prompt(s) cached (includeInactive=${INCLUDE_INACTIVE})`);
     } catch (e) {
       console.warn(`  prompt_library load failed (${e.message}) — using ${promptCache ? "cached" : "empty"} set`);
@@ -110,6 +228,92 @@ async function getPrompts() {
     }
   }
   return promptCache;
+}
+
+// ---- Tools & subtypes for the planner ----------------------
+// DEFAULT_TOOLS and SUBTYPES come from config/models.js (single source of truth) — not
+// hardcoded here. DEFAULT_TOOLS is the fallback the planner gets until `llmtools` is
+// populated; SUBTYPES is the subtype universe the planner may assign (with definitions).
+
+// Tools cache — SAME strategy as getPrompts (pull once, ~5% re-query, dev always re-pulls).
+// `llmtools` is empty for now, so getTools falls back to DEFAULT_TOOLS; once tools are added
+// to the collection, those win — no code change.
+let toolCache = null;
+async function loadTools() {
+  const filter = { isDeleted: { $ne: true } };          // never load soft-deleted
+  if (!INCLUDE_INACTIVE) filter.active = true;            // prod: active only; dev: all
+  return toolCollection.find(filter).toArray();
+}
+async function getTools() {
+  if (!toolCache || INCLUDE_INACTIVE || Math.random() < 0.05) {
+    try {
+      toolCache = await loadTools();
+      console.log(`  llmtools: ${toolCache.length} tool(s) cached (includeInactive=${INCLUDE_INACTIVE})`);
+    } catch (e) {
+      console.warn(`  llmtools load failed (${e.message}) — using ${toolCache ? "cached" : "default"} set`);
+      toolCache = toolCache || [];
+    }
+  }
+  const tools = toolCache.length ? toolCache : DEFAULT_TOOLS;   // no DB tools yet → required defaults
+  return tools.map(toolLine).join("\n");                        // RETURN the formatted string
+}
+
+// ---- Sampler config (Mongo-backed, cached) -----------------
+// `model_config` holds Ollama sampling options: one `_default` doc (global baseline) plus
+// optional per-model docs keyed by the model string (e.g. "llama3.1:8b") that OVERRIDE it.
+// Each doc is { _id, params: { temperature, top_p, ... } }. Resolution (later wins):
+//   defaultSampler() [code]  →  `_default` doc  →  this worker's OLLAMA_MODEL doc.
+// Only keys defaultSampler knows are merged, so a stray DB key can't reach Ollama. SAME cache
+// strategy as getPrompts/getTools: pull once, ~5% re-query to pick up dashboard edits (no TTL),
+// dev always re-pulls; a load failure falls back to the last cache (or code defaults).
+let samplerCache = null;
+async function loadSampler() {
+  const docs = await modelConfigCollection.find({ _id: { $in: ["_default", OLLAMA_MODEL] } }).toArray();
+  const params = Object.fromEntries(docs.map((d) => [d._id, d.params || {}]));
+  return { ...defaultSampler(), ...(params._default || {}), ...(params[OLLAMA_MODEL] || {}) };
+}
+async function getSampler() {
+  if (!samplerCache || INCLUDE_INACTIVE || Math.random() < 0.05) {
+    try {
+      samplerCache = await loadSampler();
+      console.log(`  model_config: sampler resolved for ${OLLAMA_MODEL} (${Object.keys(samplerCache).length} keys)`);
+    } catch (e) {
+      console.warn(`  model_config load failed (${e.message}) — using ${samplerCache ? "cached" : "code-default"} sampler`);
+      samplerCache = samplerCache || defaultSampler();
+    }
+  }
+  return samplerCache;
+}
+
+// ---- Output-style temperatures (Mongo-backed, cached) ------
+// The style→temperature map MERGES default → override, exactly like getSampler:
+//   code STYLE_TEMPS  →  model_config `_styles`.params (global)  →  this model's doc `.styles` (per-model)
+// Each layer overrides only the styles it names; the rest fall through to the layer below (so the DB
+// need only store what differs from code). Dashboard-editable. SAME cache strategy as getSampler:
+// pull once, ~5% re-query (no TTL), dev always re-pulls; a load failure falls back to the code table.
+let styleTempsCache = null;
+async function loadStyleTemps() {
+  const docs = await modelConfigCollection.find({ _id: { $in: ["_styles", OLLAMA_MODEL] } }).toArray();
+  const by = Object.fromEntries(docs.map((d) => [d._id, d]));
+  return { ...STYLE_TEMPS, ...(by["_styles"]?.params || {}), ...(by[OLLAMA_MODEL]?.styles || {}) };
+}
+async function getStyleTemps() {
+  if (!styleTempsCache || INCLUDE_INACTIVE || Math.random() < 0.05) {
+    try {
+      styleTempsCache = await loadStyleTemps();
+      console.log(`  model_config: style temps ${JSON.stringify(styleTempsCache)}`);
+    } catch (e) {
+      console.warn(`  style temps load failed (${e.message}) — using ${styleTempsCache ? "cached" : "code-default"} map`);
+      styleTempsCache = styleTempsCache || { ...STYLE_TEMPS };
+    }
+  }
+  return styleTempsCache;
+}
+
+// Subtypes: no `subtypes` collection yet, so the defaults (with definitions) are the source.
+// (When one exists, fetch+cache here the same way as tools and fall back to SUBTYPES.)
+async function getSubtypes() {
+  return SUBTYPES.map((s) => `- ${s.name}: ${s.description}`).join("\n");  // RETURN the formatted string
 }
 
 // System prompt for a message TYPE (e.g. "query") = matching prompts joined,
@@ -132,6 +336,15 @@ async function systemPromptFor(type) {
 }
 
 // ---- RAG ---------------------------------------------------
+// RAG is OPT-IN and OFF by default. It only works when (a) an embedding endpoint is actually
+// available and (b) it's the SAME embedding model that built the `regulations` vector index —
+// embedding a query with the chat model (different dimensions) yields garbage search even if the
+// call succeeds, and here the call 500/501s outright. So the feature stays disabled until a real,
+// index-matching embedding model is wired up: set RAG_ENABLED=true then. While off, retrieveContext
+// returns "" immediately — no embeddings call, no 18s timeout, no error spam; callers proceed
+// without context (compliance is designed to degrade gracefully).
+const RAG_ENABLED = process.env.RAG_ENABLED === "true";
+
 async function getEmbedding(text) {
   const res = await fetch(`${OLLAMA_HOST}/api/embeddings`, {
     method: "POST",
@@ -144,6 +357,7 @@ async function getEmbedding(text) {
 }
 
 async function retrieveContext(query) {
+  if (!RAG_ENABLED) return ""; // feature off (no index-matching embedding model) — skip cleanly
   const embedding = await getEmbedding(query);
   const results = await ragCollection.aggregate([
     {
@@ -160,98 +374,233 @@ async function retrieveContext(query) {
   return results.map((r) => r.text).join("\n\n");
 }
 
-// ---- Prompt construction -----------------------------------
-// Chat-model messages: the prompt_library system prompt (+ optional RAG context) as a
-// `system` message, and the user's query as a `user` message. No "Question:/Answer:"
-// scaffolding — instruction/chat models don't want it. If no library prompt maps to
-// the type, there's simply no system message.
-function buildMessages(system, query, context) {
-  const messages = [];
-  const sys = [system, context && `Relevant context:\n${context}`].filter(Boolean).join("\n\n");
-  if (sys) messages.push({ role: "system", content: sys });
-  messages.push({ role: "user", content: query });
-  return messages;
+// buildMessages / buildStepMessages / buildPlannerMessages / buildComplianceMessages live under
+// steps/ (imported above). buildStandardMessages (the generic fallback) stays here.
+
+// toolLine formats a tool (DB or default) for the planner's tools list. Used by getTools().
+function toolLine(t) {
+  // DB tools store the schema in `definition`; defaults use {name, description}.
+  const fn = t.definition?.function || t.definition || {};
+  return `- ${fn.name || t.name || "unknown"}: ${fn.description || t.description || ""}`;
 }
+
+// ---- Per-type message builders (dispatched by a lookup table) ----------------
+// One builder per message type. Each takes the full message `payload` (+ optional RAG
+// `context`) and returns the chat `messages` for the LLM. They DON'T touch each other —
+// add a type by adding a builder + a table entry; the handler never branches on type.
+
+// (planner builder → steps/planner.js)
+
+// standard (query and any other domain type): system prompt for the type + the raw query.
+async function buildStandardMessages(payload, context) {
+  const system = await systemPromptFor(payload.type || "query");
+  return buildMessages(system, payload.query, context);
+}
+
+// (step builder → steps/step.js; compliance subtype builder → steps/compliance.js)
+
+// Dependencies the step builders need (mongo/firestore-backed helpers). Injected so the builder
+// files stay pure + unit-tested (steps/*.test.js). subtypeBuilders routes a step by its `subtype`
+// (e.g. compliance) inside the generic step path.
+const stepDeps = {
+  systemPromptFor, getTools, getSubtypes, retrieveContext, getFirestoreClient,
+  subtypeBuilders: { compliance: buildComplianceMessages },
+};
+
+// type → builder. Unknown/other types fall through to the standard builder.
+const MESSAGE_BUILDERS = {
+  planner: (payload, context) => buildPlannerMessages(payload, context, stepDeps),
+  step:    (payload, context) => buildStepMessages(payload, context, stepDeps),
+};
+const builderFor = (type) => MESSAGE_BUILDERS[type] || buildStandardMessages;
 
 // ---- Ollama web tools (web_search / web_fetch) -------------
 // On the raw (non-gateway) path the MODEL calls these; the WORKER executes them
 // against Ollama's hosted endpoints with OLLAMA_API_KEY, then feeds results back.
 // (Gateway tiers get the same tools from OpenClaw instead — see chatViaOpenClaw.)
-const TOOLS = [
-  { type: "function", function: {
-      name: "web_search",
-      description: "Search the web for current, factual, or recent information.",
-      parameters: { type: "object", properties: { query: { type: "string" }, max_results: { type: "number" } }, required: ["query"] } } },
-  { type: "function", function: {
-      name: "web_fetch",
-      description: "Fetch the full contents of a specific URL.",
-      parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } } },
-];
+// Built from DEFAULT_TOOLS (config/models.js) so the tool descriptions/params live in ONE place —
+// the SAME specs the planner sees. The worker just wraps them in Ollama's function-call shape.
+const TOOLS = DEFAULT_TOOLS.map((t) => ({
+  type: "function",
+  function: { name: t.name, description: t.description, parameters: t.parameters },
+}));
+
+// Hard cap on web_search results (from WEB_SEARCH_MAX in env). The MODEL picks max_results and a
+// weak one asks for absurd values (we saw 1000 → a 122k-token payload that blew the context and
+// timed out the next generation). Clamp to a sane window: never trust the model's number unbounded.
+const WEB_SEARCH_CAP = Math.max(1, parseInt(WEB_SEARCH_MAX, 10) || 3);
+
+// Should a dead web tool (429/auth) degrade to a tool-free "answer from memory" round instead of
+// terminal-failing the step? DEV defaults ON so an exhausted web quota doesn't block local pipeline
+// testing; production defaults OFF so grounding steps fail rather than invent sources. An explicit
+// WEB_TOOL_FALLBACK ("true"/"false") overrides the env-based default.
+const WEB_TOOL_FALLBACK_ON =
+  WEB_TOOL_FALLBACK == null || WEB_TOOL_FALLBACK === ""
+    ? DEPLOY_ENV === "dev"
+    : /^true$/i.test(WEB_TOOL_FALLBACK);
+
+// Capping the COUNT is not enough — each web result carries full page text, so even 10 results
+// can be ~350k chars (we saw 347,790 → the 8192-ctx model truncated to 8191 and kept 4 tokens of
+// the real prompt, so it produced nothing). Condense every tool result to title + url + a snippet
+// so the whole payload fits the window. web_fetch is a deliberate single-URL pull, so it gets a
+// larger budget than one search hit.
+const WEB_RESULT_CHARS = 1200; // per web_search hit's content
+const WEB_FETCH_CHARS = 6000;  // a single web_fetch body
+const clip = (s, n) => {
+  const str = typeof s === "string" ? s : (s == null ? "" : String(s));
+  return str.length > n ? `${str.slice(0, n)}… [truncated, ${str.length} chars total]` : str;
+};
+
+// Shrink a raw web tool result to a compact, model-friendly shape before it re-enters the prompt.
+// Unknown shapes fall through clipped whole, so a new field can never silently blow the context.
+function condenseToolResult(name, result) {
+  if (!result || result.error) return result;
+  if (name === "normalize_ingredients") return result; // already-compact rows — never clip (would corrupt the JSON of a 50-100 row batch)
+  if (name === "web_search") {
+    const hits = Array.isArray(result.results) ? result.results : [];
+    return {
+      results: hits.map((r) => ({
+        title: r.title ?? "",
+        url: r.url ?? "",
+        content: clip(r.content ?? r.snippet ?? "", WEB_RESULT_CHARS),
+      })),
+    };
+  }
+  if (name === "web_fetch") {
+    return {
+      title: result.title ?? "",
+      url: result.url ?? "",
+      content: clip(result.content ?? "", WEB_FETCH_CHARS),
+    };
+  }
+  return JSON.parse(clip(JSON.stringify(result), WEB_FETCH_CHARS));
+}
 
 async function executeTool(name, args) {
-  const path = name === "web_fetch" ? "web_fetch" : "web_search";
-  const body = name === "web_fetch" ? { url: args.url } : { query: args.query, max_results: args.max_results || 5 };
-  const res = await fetch(`${OLLAMA_WEB_BASE}/${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OLLAMA_API_KEY}` },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) return { error: `${name} failed: ${res.status} ${res.statusText}` };
-  return await res.json();
-}
-
-// One streamed /api/chat round: streams assistant content via onChunk and returns
-// any tool calls the model emitted (tool_calls arrive in the final/done chunk).
-async function chatRound(messages, tools, onChunk) {
-  const res = await fetch(`${OLLAMA_HOST}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: OLLAMA_MODEL,
-      messages,
-      tools,
-      stream: true,
-      // Without this Ollama defaults to a tiny context (~2–4k); a long system prompt
-      // then leaves almost no room for output, so the model truncates after a little.
-      options: { num_ctx: parseInt(OLLAMA_NUM_CTX, 10), num_predict: parseInt(OLLAMA_NUM_PREDICT, 10) },
-    }),
-  });
-  if (!res.ok) throw new Error(`Ollama chat failed: ${res.statusText}`);
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let content = "", toolCalls = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    for (const line of decoder.decode(value, { stream: true }).split("\n").filter(Boolean)) {
-      try {
-        const chunk = JSON.parse(line);
-        const piece = chunk.message?.content;
-        if (piece) { content += piece; await onChunk(piece, content); }
-        if (chunk.message?.tool_calls?.length) toolCalls = toolCalls.concat(chunk.message.tool_calls);
-      } catch { /* skip malformed line */ }
+  // Inventory step: the model copied residents + the diet distribution + the day's recipes into
+  // `args` (it does NO math); the tool normalizes the names and scales each amount by how many
+  // residents are on that recipe's diet, in CODE. Pure (no web call). Returns rows for the model
+  // to format.
+  if (name === "normalize_ingredients") {
+    return { rows: processDay(args) };
+  }
+  // web_search → free-tier PROVIDER POOL (search-pool.js), NOT Ollama's metered hosted endpoint.
+  // Weighted-random pick among providers under their rolling-30-day cap, DDG as the keyless fallback;
+  // quota lives in Firestore tools_limits/web_search/<provider>/<day>. Returns { results } | { error }
+  // (no TerminalError — the pool routes around 429s, so an exhausted quota no longer kills the step).
+  if (name === "web_search") {
+    const asked = Number(args.max_results) || WEB_SEARCH_CAP;
+    const max_results = Math.min(Math.max(1, asked), WEB_SEARCH_CAP);
+    if (asked > WEB_SEARCH_CAP) console.warn(`[worker]   web_search max_results ${asked} → clamped to ${max_results}`);
+    args.max_results = max_results;   // write the EFFECTIVE value back so the tool-call log/record shows what actually ran, not the model's (clamped-away) ask
+    return await searchPool({ query: args.query, max_results, db: getFirestoreClient() });
+  }
+  // web_fetch → curl (search-pool.js fetchPage), NOT Ollama's metered hosted endpoint. No quota to
+  // exhaust, so it never 429s the way the old path did. A failed fetch returns a soft { error } so the
+  // model can try another URL or answer — never terminal.
+  if (name === "web_fetch") {
+    try {
+      return await fetchPage(args.url);
+    } catch (err) {
+      return { error: err.message };
     }
   }
-  return { content, toolCalls };
+  return { error: `unknown tool: ${name}` };
 }
+
+// chatRound (the Ollama HTTP transport + stall watchdog + keep-alive pool) lives in ./ollama.js so
+// it is unit-testable in isolation (see ollama.test.js). It takes sampler/host/timeouts as opts;
+// the callers below resolve the sampler once per request and pass it in.
 
 // Raw-path inference WITH web tools: loop chat rounds, executing any web_search/
 // web_fetch the model requests, until it answers (no tool calls). Streams the answer.
-async function chatWithTools(initialMessages, onChunk) {
-  const messages = [...initialMessages];
-  const maxRounds = parseInt(MAX_TOOL_ROUNDS, 10) || 4;
-  for (let round = 0; round < maxRounds; round++) {
-    const { content, toolCalls } = await chatRound(messages, TOOLS, onChunk);
-    messages.push({ role: "assistant", content, tool_calls: toolCalls });
-    if (!toolCalls.length) return content; // model answered → done
-    for (const call of toolCalls) {
-      const result = await executeTool(call.function.name, call.function.arguments || {});
-      console.log(`  tool: ${call.function.name}(${JSON.stringify(call.function.arguments || {})})`);
-      messages.push({ role: "tool", tool_name: call.function.name, content: JSON.stringify(result) });
+// Weak/quantized models sometimes WRITE a tool call as text ("…{"name":"web_search","parameters":
+// {…}}") instead of using the structured tool_calls field — which leaves the step's "answer" as a
+// literal function call. Recover the intent: pull the first balanced JSON object that names a KNOWN
+// tool out of the content so chatWithTools can execute it like a real call. String-aware brace scan
+// so braces inside argument strings don't throw off the balance.
+function parseTextToolCall(content, toolDefs) {
+  if (!content || !content.includes('"name"')) return null;
+  const names = new Set(toolDefs.map((t) => t.function.name));
+  for (let i = content.indexOf("{"); i >= 0; i = content.indexOf("{", i + 1)) {
+    let depth = 0, inStr = false;
+    for (let j = i; j < content.length; j++) {
+      const ch = content[j];
+      if (inStr) { if (ch === "\\") j++; else if (ch === '"') inStr = false; continue; }
+      if (ch === '"') inStr = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) {
+        try {
+          const obj = JSON.parse(content.slice(i, j + 1));
+          if (obj && names.has(obj.name)) return { function: { name: obj.name, arguments: obj.parameters || obj.arguments || {} } };
+        } catch { /* not the tool-call object — keep scanning */ }
+        break;
+      }
     }
   }
-  const final = await chatRound(messages, undefined, onChunk); // round cap → answer tool-free
+  return null;
+}
+
+async function chatWithTools(initialMessages, onChunk, numCtx, toolDefs = TOOLS, style = DEFAULT_STYLE) {
+  const messages = [...initialMessages];
+  const maxRounds = parseInt(MAX_TOOL_ROUNDS, 10) || 4;
+  const sampler = samplerForStyle(await getSampler(), style, await getStyleTemps()); // DB base + per-style temperature
+  for (let round = 0; round < maxRounds; round++) {
+    const { content, toolCalls: structured } = await chatRound(messages, toolDefs, onChunk, numCtx, { sampler });
+    let toolCalls = structured;
+    if (!toolCalls.length) {
+      const recovered = parseTextToolCall(content, toolDefs); // model wrote the call as text?
+      if (!recovered) { messages.push({ role: "assistant", content }); return content; } // a real answer
+      console.log(`  tool (recovered from text): ${recovered.function.name}`);
+      toolCalls = [recovered];
+      messages.push({ role: "assistant", content: "", tool_calls: toolCalls });
+    } else {
+      messages.push({ role: "assistant", content, tool_calls: toolCalls });
+    }
+    for (const call of toolCalls) {
+      let raw;
+      try {
+        raw = await executeTool(call.function.name, call.function.arguments || {});
+      } catch (err) {
+        // A non-retryable web-tool failure (429/auth) arrives here as TerminalError. With
+        // WEB_TOOL_FALLBACK on, don't fail the step — satisfy the dangling tool_call, tell the
+        // model the tools are gone, and answer in one tool-free round from its own knowledge.
+        // (Off → rethrow, which terminal-fails the step. See WEB_TOOL_FALLBACK env note.)
+        if (err?.terminal && WEB_TOOL_FALLBACK_ON) {
+          console.warn(`  tool ${call.function.name} unavailable (${err.message}) — WEB_TOOL_FALLBACK on: answering tool-free from model knowledge`);
+          messages.push({ role: "tool", tool_name: call.function.name, content: JSON.stringify({ error: "web lookup unavailable for this run" }) });
+          messages.push({ role: "user", content: "Web lookup is unavailable. Answer the task as best you can from your own knowledge; do not call any tools." });
+          const degraded = await chatRound(messages, undefined, onChunk, numCtx, { sampler });
+          return degraded.content;
+        }
+        throw err;
+      }
+      const result = condenseToolResult(call.function.name, raw);
+      const out = JSON.stringify(result);
+      console.log(`  tool: ${call.function.name}(${JSON.stringify(call.function.arguments || {})}) → ${out.length} chars`);
+      messages.push({ role: "tool", tool_name: call.function.name, content: out });
+    }
+  }
+  const final = await chatRound(messages, undefined, onChunk, numCtx, { sampler }); // round cap → answer tool-free
   return final.content;
+}
+
+// Tool-FREE inference: one streamed round with NO tool definitions, so the model can only
+// generate text. This is what the PLANNER must use — its job is to EMIT a YAML step plan
+// that ASSIGNS tools to steps, not to call tools itself. Passing it executable web_search/
+// web_fetch makes weaker models (e.g. Llama 3.1 8B) run tools instead of planning ("garbage").
+async function chatNoTools(messages, onChunk, numCtx, style = DEFAULT_STYLE) {
+  const sampler = samplerForStyle(await getSampler(), style, await getStyleTemps());
+  const { content } = await chatRound(messages, undefined, onChunk, numCtx, { sampler });
+  return content;
+}
+
+// Apply a step's output style to the resolved sampler: override ONLY `temperature` (the rest stays
+// from model_config). CLONE — never mutate the cached sampler object (getSampler returns the shared
+// cache). A style with no mapped temperature leaves the base sampler untouched.
+function samplerForStyle(baseSampler, style, temps) {
+  const t = temperatureForStyle(style, temps);
+  return t == null ? baseSampler : { ...baseSampler, temperature: t };
 }
 
 // ---- OpenClaw gateway inference ----------------------------
@@ -299,8 +648,8 @@ async function chatViaOpenClaw(messages, onChunk) {
 
 // ---- Chunk flusher -----------------------------------------
 // Batches Firestore writes: flushes every 20 chunks or 500ms
-function makeChunkFlusher(db, jobId) {
-  const jobRef = db.collection("llmResults").doc(jobId);
+function makeChunkFlusher(targetRef) {
+  const jobRef = targetRef;
   let pending = "";
   let accumulated = "";
   let timer = null;
@@ -308,11 +657,13 @@ function makeChunkFlusher(db, jobId) {
 
   async function flush() {
     if (!pending) return;
-    const full = accumulated;
+    // Write only what's safe to show: the marker is withheld mid-stream so a forming
+    // "<@@…" never leaks into the live response (see steps/outcome.js).
+    const visible = visibleResponse(accumulated);
     pending = "";
     clearTimeout(timer);
     timer = null;
-    await jobRef.update({ response: full, updatedAt: FieldValue.serverTimestamp() });
+    await fsWrite("stream chunk", () => jobRef.update({ response: visible, updatedAt: FieldValue.serverTimestamp() }));
   }
 
   return {
@@ -323,7 +674,13 @@ function makeChunkFlusher(db, jobId) {
       if (count % 20 === 0) {
         await flush();
       } else if (!timer) {
-        timer = setTimeout(flush, 500);
+        // Detached flush: NOT awaited, so its promise MUST catch its own errors — an unhandled
+        // rejection here is exactly what crashed the worker before. fsWrite already retries
+        // transients; a genuinely persistent failure is logged and dropped (the next flush, or the
+        // awaited final flush, rewrites state).
+        timer = setTimeout(() => {
+          flush().catch((e) => console.error(`[worker] background flush failed (non-fatal): ${e.message}`));
+        }, 500);
       }
     },
     flush,
@@ -341,14 +698,90 @@ async function handleMessage(message) {
     return;
   }
 
-  const { jobId, query, type = "query" } = payload;
-  console.log(`Processing job: ${jobId} (type: ${type})`);
+  const { jobId, query, type = "query", step, unit } = payload;
+  // `attempt` rides the message (dispatch.js): 0 on first dispatch, bumped on an orchestrator retry.
+  // It is the discriminator that separates a real retry (re-run the same slot) from a stale
+  // duplicate delivery of an attempt already finished. Stored on the slot; see admission.js.
+  const attempt = Number(payload.attempt) || 0;
+  // Orchestrated runs (planner + steps) carry `step` ("plan" | index). The RUN doc id depends
+  // on which:
+  //   • a numeric step's fanout unit → an ORDERED, zero-padded id `${step}-${unit}` (unitDocId,
+  //     from config/models.js — the single source of truth). The doc id IS the order key, so the
+  //     UI can stream a visible WINDOW via a documentId() range with no index. `unit` comes from
+  //     dispatch; default 0 for a single-unit step. The id is a SLOT: a re-run overwrites it
+  //     (idempotent — a Pub/Sub redelivery can't create a duplicate).
+  //   • the planner run (step "plan", not a fanout) → keeps the Pub/Sub message id.
+  // Legacy one-shot jobs have no `step` and write to the top doc.
+  const isRun = step !== undefined && step !== null;
+  const runId = !isRun ? null : (typeof step === "number" ? unitDocId(step, unit ?? 0) : message.id);
+  payload.runId = runId; // carried into the orchestrate report so the orchestrator finds this run
+  console.log(
+    `[worker] ← job ${jobId}${isRun ? ` step=${step} run=${runId}` : ""} type=${type} model=${OLLAMA_MODEL} ` +
+    `queryLen=${query?.length ?? 0} report=${payload.report ?? "-"} rag=${payload.rag === true || payload.metadata?.rag === true}`
+  );
 
   const db = getFirestoreClient();
-  const jobRef = db.collection("llmResults").doc(jobId);
+  // A RUN streams into steps/{runId} (uniform shape) — runId is the ordered `${step}-${unit}` slot
+  // for a numeric step, or the Pub/Sub message id for the planner. Legacy one-shot jobs stream
+  // into the top doc.
+  const parentRef = db.collection("llmResults").doc(jobId);
+  const jobRef = isRun
+    ? parentRef.collection("steps").doc(runId)
+    : parentRef;
 
   try {
-    await jobRef.update({ status: "streaming" });
+    // Stamp companyId + userId on every RUN doc so children are company-scoped (access control:
+    // you can't see another company's data) and traceable to the user who launched the job. The
+    // planner message carries them; step messages don't, so fall back to the parent job doc.
+    let companyId = payload.companyId ?? null;
+    let userId = payload.userId ?? null;
+    if (isRun && (companyId === null || userId === null)) {
+      const j = (await parentRef.get()).data() || {};
+      companyId = companyId ?? j.companyId ?? null;
+      userId = userId ?? j.userId ?? null;
+    }
+
+    // First write CREATES (or reuses) the run doc. Uniform shape across the planner run and every
+    // step run. `deletedAt: null` clears any prior soft-delete marker when a re-run reuses an
+    // ordered slot id, so a resurrected slot doesn't keep a stale deletedAt.
+    //
+    // CRUCIAL: this is a re-entry point. A transient "fetch failed" nacks (see the catch) and
+    // Pub/Sub redelivers the SAME message into the SAME slot — so a prior attempt may have left
+    // `outcome`/`completedAt` set from when it wrote status:"fail". Because this is a merge, we
+    // MUST clear those failure fields when we set status back to "running"; otherwise the doc
+    // holds the old attempt's outcome alongside the new attempt's running status, and the UI
+    // shows "fetch failed" + "Running" at once. Invariant: running ⇒ no outcome.
+    //
+    // `createdAt` is the SEND time and must be stamped ONCE — never re-stamped on a retry. A
+    // redelivered "fetch failed" re-enters this same slot; if we reset createdAt here, the prior
+    // attempt's `updatedAt` is now OLDER than the new createdAt, so runtime (updatedAt − createdAt)
+    // goes negative and renders as a bogus "0.0s". So we only set createdAt when the doc doesn't
+    // already have one; runtime then measures from the original send across every retry.
+    // LEASELESS receive: in ONE transaction, decide whether to run (shouldRun) and, if so, mark the
+    // slot `running` for THIS attempt — atomic so a stale attempt can't slip between read and write.
+    // No lease, no holder: shouldRun skips only a slot already TERMINAL for this attempt or one OWNED
+    // by a NEWER attempt (a retry that overtook us). A `running` slot is NOT a skip — a redelivery
+    // after a crash must be able to take it over (the dead worker holds nothing). A concurrent
+    // same-attempt duplicate is allowed too; the completion CAS dedups the write. The running mark
+    // clears the prior attempt's failure fields (running ⇒ no outcome) and stamps createdAt ONCE so
+    // runtime (updatedAt − createdAt) measures from the original send across retries.
+    let willRun = false;
+    await fsWrite("receive claim", () => db.runTransaction(async (tx) => {
+      const snap = await tx.get(jobRef);
+      const slot = snap.exists ? snap.data() : undefined;
+      willRun = shouldRun(slot, attempt);
+      if (!willRun) return;
+      const claim = isRun
+        ? { step, attempt, companyId, userId, status: "running", outcome: null, completedAt: null, isDeleted: false, deletedAt: null }
+        : { attempt, status: "running", outcome: null, completedAt: null };
+      if (!snap.exists || snap.get("createdAt") == null) claim.createdAt = FieldValue.serverTimestamp();
+      tx.set(jobRef, claim, { merge: true });
+    }));
+    if (!willRun) {
+      console.log(`[worker] ⤳ already terminal/superseded — skipping (acked): ${jobId}${isRun ? ` step=${step} run=${runId} attempt=${attempt}` : ""}`);
+      message.ack();
+      return;
+    }
 
     // RAG is an OPTIONAL augmentation — it must never break a plain query.
     // Default: just send the query. If a request opts in (metadata.rag) we try to
@@ -365,40 +798,156 @@ async function handleMessage(message) {
       console.log("  RAG: not requested");
     }
 
-    // System prompt comes from the prompt_library (joined by message TYPE, sorted by
-    // priority) — no hard-coded persona. Build chat messages (system + user) and
-    // persist a readable copy of what was sent for the record.
-    const system = await systemPromptFor(type);
-    console.log(`  Prompt: ${system ? system.length + " chars from prompt_library" : "no library prompt for type " + type}`);
-    const messages = buildMessages(system, query, context);
-    await jobRef.update({ prompt: messages.map((m) => m.content).join("\n\n") });
+    // Dispatch by message type through the builder lookup table — each type builds its own
+    // prompt+data in isolation; the handler doesn't branch on type and types don't cross over.
+    // ── DEBUG 1: which path (builder) this message takes ──
+    const path = MESSAGE_BUILDERS[type] ? `${type} builder` : "standard builder";
+    console.log(`[worker]   ${jobId} PATH → ${path} (type=${type})`);
 
-    // Both paths support web_search/web_fetch: gateway tiers via OpenClaw, raw tiers
-    // via the worker tool-loop against Ollama's API. Same free OLLAMA_API_KEY behind both.
-    const flusher = makeChunkFlusher(db, jobId);
-    const useGateway = GATEWAY === "openclaw";
-    console.log(`  Inference: ${useGateway ? "OpenClaw gateway (web tools)" : "Ollama chat + web tools"}`);
-    const fullResponse = useGateway
-      ? await chatViaOpenClaw(messages, flusher.push.bind(flusher))
-      : await chatWithTools(messages, flusher.push.bind(flusher));
-    await flusher.flush();
+    const messages = await builderFor(type)(payload, context);
 
-    console.log(`  Streaming complete`);
+    // ── DEBUG 2: the exact prompt that was built (system + user, role-labelled) ──
+    const promptDump = messages.map((m) => `--- [${m.role}] (${m.content.length} chars) ---\n${m.content}`).join("\n\n");
+    console.log(`[worker]   ${jobId} PROMPT BUILT:\n${promptDump}\n[worker]   ${jobId} END PROMPT`);
+    // Record both: `message` = the user content (the input), `prompt` = the full assembled
+    // prompt (system + user) actually sent. `response` is written on completion below.
+    const userMessage = messages.find((m) => m.role === "user")?.content ?? "";
+    await fsWrite("input meta", () => jobRef.update({ message: userMessage, prompt: messages.map((m) => m.content).join("\n\n") }));
 
-    // Results live in Firestore only — clients react via onSnapshot.
-    // MongoDB is RAG-only; do NOT write results there.
-    await jobRef.update({
-      status:      "complete",
-      response:    fullResponse,
-      completedAt: FieldValue.serverTimestamp(),
+    // Size the context window to THIS prompt (+ output reserve), capped by the model's max.
+    // Too big → TerminalError → fail WITHOUT retrying (see the catch). The gateway path ignores
+    // num_ctx (OpenClaw manages it), but we still size first to fail-fast on impossible requests.
+    const numCtx = sizeNumCtx({
+      messages,
+      modelMaxCtx: MODEL_MAX_CTX,
+      outputReserve: parseInt(OUTPUT_RESERVE_TOKENS, 10),
+      floor: parseInt(OLLAMA_NUM_CTX, 10),
     });
+    console.log(`  num_ctx=${numCtx} (model cap ${MODEL_MAX_CTX ?? "unknown"}, output reserve ${OUTPUT_RESERVE_TOKENS})`);
 
-    message.ack();
-    console.log(`  Acked: ${jobId}`);
+    // The PLANNER never gets executable tools (it ASSIGNS tools to steps; giving it web_search/
+    // web_fetch makes it run tools instead of emitting the plan). A domain step gets ONLY the tools
+    // the planner assigned it (def.tools, carried in the message), intersected with what the worker
+    // implements — so a step the planner gave no tools runs TOOL-FREE. The planner decides per step
+    // from the tools list's descriptions; we just honor its choice. (Gateway/OpenClaw tiers always
+    // expose tools, regardless.)
+    const flusher = makeChunkFlusher(jobRef);
+    const useGateway = GATEWAY === "openclaw";
+    // Load the actual tool DEFINITION for each name the step was assigned, IN the order given.
+    // An entry may be a plain name ("web_search") or an object ({name:"web_search"}) depending on
+    // how the planner's YAML parsed — normalize to the name first. Empty list → no tools (tool-free
+    // step, allowed). A name with NO matching definition is dropped LOUDLY (not silently) so a
+    // planner/worker tool-name mismatch surfaces instead of looking like "no tools assigned".
+    const toolByName = new Map(TOOLS.map((t) => [t.function.name, t]));
+    const named = (payload.tools || []).map((n) => (typeof n === "string" ? n : n?.name)).filter(Boolean);
+    const assignedTools = named.map((n) => toolByName.get(n)).filter(Boolean);
+    const missing = named.filter((n) => !toolByName.has(n));
+    if (missing.length) console.warn(`[worker]   ${jobId} assigned tool(s) with NO matching definition — dropped: ${missing.join(", ")} (have: ${[...toolByName.keys()].join(", ")})`);
+    const allowTools = type !== "planner" && assignedTools.length > 0;
+    if (useGateway && type === "planner") {
+      // OpenClaw always exposes its tools, so a planner shouldn't run on a gateway tier.
+      console.warn(`[worker]   ${jobId} planner on a GATEWAY tier — OpenClaw still offers tools; route the planner to a raw model topic.`);
+    }
+    // Output style (structured | blended | unstructured) rides the step's dispatch payload, same as
+    // `tools`. The worker maps it to a temperature (DB model_config `_styles`, code fallback), overriding
+    // only the sampler's temperature for this request. Default structured — every pipeline step is
+    // structured unless its plan def says otherwise. The generic `query`/chat path is unstructured.
+    const genStyle = payload.style || (type === "query" ? "unstructured" : DEFAULT_STYLE);
+    console.log(`  Inference: ${useGateway ? "OpenClaw gateway" : "Ollama chat"} (tools ${allowTools ? `on [${assignedTools.map((t) => t.function.name).join(",")}]` : "off"}, style=${genStyle} → temp=${temperatureForStyle(genStyle, await getStyleTemps())})`);
+    // Run the generation behind the in-process gate so we never run more concurrent generations
+    // than Ollama has run-slots (excess queues here while its lease auto-extends). release() in a
+    // `finally` so a throw still frees the slot; correctness across workers stays in the CAS below.
+    if (genGate.waiting > 0 || genGate.active >= genGate.max) {
+      console.log(`[worker]   ${jobId} waiting for a generation slot (${genGate.active}/${genGate.max} busy, ${genGate.waiting} queued)`);
+    }
+    const releaseGen = await genGate.acquire();
+    let fullResponse;
+    try {
+      fullResponse = useGateway
+        ? await chatViaOpenClaw(messages, flusher.push.bind(flusher))
+        : allowTools
+          ? await chatWithTools(messages, flusher.push.bind(flusher), numCtx, assignedTools, genStyle)
+          : await chatNoTools(messages, flusher.push.bind(flusher), numCtx, genStyle);
+      await flusher.flush();
+    } finally {
+      releaseGen();
+    }
+
+    // ── DEBUG 3: the final output the model produced ──
+    console.log(`[worker]   ${jobId} OUTPUT (${fullResponse?.length ?? 0} chars):\n${fullResponse}\n[worker]   ${jobId} END OUTPUT`);
+
+    // Pull the status block (@@::PASS::@@ / @@::FAIL:reason::@@) OUT of the output, and keep
+    // the marker out of the visible `response`. Terminal status is one of just two: PASS → success,
+    // FAIL → fail. The FAIL reason goes in `outcome` (success has no reason → null). The orchestrator
+    // gets the status + outcome in the report below so it can decide success → advance / fail → stop.
+    const { status: blockStatus, reason, clean } = splitOutcome(fullResponse);
+    const runStatus = blockStatus === "FAIL" ? "fail" : "success"; // PASS or no block → success
+    const outcome = runStatus === "fail" ? reason : null;          // outcome carries the failure reason only
+    payload.runStatus = runStatus;                                 // carried into the orchestrate report
+    payload.outcome = outcome;
+    console.log(`[worker]   ${jobId} → ${runStatus}${outcome ? ` (${outcome})` : ""}`);
+
+    // Completion = first-writer-wins CAS (design/distributed-dispatch.md). In a transaction,
+    // completionWrite returns null if this slot is already terminal for this/a newer attempt, or
+    // owned by a newer attempt — so a duplicate concurrent run, or a stale older-attempt completion,
+    // never clobbers the winner. Results live in Firestore only (clients react via onSnapshot;
+    // Mongo is RAG-only). `updatedAt` is bumped so runtime = updatedAt − createdAt is end-to-end.
+    let wrote = false;
+    await fsWrite("result", () => db.runTransaction(async (tx) => {
+      const slot = (await tx.get(jobRef)).data();
+      const w = completionWrite(slot, { attempt, status: runStatus, response: clean, outcome });
+      wrote = !!w;
+      if (!w) return;
+      tx.set(jobRef, {
+        status: w.status, response: w.response, outcome: w.outcome ?? null, attempt: w.attempt,
+        updatedAt: FieldValue.serverTimestamp(), completedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }));
+
+    // Only the WINNER reports — a lost race means another run already told the orchestrator.
+    if (wrote) {
+      await reportToOrchestrator(payload);
+      message.ack();
+      console.log(`[worker] ✓ acked ${jobId} (status=${runStatus})`);
+    } else {
+      message.ack();
+      console.log(`[worker] ⤳ completion no-op (superseded/duplicate) — acked: ${jobId}${isRun ? ` run=${runId} attempt=${attempt}` : ""}`);
+    }
   } catch (err) {
-    console.error(`  Failed job ${jobId}:`, err.message);
-    await jobRef.update({ status: "error", error: err.message }).catch(() => {});
-    message.nack();
+    // Classify so the failure is debuggable at a glance, and name WHICH run failed (step+unit) +
+    // its type — a bare "FAILED job <id>" forced reading the whole transcript to find the context.
+    const where = isRun ? ` step=${step} run=${runId}` : "";
+    const kind = err?.terminal ? "TERMINAL" : /stall|abort/i.test(err.message || "") ? "STALL" : "ERROR";
+    console.error(`[worker] ✗ FAILED (${kind}) job ${jobId}${where} type=${type}: ${err.message}`);
+    // "fetch failed" is undici's generic wrapper — the REAL reason (UND_ERR_HEADERS_TIMEOUT /
+    // UND_ERR_BODY_TIMEOUT = timeout, ECONNRESET = Ollama dropped the connection, etc.) lives
+    // on err.cause. Log it so failures aren't a mystery.
+    if (err?.cause) console.error(`[worker]   ${jobId} cause:`, err.cause?.code || err.cause?.message || err.cause);
+    // error / abort / crash all end the same: status `fail`, with the message in `outcome` (the
+    // single field that says WHY it ended). Written through the SAME first-writer-wins CAS so a
+    // superseded or stale-attempt failure can't clobber a newer attempt that overtook this run.
+    let wroteFail = false;
+    await fsWrite("fail status", () => db.runTransaction(async (tx) => {
+      const slot = (await tx.get(jobRef)).data();
+      const w = completionWrite(slot, { attempt, status: "fail", response: slot?.response ?? "", outcome: err.message });
+      wroteFail = !!w;
+      if (!w) return;
+      tx.set(jobRef, { status: "fail", outcome: err.message, attempt: w.attempt, updatedAt: FieldValue.serverTimestamp(), completedAt: FieldValue.serverTimestamp() }, { merge: true });
+    })).catch(() => {});
+    // Tell the orchestrator we FAILED so its retry → pass-through logic engages — but ONLY if we
+    // actually wrote the failure (a superseded run's failure is not ours to report; the owning
+    // attempt will). An INFRASTRUCTURE failure (stall/abort/timeout/crash) must drive the auto-flow
+    // exactly like a content FAIL (`@@::FAIL::@@`) so the cursor moves and the job never wedges.
+    if (wroteFail) {
+      payload.runStatus = "fail";
+      payload.outcome = err.message;
+      await reportToOrchestrator(payload).catch((e) => console.error(`[worker]   ${jobId} fail-report error:`, e?.message || e));
+    }
+    // ALWAYS ack — never nack. Nacking redelivers the SAME (often slow/poison) message forever —
+    // that loop is exactly what wedged the worker for 31 minutes. Re-dispatch is the ORCHESTRATOR's
+    // job (a fresh message from dispatchStep on retry), not Pub/Sub redelivery of this one.
+    message.ack();
+    console.log(`[worker] ⤳ failed (acked${wroteFail ? "; orchestrator notified → retry/pass-through" : "; superseded — not reported"}): ${jobId}`);
   }
 }
 
@@ -407,19 +956,47 @@ async function main() {
   await connectMongo();
 
   const pubsub = new PubSub({ projectId: GCP_PROJECT_ID });
-  const subscriptionNames = SUBSCRIPTION_NAME.split(',').map(s => s.trim());
+
+  // Per-worker concurrency: how many messages THIS worker leases at once. dev → 1 (a CPU box
+  // can't run two generations without them fighting for cores/RAM — that caused the competing
+  // slots), prod → 2 by default and tunable via MAX_CONCURRENCY. maxExtensionMinutes keeps the
+  // Pub/Sub lease auto-refreshed (up to 60 min) so a long generation isn't redelivered mid-run.
+  const maxMessages = parseInt(process.env.MAX_CONCURRENCY || (IS_PROD ? "2" : "1"), 10);
+  console.log(`  Flow control: maxMessages=${maxMessages} (env=${DEPLOY_ENV}), maxExtensionMinutes=60`);
+
+  // Split a comma list into individual names, but do NOT trim/normalize: each name is a
+  // Pub/Sub subscription id used verbatim. "Cleaning" it here would mask an upstream bug
+  // (e.g. a stray space) AND make us subscribe to a name Pub/Sub doesn't have. Pass through
+  // exactly as given — a malformed name should fail loudly, not be silently patched.
+  const subscriptionNames = SUBSCRIPTION_NAME.split(',');
 
   for (const subName of subscriptionNames) {
     const subscription = pubsub.subscription(subName, {
-      flowControl: { maxMessages: 2 },
+      flowControl: { maxMessages, maxExtensionMinutes: 60 },
     });
+    // A Pub/Sub Subscription emits: message | error | close | debug — there is NO "success"
+    // event (a received `message` IS the success path; handleMessage logs "[worker] ← job …").
     subscription.on("message", handleMessage);
-    subscription.on("error", (err) => console.error(`Subscription error (${subName}):`, err));
+    subscription.on("error", (err) => console.error(`[worker] subscription ERROR (${subName}):`, err?.message || err));
+    // close: the subscriber stopped receiving (stream torn down / fatal error). Without this it
+    // goes silent and just looks like "no jobs arriving" with no clue why.
+    subscription.on("close", () => console.warn(`[worker] subscription CLOSED (${subName}) — no longer receiving messages`));
+    // debug: gRPC/stream internals (reconnects, deadline exceeded). Quiet unless something's off.
+    subscription.on("debug", (msg) => console.debug(`[worker] subscription debug (${subName}):`, msg?.message || msg));
     console.log(`  Listening: ${subName}`);
   }
 
   console.log(`Model: ${OLLAMA_MODEL} @ ${OLLAMA_HOST}\n`);
 }
+
+// Consumer-level backstop: a long-lived Pub/Sub worker must NEVER die on a stray async rejection
+// (a detached promise nobody awaited — exactly what the timer-driven Firestore flush was). Real
+// failures are handled where they happen (fsWrite retries transients; handleMessage's try/catch
+// fails the job + acks). This only catches a programmer slip so one escaped rejection LOGS instead
+// of taking the whole consumer down. A backstop, not a license to skip handling errors.
+process.on("unhandledRejection", (reason) => {
+  console.error("[worker] ✗ UNHANDLED REJECTION (kept alive):", reason?.stack || reason?.message || reason);
+});
 
 main().catch((err) => {
   console.error("Worker failed to start:", err.message);

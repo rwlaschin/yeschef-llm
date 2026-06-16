@@ -7,12 +7,23 @@ import { PubSub } from "@google-cloud/pubsub";
 import { MODELS, subscriptionOf, deadLetterOf } from "../config/models.js";
 
 const DEFAULT_SUB_CONFIG = {
-  ackDeadlineSeconds: 40,
+  // Base redelivery window. PROD stays short (40s) so a preempted SPOT VM's in-flight
+  // unit redelivers fast. DEV ONLY → 300s: the Pub/Sub emulator ignores the client's
+  // lease extension (maxExtensionMinutes), so it redelivers at exactly this deadline;
+  // 40s there double-runs slow (1–5 min) units. Real Pub/Sub honors the extension, so
+  // prod is unaffected by this value beyond the spot-death case.
+  ackDeadlineSeconds: process.env.NODE_ENV === "dev" ? 300 : 40,
   minRetryDelay: { seconds: 10 },
   maxRetryDelay: { seconds: 30 },
 };
 
-const MAX_DELIVERY_ATTEMPTS = 5;
+// Dead-letter is a TRANSPORT backstop only — the natural terminal sink for messages that can never
+// reach a clean terminal write (unparseable payload, repeated crash before any Firestore write). It
+// is NOT the give-up authority: that is semantic, owned by the orchestrator (attempts[step] → MAX_GEN
+// → passthrough). Pub/Sub counts EVERY delivery, including healthy redeliveries from spot preemption,
+// so this is set high — a long unit preempted a few times must not dead-letter while still healthy.
+// See design/distributed-dispatch.md.
+const MAX_DELIVERY_ATTEMPTS = 50;
 
 // `models` defaults to the full registry (prod provisions everything). Dev passes
 // only its dev-capable models so we don't create topics/subs for tiers that can't
@@ -60,7 +71,7 @@ export async function setup(projectId, models = MODELS) {
 
   console.log(`\nPub/Sub setup [${projectId}] — ${models.length} model(s)\n`);
   for (const m of models) {
-    console.log(`[${m.key.toUpperCase()}]`);
+    console.log(`[${m.label}]`);
     await ensureTopic(deadLetterOf(m));
     await ensureTopic(m.topic);
     await ensureSubscription({

@@ -1,6 +1,6 @@
 <template>
   <Teleport to="body">
-    <div class="fixed bottom-4 right-4 space-y-3 z-50 pointer-events-none">
+    <div class="fixed bottom-4 left-4 space-y-3 z-50 pointer-events-none">
       <TransitionGroup name="toast">
         <div
           v-for="toast in toasts"
@@ -60,11 +60,11 @@ const toastColor = (type) => {
 
 .toast-enter-from {
   opacity: 0;
-  transform: translateX(100%);
+  transform: translateX(-100%);
 }
 
 .toast-leave-to {
   opacity: 0;
-  transform: translateX(100%);
+  transform: translateX(-100%);
 }
 </style>

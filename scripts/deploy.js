@@ -13,10 +13,8 @@
 // after the final Firestore write, so a preempted job is redelivered and another
 // spot VM (same baked image) finishes it (jobId idempotency guards partial writes).
 //
-// SAFETY: dry-run by default — prints every command without running it.
-//   npm run deploy                    # dry-run (inspect the plan)
-//   npm run deploy -- --dry-run=0     # execute
-//   npm run deploy -- --apply         # execute (alias)
+// Applies for real by default. Pass --dry-run to only PRINT the gcloud/docker
+// commands without executing them (preview the plan).
 //
 // ⚠️ UNVERIFIED — not yet run. Verify project params (zone/network/SA/GPU quota)
 //    and MIG scale-to-zero (min-replicas=0) before a real deploy.
@@ -43,15 +41,9 @@ const {
   FIREBASE_PROJECT_ID,
 } = process.env;
 
-// Dry-run by default. Disable with --dry-run=0 / --dry-run=false / --no-dry-run / --apply
+// Applies for real by default. Pass --dry-run to only print the commands (no execution).
 const args = process.argv.slice(2);
-let DRY_RUN = true;
-const dryRunArg = args.find((a) => a.startsWith("--dry-run"));
-if (dryRunArg && dryRunArg.includes("=")) {
-  const v = dryRunArg.split("=")[1];
-  DRY_RUN = !(v === "0" || v === "false" || v === "no");
-}
-if (args.includes("--no-dry-run") || args.includes("--apply")) DRY_RUN = false;
+const DRY_RUN = args.some((a) => a === "--dry-run" || a === "--dry-run=1" || a === "--dry-run=true");
 const APPLY = !DRY_RUN;
 
 for (const [k, v] of Object.entries({
@@ -75,6 +67,10 @@ const IMAGES = MODELS.map((m) => ({
   subscription: subscriptionOf(m),
   model: m.model,
   gpu: m.gpu,
+  // ENV-sourced (dotenv-flow: .env.production → .env), DEFAULTS fallback. Feeds BOTH the baked
+  // Dockerfile ENV (renderDockerfile) and the runtime `docker run -e` in the VM startup script.
+  parallel: process.env.OLLAMA_NUM_PARALLEL || DEFAULTS.parallel,
+  maxQueue: process.env.OLLAMA_MAX_QUEUE || DEFAULTS.maxQueue,
 }));
 
 function run(cmd) {

@@ -3,9 +3,9 @@
     <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
       <div class="glass p-6 rounded-lg max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
       <!-- Header -->
-      <div class="flex justify-between items-center mb-6 pb-4 border-b border-gray-700">
+      <div class="flex justify-between items-center mb-6 pb-4 border-b border-gray-200 dark:border-gray-700">
         <h2 class="text-xl font-serif text-primary">Import Tools</h2>
-        <button @click="$emit('cancel')" class="p-1 text-gray-400 hover:text-white hover:bg-gray-700 rounded transition">
+        <button @click="$emit('cancel')" class="p-1 text-muted hover:text-strong hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition">
           <XMarkIcon class="w-6 h-6" />
         </button>
       </div>
@@ -13,10 +13,10 @@
       <div class="space-y-6">
         <!-- Method 1: Paste JSON -->
         <div class="space-y-3">
-          <h3 class="text-sm font-semibold text-gray-300">Method 1: Paste JSON</h3>
+          <h3 class="text-sm font-semibold text-secondary">Method 1: Paste JSON</h3>
           <textarea
             v-model="jsonInput"
-            class="w-full px-3 py-2 rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500 focus:outline-none font-mono text-xs min-h-40"
+            class="w-full px-3 py-2 rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500 focus:outline-none font-mono text-xs min-h-40"
             placeholder="[{&quot;name&quot;:&quot;search_recipes&quot;,&quot;active&quot;:true,&quot;definition&quot;:{...}}]"
           />
         </div>
@@ -24,17 +24,17 @@
         <!-- Divider -->
         <div class="relative">
           <div class="absolute inset-0 flex items-center">
-            <div class="w-full border-t border-gray-700"></div>
+            <div class="w-full border-t border-gray-200 dark:border-gray-700"></div>
           </div>
           <div class="relative flex justify-center text-sm">
-            <span class="px-2 bg-gray-950 text-gray-500">or</span>
+            <span class="px-2 bg-white dark:bg-gray-950 text-gray-500">or</span>
           </div>
         </div>
 
         <!-- Method 2: File Upload -->
         <div class="space-y-3">
-          <h3 class="text-sm font-semibold text-gray-300">Method 2: Upload File</h3>
-          <div class="border-2 border-dashed border-gray-700 rounded-lg p-8 text-center hover:border-amber-500 transition cursor-pointer" @click="triggerFileInput">
+          <h3 class="text-sm font-semibold text-secondary">Method 2: Upload File</h3>
+          <div class="border-2 border-dashed border-gray-300 dark:border-gray-700 rounded-lg p-8 text-center hover:border-amber-500 transition cursor-pointer" @click="triggerFileInput">
             <input
               ref="fileInput"
               type="file"
@@ -43,7 +43,7 @@
               @change="handleFileUpload"
             />
             <DocumentArrowDownIcon class="w-8 h-8 mx-auto mb-3 text-gray-400" />
-            <p class="text-gray-300 text-sm">Click to select file or drag and drop</p>
+            <p class="text-secondary text-sm">Click to select file or drag and drop</p>
             <p class="text-xs text-gray-500 mt-2">.json files only</p>
           </div>
         </div>
@@ -71,7 +71,7 @@
           <button
             type="button"
             @click="$emit('cancel')"
-            class="px-4 py-2 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 transition font-medium"
+            class="px-4 py-2 rounded btn-muted transition font-medium"
           >
             Cancel
           </button>

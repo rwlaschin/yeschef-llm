@@ -29,7 +29,7 @@
                   'px-2 py-1 text-xs rounded font-medium transition',
                   version.active
                     ? 'bg-emerald-900/30 text-emerald-400'
-                    : 'bg-gray-700/40 text-gray-400 hover:bg-gray-700/60',
+                    : 'bg-gray-200 text-gray-500 hover:bg-gray-300 dark:bg-gray-700/40 dark:text-gray-400 dark:hover:bg-gray-700/60',
                   selectedTool?._id === version._id ? 'ring-2 ring-amber-500' : ''
                 ]"
               >
@@ -45,7 +45,7 @@
               'px-2.5 py-1 text-xs rounded font-medium whitespace-nowrap transition cursor-pointer hover:opacity-80',
               getCardTool(toolName).active
                 ? 'bg-emerald-900/30 text-emerald-400'
-                : 'bg-gray-700/40 text-gray-400 hover:bg-gray-700/60'
+                : 'bg-gray-200 text-gray-500 hover:bg-gray-300 dark:bg-gray-700/40 dark:text-gray-400 dark:hover:bg-gray-700/60'
             ]"
             :title="`Click to ${getCardTool(toolName).active ? 'deactivate' : 'activate'}`"
           >
@@ -54,7 +54,7 @@
         </div>
 
         <!-- Description (collapsed view) -->
-        <p class="text-sm text-gray-300 mb-4">{{ getCardTool(toolName).definition.description }}</p>
+        <p class="text-sm text-secondary mb-4">{{ getCardTool(toolName).definition.description }}</p>
 
         <!-- Parameters (collapsed view) -->
         <div class="mb-4 space-y-2">
@@ -87,7 +87,7 @@
             :disabled="getCardTool(toolName).active"
             class="flex-1 flex items-center justify-center px-3 py-2 rounded transition border"
             :class="getCardTool(toolName).active
-              ? 'bg-gray-700/20 text-gray-500 cursor-not-allowed border-gray-700/20'
+              ? 'bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200 dark:bg-gray-700/20 dark:text-gray-500 dark:border-gray-700/20'
               : 'bg-red-900/30 text-red-400 hover:bg-red-900/50 border-red-900/30'"
             :title="getCardTool(toolName).active ? 'Cannot delete active tools' : 'Delete tool'"
           >
@@ -106,7 +106,7 @@
           </div>
           <button
             @click="selectedTool = null"
-            class="text-gray-400 hover:text-white transition"
+            class="text-muted hover:text-strong transition"
           >
             ✕
           </button>
@@ -120,7 +120,7 @@
               'px-3 py-1 text-sm rounded font-medium transition cursor-pointer hover:opacity-80',
               selectedTool.active
                 ? 'bg-emerald-900/30 text-emerald-400'
-                : 'bg-gray-700/40 text-gray-400 hover:bg-gray-700/60'
+                : 'bg-gray-200 text-gray-500 hover:bg-gray-300 dark:bg-gray-700/40 dark:text-gray-400 dark:hover:bg-gray-700/60'
             ]"
           >
             {{ selectedTool.active ? 'Active' : 'Inactive' }}
@@ -130,14 +130,14 @@
         <!-- Description -->
         <div class="mb-6">
           <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Description</h3>
-          <p class="text-gray-300">{{ selectedTool.definition.description }}</p>
+          <p class="text-secondary">{{ selectedTool.definition.description }}</p>
         </div>
 
         <!-- Parameters -->
         <div class="mb-6">
           <h3 class="text-xs font-semibold text-gray-400 uppercase mb-3">Parameters</h3>
           <div v-if="selectedTool.definition.parameters.properties && Object.keys(selectedTool.definition.parameters.properties).length > 0" class="space-y-4">
-            <div v-for="(param, key) in selectedTool.definition.parameters.properties" :key="key" class="p-3 bg-gray-800/40 rounded border border-gray-700">
+            <div v-for="(param, key) in selectedTool.definition.parameters.properties" :key="key" class="p-3 surface-2 rounded border border-gray-200 dark:border-gray-700">
               <div class="flex items-center gap-2 mb-2">
                 <span class="font-mono font-semibold text-amber-400">{{ key }}</span>
                 <span class="text-xs text-gray-500">{{ param.type }}</span>
@@ -152,7 +152,7 @@
         <!-- Raw Definition -->
         <div class="mb-6">
           <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Definition (JSON)</h3>
-          <pre class="bg-gray-800/40 border border-gray-700 rounded p-3 overflow-x-auto text-xs text-gray-300 font-mono">{{ JSON.stringify(selectedTool.definition, null, 2) }}</pre>
+          <pre class="code-block border border-gray-200 dark:border-gray-700 rounded p-3 overflow-x-auto text-xs font-mono">{{ JSON.stringify(selectedTool.definition, null, 2) }}</pre>
         </div>
 
         <!-- Actions -->
@@ -169,7 +169,7 @@
             :disabled="selectedTool.active"
             class="flex-1 flex items-center justify-center px-4 py-2 rounded transition font-medium border"
             :class="selectedTool.active
-              ? 'bg-gray-700/20 text-gray-500 cursor-not-allowed border-gray-700/20'
+              ? 'bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200 dark:bg-gray-700/20 dark:text-gray-500 dark:border-gray-700/20'
               : 'bg-red-900/30 text-red-400 hover:bg-red-900/50 border-red-900/30'"
           >
             <TrashIcon class="w-4 h-4 mr-2" />

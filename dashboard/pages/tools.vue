@@ -6,7 +6,7 @@
       <div class="flex gap-2">
         <button
           @click="showImport = true"
-          class="flex items-center gap-2 px-4 py-2 bg-gray-800 text-gray-300 rounded-lg font-medium hover:bg-gray-700 transition"
+          class="flex items-center gap-2 px-4 py-2 btn-muted rounded-lg font-medium transition"
         >
           <ArrowDownTrayIcon class="w-4 h-4" />
           Import

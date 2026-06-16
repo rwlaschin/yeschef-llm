@@ -18,12 +18,6 @@ RUN npm install -g openclaw
 
 WORKDIR /app
 
-COPY package.json ./
-COPY worker/ ./worker/
-COPY docker/common/start.sh /start.sh
-
-RUN npm install && chmod +x /start.sh
-
 # Store models OUTSIDE /root/.ollama: the base ollama image declares that path as
 # a VOLUME, and Docker discards build-time writes to volume paths — so pulling
 # there leaves the model OUT of the image (cold starts would re-pull GBs every
@@ -31,7 +25,10 @@ RUN npm install && chmod +x /start.sh
 # applies at runtime, so `ollama serve` reads the baked model from the same path.
 ENV OLLAMA_MODELS=/models
 
-# Pull model at build time - baked into image, no cold-start pull.
+# Pull the model EARLY — BEFORE copying app code — so editing worker/ or config/
+# does NOT invalidate this expensive (multi-GB) layer. Docker's cache key for this
+# RUN includes the `<%= model %>` text, so it still re-pulls correctly when the
+# model tag itself changes — just not on every worker code edit.
 # IMPORTANT: a failed `ollama pull` MUST fail the build (don't mask it with
 # `|| true`, or you ship a model-less image that "built fine"). The `|| true`
 # is scoped to pkill only. After pull, assert the model is actually present.
@@ -44,6 +41,16 @@ RUN ollama serve & \
     ollama list | grep -q "<%= model %>" && \
     { pkill -f "ollama serve" || true; } && \
     sleep 2
+
+# App code LAST — these layers are cheap and change often, so a worker/config edit
+# rebuilds in seconds and REUSES the baked-model layer above. npm install keys off
+# package.json alone (copied first), so code edits don't trigger a reinstall either.
+COPY package.json ./
+RUN npm install
+COPY worker/ ./worker/
+COPY config/ ./config/
+COPY docker/common/start.sh /start.sh
+RUN chmod +x /start.sh
 
 ENV OLLAMA_MODEL=<%= model %>
 ENV OLLAMA_HOST=http://localhost:11434

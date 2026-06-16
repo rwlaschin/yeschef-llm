@@ -17,12 +17,12 @@
     </div>
 
     <!-- Intro / Docs Banner -->
-    <div class="flex items-start gap-2 mb-3 p-2 rounded bg-gray-800/40 border border-gray-700">
+    <div class="flex items-start gap-2 mb-3 p-2 rounded surface-2 border border-gray-200 dark:border-gray-700">
       <InformationCircleIcon class="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
-      <p class="text-xs text-gray-300 leading-relaxed">
+      <p class="text-xs text-secondary leading-relaxed">
         A tool lets the model call out to your code or services. The model reads the
-        <span class="text-gray-100 font-medium">name</span> + <span class="text-gray-100 font-medium">description</span>
-        to decide when to use it, then sends the <span class="text-gray-100 font-medium">parameters</span> you define.
+        <span class="text-strong font-medium">name</span> + <span class="text-strong font-medium">description</span>
+        to decide when to use it, then sends the <span class="text-strong font-medium">parameters</span> you define.
         <a href="https://docs.ollama.com/capabilities/tool-calling" target="_blank" class="text-amber-400 hover:text-amber-300 underline">Ollama tool-calling docs ↗</a>
       </p>
     </div>
@@ -31,13 +31,13 @@
       <!-- Row 1: Name + Type -->
       <div class="grid grid-cols-3 gap-2">
         <div class="col-span-2">
-          <label class="text-xs font-semibold text-gray-300 block mb-0.5">Tool Name *</label>
-          <input v-model="form.name" type="text" placeholder="search_recipes" class="w-full px-2 py-1 text-xs rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500" />
+          <label class="text-xs font-semibold text-secondary block mb-0.5">Tool Name *</label>
+          <input v-model="form.name" type="text" placeholder="search_recipes" class="w-full px-2 py-1 text-xs rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500" />
           <p class="text-[11px] text-gray-500 mt-0.5">snake_case identifier the model calls (e.g. <span class="font-mono">get_weather</span>)</p>
           <span v-if="errors.name" class="text-xs text-red-400">{{ errors.name }}</span>
         </div>
         <div>
-          <label class="text-xs font-semibold text-gray-300 block mb-0.5">Type *</label>
+          <label class="text-xs font-semibold text-secondary block mb-0.5">Type *</label>
           <Select v-model="form.type" :options="typeOptions" placeholder="Pick" />
           <p class="text-[11px] text-gray-500 mt-0.5">How it runs</p>
           <span v-if="errors.type" class="text-xs text-red-400">{{ errors.type }}</span>
@@ -46,22 +46,22 @@
 
       <!-- Row 2: Description -->
       <div>
-        <label class="text-xs font-semibold text-gray-300 block mb-0.5">Description *</label>
-        <textarea v-model="form.definition.description" placeholder="e.g. Search the recipe database by ingredients and dietary needs" class="w-full px-2 py-1 text-xs rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500 resize-none" rows="2" />
+        <label class="text-xs font-semibold text-secondary block mb-0.5">Description *</label>
+        <textarea v-model="form.definition.description" placeholder="e.g. Search the recipe database by ingredients and dietary needs" class="w-full px-2 py-1 text-xs rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500 resize-none" rows="2" />
         <p class="text-[11px] text-gray-500 mt-0.5">The model reads this to decide <em>when</em> to call the tool — be specific.</p>
         <span v-if="errors.description" class="text-xs text-red-400">{{ errors.description }}</span>
       </div>
 
       <!-- Type-Specific Implementation Config -->
       <!-- Pick-a-type hint -->
-      <div v-if="!form.type" class="border-t border-gray-700 pt-2">
+      <div v-if="!form.type" class="border-t border-gray-200 dark:border-gray-700 pt-2">
         <p class="text-xs text-gray-500 italic">Pick a Type above to configure how this tool runs.</p>
       </div>
 
-      <div v-if="form.type" class="border-t border-gray-700 pt-2 space-y-2">
+      <div v-if="form.type" class="border-t border-gray-200 dark:border-gray-700 pt-2 space-y-2">
         <!-- Section header (shared) -->
         <div class="flex items-center justify-between">
-          <span class="text-xs font-semibold text-gray-300">{{ typeMeta.label }}</span>
+          <span class="text-xs font-semibold text-secondary">{{ typeMeta.label }}</span>
           <a :href="typeMeta.docs" target="_blank" class="text-[11px] text-amber-400 hover:text-amber-300 underline">{{ typeMeta.docsLabel }} ↗</a>
         </div>
         <p class="text-[11px] text-gray-500">{{ typeMeta.help }}</p>
@@ -70,7 +70,7 @@
         <div v-if="form.type === 'api_call'" class="space-y-2">
           <div>
             <label class="text-[11px] text-gray-400 block mb-0.5">Endpoint URL *</label>
-            <input v-model="form.impl.endpoint" type="text" placeholder="https://api.example.com/search" class="w-full px-2 py-1 text-xs rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500" />
+            <input v-model="form.impl.endpoint" type="text" placeholder="https://api.example.com/search" class="w-full px-2 py-1 text-xs rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500" />
           </div>
           <div class="grid grid-cols-2 gap-2">
             <div>
@@ -84,7 +84,7 @@
           </div>
           <div v-if="form.impl.auth_type !== 'none'">
             <label class="text-[11px] text-gray-400 block mb-0.5">{{ form.impl.auth_type === 'bearer' ? 'Bearer Token *' : 'API Key *' }}</label>
-            <input v-model="form.impl.auth_value" type="password" placeholder="Stored securely" class="w-full px-2 py-1 text-xs rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500" />
+            <input v-model="form.impl.auth_value" type="password" placeholder="Stored securely" class="w-full px-2 py-1 text-xs rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500" />
           </div>
         </div>
 
@@ -97,12 +97,12 @@
             </div>
             <div>
               <label class="text-[11px] text-gray-400 block mb-0.5">Collection / Table *</label>
-              <input v-model="form.impl.collection" type="text" placeholder="recipes" class="w-full px-2 py-1 text-xs rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500" />
+              <input v-model="form.impl.collection" type="text" placeholder="recipes" class="w-full px-2 py-1 text-xs rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500" />
             </div>
           </div>
           <div>
             <label class="text-[11px] text-gray-400 block mb-0.5">Connection String *</label>
-            <input v-model="form.impl.connection" type="password" placeholder="mongodb://… (stored securely)" class="w-full px-2 py-1 text-xs rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500" />
+            <input v-model="form.impl.connection" type="password" placeholder="mongodb://… (stored securely)" class="w-full px-2 py-1 text-xs rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500" />
           </div>
         </div>
 
@@ -115,39 +115,39 @@
             </div>
             <div v-if="form.impl.service === 'custom'">
               <label class="text-[11px] text-gray-400 block mb-0.5">Endpoint *</label>
-              <input v-model="form.impl.endpoint" type="text" placeholder="https://…" class="w-full px-2 py-1 text-xs rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500" />
+              <input v-model="form.impl.endpoint" type="text" placeholder="https://…" class="w-full px-2 py-1 text-xs rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500" />
             </div>
           </div>
           <div>
             <label class="text-[11px] text-gray-400 block mb-0.5">API Key</label>
-            <input v-model="form.impl.api_key" type="password" placeholder="Optional — leave blank if not required" class="w-full px-2 py-1 text-xs rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500" />
+            <input v-model="form.impl.api_key" type="password" placeholder="Optional — leave blank if not required" class="w-full px-2 py-1 text-xs rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500" />
           </div>
         </div>
 
         <!-- Transform -->
         <div v-if="form.type === 'transform'">
           <label class="text-[11px] text-gray-400 block mb-0.5">Transformation Rules</label>
-          <textarea v-model="form.impl.transform_rules" placeholder="e.g. map results[].name → title, results[].url → link" class="w-full px-2 py-1 text-xs rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500 resize-none" rows="2" />
+          <textarea v-model="form.impl.transform_rules" placeholder="e.g. map results[].name → title, results[].url → link" class="w-full px-2 py-1 text-xs rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500 resize-none" rows="2" />
         </div>
 
         <!-- Custom -->
         <div v-if="form.type === 'custom'">
           <label class="text-[11px] text-gray-400 block mb-0.5">Implementation Notes</label>
-          <textarea v-model="form.impl.notes" placeholder="HTTP endpoint, serverless URL, or function name your code will dispatch to" class="w-full px-2 py-1 text-xs rounded bg-gray-800 text-white border border-gray-700 focus:border-amber-500 resize-none" rows="2" />
+          <textarea v-model="form.impl.notes" placeholder="HTTP endpoint, serverless URL, or function name your code will dispatch to" class="w-full px-2 py-1 text-xs rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-800 dark:text-white dark:border-gray-700 focus:border-amber-500 resize-none" rows="2" />
         </div>
       </div>
 
       <!-- Parameters (Compact) -->
-      <div v-if="form.type" class="border-t border-gray-700 pt-2">
+      <div v-if="form.type" class="border-t border-gray-200 dark:border-gray-700 pt-2">
         <div class="flex items-center justify-between mb-0.5">
-          <span class="text-xs font-semibold text-gray-300">Parameters</span>
+          <span class="text-xs font-semibold text-secondary">Parameters</span>
           <button type="button" @click="addParameter" class="text-xs text-amber-400 hover:text-amber-300">+ Add</button>
         </div>
         <p class="text-[11px] text-gray-500 mb-1.5">Inputs the model fills in when calling the tool. Mark <span class="font-mono">req</span> for ones it must always provide.</p>
 
         <div v-if="parametersList.length > 0" class="space-y-1">
           <div v-for="(param, idx) in parametersList" :key="idx" class="grid grid-cols-6 gap-1 items-center text-xs">
-            <input v-model="param.name" type="text" placeholder="name" class="col-span-2 px-1.5 py-1 rounded bg-gray-900 text-white border border-gray-700 focus:border-amber-500" />
+            <input v-model="param.name" type="text" placeholder="name" class="col-span-2 px-1.5 py-1 rounded bg-gray-100 text-gray-900 border border-gray-300 dark:bg-gray-900 dark:text-white dark:border-gray-700 focus:border-amber-500" />
             <div class="col-span-2">
               <Select v-model="param.type" :options="['string', 'number', 'integer', 'boolean', 'array']" />
             </div>
@@ -168,7 +168,7 @@
 
       <!-- Actions -->
       <div class="flex gap-2 justify-end pt-2 border-t border-gray-700">
-        <button type="button" @click="$emit('cancel')" class="px-3 py-1 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 text-xs font-medium">Cancel</button>
+        <button type="button" @click="$emit('cancel')" class="px-3 py-1 rounded btn-muted text-xs font-medium">Cancel</button>
 
         <!-- Create (new tool) -->
         <button v-if="!isEditing" type="submit" class="px-3 py-1 rounded bg-amber-500 text-gray-900 hover:bg-amber-600 text-xs font-medium">Create</button>
@@ -177,9 +177,9 @@
         <Menu v-else as="div" class="relative inline-flex">
           <button type="submit" class="px-3 py-1 rounded-l bg-amber-500 text-gray-900 hover:bg-amber-600 text-xs font-medium">Update</button>
           <MenuButton type="button" class="px-1.5 py-1 rounded-r bg-amber-600 text-gray-900 hover:bg-amber-700 text-xs font-medium border-l border-amber-700/40 flex items-center">▾</MenuButton>
-          <MenuItems class="absolute right-0 bottom-full mb-1.5 w-52 rounded-lg p-1 bg-gray-950 border border-gray-700/60 shadow-xl focus:outline-none z-50">
+          <MenuItems class="absolute right-0 bottom-full mb-1.5 w-52 rounded-lg p-1 bg-white border border-gray-200 dark:bg-gray-950 dark:border-gray-700/60 shadow-xl focus:outline-none z-50">
             <MenuItem v-slot="{ active }">
-              <button type="button" @click="handleSubmit(true)" :class="['w-full text-left px-2.5 py-2 rounded text-xs font-medium transition', active ? 'bg-amber-500/20 text-amber-300' : 'text-gray-200']">
+              <button type="button" @click="handleSubmit(true)" :class="['w-full text-left px-2.5 py-2 rounded text-xs font-medium transition', active ? 'bg-amber-500/20 text-amber-300' : 'text-secondary']">
                 Save as new version
                 <span class="block text-[10px] font-normal text-gray-400 mt-0.5">Creates v{{ (version || 0) + 1 }}, keeps v{{ version }}</span>
               </button>

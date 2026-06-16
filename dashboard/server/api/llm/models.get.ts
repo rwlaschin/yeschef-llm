@@ -8,5 +8,6 @@ export default defineEventHandler((event) => {
   const { env } = getQuery(event)
   const list = env === 'production' ? MODELS : devModels()
   // value = topic (what /api/llm/request expects as `model`)
-  return list.map((m: any) => ({ value: m.topic, label: m.label }))
+  // ctx = the model's max context window in tokens (capability ceiling; see config/models.js)
+  return list.map((m: any) => ({ value: m.topic, label: m.label, ctx: m.ctx }))
 })

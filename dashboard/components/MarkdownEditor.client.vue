@@ -1,5 +1,5 @@
 <template>
-  <div class="cm-wrap border border-gray-700/40 rounded-lg overflow-hidden">
+  <div class="cm-wrap border-divider rounded-lg overflow-hidden">
     <Codemirror
       v-model="model"
       :extensions="extensions"
@@ -27,9 +27,28 @@ const model = computed({
   set: (v) => emit('update:modelValue', v),
 })
 
-// Plain-text editor: dark theme + line wrapping only. No language/syntax pass
-// that could reinterpret YAML-ish structure or `#`.
-const extensions = [oneDark, EditorView.lineWrapping]
+const { isDark } = useTheme()
+
+// Light editor theme — readable dark text on white (oneDark is unreadable on a
+// light page). High-contrast body text, amber caret/selection to match the app.
+const lightTheme = EditorView.theme(
+  {
+    '&': { color: '#111827', backgroundColor: '#ffffff' },
+    '.cm-content': { caretColor: '#d97706' },
+    '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#d97706' },
+    '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection':
+      { backgroundColor: '#fde68a' },
+    '.cm-gutters': { backgroundColor: '#f9fafb', color: '#9ca3af', border: 'none' },
+    '.cm-activeLine': { backgroundColor: 'rgba(0,0,0,0.03)' },
+    '.cm-activeLineGutter': { backgroundColor: '#f3f4f6' },
+    '.cm-placeholder': { color: '#9ca3af' },
+  },
+  { dark: false }
+)
+
+// Theme follows the app toggle; line wrapping only — no language/syntax pass that
+// could reinterpret YAML-ish structure or `#`. Reactive so toggling re-themes live.
+const extensions = computed(() => [isDark.value ? oneDark : lightTheme, EditorView.lineWrapping])
 </script>
 
 <style scoped>

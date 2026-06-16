@@ -45,7 +45,7 @@
         </div>
 
         <!-- full prompt, shown verbatim (whitespace + indentation preserved) -->
-        <pre class="prompt-doc text-sm text-gray-300 whitespace-pre-wrap break-words">{{ display(p.content) }}</pre>
+        <pre class="prompt-doc text-sm text-secondary whitespace-pre-wrap break-words">{{ display(p.content) }}</pre>
       </article>
     </div>
   </div>

@@ -10,7 +10,7 @@ function getPubSubClient(projectId, environment) {
 
     if (environment === "local") {
       // Use emulator
-      process.env.PUBSUB_EMULATOR_HOST = "localhost:8085";
+      process.env.PUBSUB_EMULATOR_HOST = "localhost:8185";
     }
 
     const client = new PubSub({ projectId });

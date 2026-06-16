@@ -6,13 +6,13 @@
         <h2 class="text-lg font-serif text-primary mb-4">{{ title }}</h2>
 
         <!-- Message -->
-        <p class="text-sm text-gray-300 mb-6">{{ message }}</p>
+        <p class="text-sm text-secondary mb-6">{{ message }}</p>
 
         <!-- Action Buttons -->
         <div class="flex gap-3 justify-end">
           <button
             @click="cancel"
-            class="px-4 py-2 rounded bg-gray-800 text-gray-300 hover:bg-gray-700 transition font-medium"
+            class="px-4 py-2 rounded btn-muted transition font-medium"
           >
             Cancel
           </button>
