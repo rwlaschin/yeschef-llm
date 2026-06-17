@@ -63,6 +63,7 @@ ai.addContentTypeParser("application/json", {}, (req, payload, done) => {
 // ---- Route table (lazy) ------------------------------------
 ai.post("/plan", lazy(() => import("./entry/ai/plan.js"), "post"));    // UI/YesChef launch a plan
 ai.post("/menu", lazy(() => import("./entry/ai/menu.js"), "post"));    // UI: compose a Menu Plan (no planner) → run step 0
+ai.post("/query", lazy(() => import("./entry/ai/query.js"), "post"));  // UI chat copilot: single-shot query (orchestrator owns the topic)
 ai.get("/steps", lazy(() => import("./entry/ai/steps.js"), "list"));   // Step Library list (Mongo plan_library)
 ai.post("/steps", lazy(() => import("./entry/ai/steps.js"), "post"));  // Step Library writes (Mongo plan_library)
 // Re-run an EXISTING plan without re-running the planner (hard-deletes the right run range,

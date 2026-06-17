@@ -14,7 +14,8 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { processDay } from "./lib/inventory.js";
 // Single source of truth (config/models.js, copied into the image + mounted in dev) — the
 // planner's subtype list and default tools live here, NOT hardcoded in the worker.
-import { SUBTYPES, DEFAULT_TOOLS, MODELS, unitDocId, defaultSampler, temperatureForStyle, DEFAULT_STYLE, STYLE_TEMPS } from "../config/models.js";
+import { SUBTYPES, DEFAULT_TOOLS, MODELS, unitDocId, defaultSampler, temperatureForStyle, DEFAULT_STYLE, STYLE_TEMPS, FAKE_SUBSCRIPTION } from "../config/models.js";
+import { cannedResponse } from "./cannedResponses.js";
 // Step builders live under steps/ — one file per step kind (see worker/ARCHITECTURE.md).
 // Pure / dependency-injected modules, unit-tested in steps/*.test.js.
 import { buildMessages, buildStepMessages, sizeNumCtx, TerminalError } from "./steps/step.js";
@@ -857,20 +858,29 @@ async function handleMessage(message) {
     // Run the generation behind the in-process gate so we never run more concurrent generations
     // than Ollama has run-slots (excess queues here while its lease auto-extends). release() in a
     // `finally` so a throw still frees the slot; correctness across workers stays in the CAS below.
-    if (genGate.waiting > 0 || genGate.active >= genGate.max) {
-      console.log(`[worker]   ${jobId} waiting for a generation slot (${genGate.active}/${genGate.max} busy, ${genGate.waiting} queued)`);
-    }
-    const releaseGen = await genGate.acquire();
     let fullResponse;
-    try {
-      fullResponse = useGateway
-        ? await chatViaOpenClaw(messages, flusher.push.bind(flusher))
-        : allowTools
-          ? await chatWithTools(messages, flusher.push.bind(flusher), numCtx, assignedTools, genStyle)
-          : await chatNoTools(messages, flusher.push.bind(flusher), numCtx, genStyle);
+    if (payload.fake) {
+      // Fake/canned topic: no model, no generation gate, no delay. Return canned output
+      // by subtype and stream it through the SAME flusher → Firestore path.
+      fullResponse = cannedResponse(payload.subtype, payload);
+      flusher.push(fullResponse);
       await flusher.flush();
-    } finally {
-      releaseGen();
+      console.log(`[worker]   ${jobId} FAKE canned response (subtype=${payload.subtype}, ${fullResponse.length} chars)`);
+    } else {
+      if (genGate.waiting > 0 || genGate.active >= genGate.max) {
+        console.log(`[worker]   ${jobId} waiting for a generation slot (${genGate.active}/${genGate.max} busy, ${genGate.waiting} queued)`);
+      }
+      const releaseGen = await genGate.acquire();
+      try {
+        fullResponse = useGateway
+          ? await chatViaOpenClaw(messages, flusher.push.bind(flusher))
+          : allowTools
+            ? await chatWithTools(messages, flusher.push.bind(flusher), numCtx, assignedTools, genStyle)
+            : await chatNoTools(messages, flusher.push.bind(flusher), numCtx, genStyle);
+        await flusher.flush();
+      } finally {
+        releaseGen();
+      }
     }
 
     // ── DEBUG 3: the final output the model produced ──
@@ -969,6 +979,9 @@ async function main() {
   // (e.g. a stray space) AND make us subscribe to a name Pub/Sub doesn't have. Pass through
   // exactly as given — a malformed name should fail loudly, not be silently patched.
   const subscriptionNames = SUBSCRIPTION_NAME.split(',');
+  // Every non-prod worker also drains the shared fake/canned subscription so a fake job's
+  // steps get canned responses without a dedicated worker. (Prod never sets fake:true.)
+  if (!IS_PROD && !subscriptionNames.includes(FAKE_SUBSCRIPTION)) subscriptionNames.push(FAKE_SUBSCRIPTION);
 
   for (const subName of subscriptionNames) {
     const subscription = pubsub.subscription(subName, {

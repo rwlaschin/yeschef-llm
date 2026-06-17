@@ -31,13 +31,18 @@ export default defineEventHandler(async (event) => {
   try {
     const collectionName = process.env.NUXT_PUBLIC_FIRESTORE_COLLECTION_RESULTS || 'llmResults'
     const db = getFirestoreDb()
-    // Delete the Job result AND its Menu plan. A menu job saves its inputs to menuPlans/{jobId}
-    // (same id); deleting only the result would orphan that doc. menuPlans is absent for non-menu
-    // jobs, so the second delete is a harmless no-op — which lets BOTH the menu page and the
-    // Requests page reuse this one endpoint and never leave a plan behind.
+    const jobRef = db.collection(collectionName).doc(jobId)
+    // Delete the Job result AND its Menu plan. A menu job saves its inputs to
+    // companies/{companyId}/menuPlans/{jobId} (path-scoped tenant). companyId rides the
+    // llmResults doc, so read it first; the plan delete is skipped for non-menu jobs (no
+    // companyId) — lets BOTH the menu page and the Requests page reuse this one endpoint.
+    const snap = await jobRef.get()
+    const companyId = snap.exists ? snap.data()?.companyId : null
     await Promise.all([
-      db.recursiveDelete(db.collection(collectionName).doc(jobId)),
-      db.recursiveDelete(db.collection('menuPlans').doc(jobId)),
+      db.recursiveDelete(jobRef),
+      companyId
+        ? db.recursiveDelete(db.collection('companies').doc(companyId).collection('menuPlans').doc(jobId))
+        : Promise.resolve(),
     ])
     return { jobId, deleted: true }
   } catch (err: any) {

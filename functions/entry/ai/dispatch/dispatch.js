@@ -9,6 +9,7 @@
 import { PubSub } from "@google-cloud/pubsub";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { renderUnit } from "../compose.js";
+import { FAKE_TOPIC } from "../../../../config/models.js";
 
 let _pubsub;
 function pubsub() {
@@ -65,7 +66,11 @@ export async function dispatchStep(jobId, step, opts = {}) {
   const db = getFirestore();
   const jobRef = db.collection("llmResults").doc(jobId);
   const jobSnap = await jobRef.get();
-  const plan = (jobSnap.exists ? jobSnap.data().plan : null) || [];
+  const job = jobSnap.exists ? jobSnap.data() : {};
+  const plan = job.plan || [];
+  // A fake job dispatches to the canned topic instead of the step's real model — the worker
+  // returns canned output (no Ollama) via the same write path. Everything else is identical.
+  const fake = job.fake === true;
   const def = plan[step];
   if (!def) {
     console.error(`[ai/dispatch] jobId=${jobId} step=${step} — no plan[${step}] entry; cannot dispatch`);
@@ -96,8 +101,8 @@ export async function dispatchStep(jobId, step, opts = {}) {
       // and hand it to the worker via `query`, which it renders as-is. An orchestrator-authored
       // `query` (e.g. a retry directive) still wins over the per-unit render.
       const unitQuery = query != null ? query : (Array.isArray(def.items) ? renderUnit(def, i) : null);
-      const id = await pubsub().topic(def.model).publishMessage({
-        json: { jobId, step, unit: i, attempt, type: "step", model: def.model, tools: def.tools || [], ...(def.style ? { style: def.style } : {}), ...(report ? { report } : {}), ...(unitQuery != null ? { query: unitQuery } : {}) },
+      const id = await pubsub().topic(fake ? FAKE_TOPIC : def.model).publishMessage({
+        json: { jobId, step, unit: i, attempt, type: "step", model: def.model, subtype: def.subtype, tools: def.tools || [], ...(fake ? { fake: true } : {}), ...(def.style ? { style: def.style } : {}), ...(report ? { report } : {}), ...(unitQuery != null ? { query: unitQuery } : {}) },
       });
       msgIds.push(id);
     }
@@ -113,7 +118,7 @@ export async function dispatchStep(jobId, step, opts = {}) {
     throw err; // other errors may be transient → let Pub/Sub retry
   }
   const tag = `${report ? "" : " (debug/no-report)"}${attempt ? ` retry#${attempt}` : ""}`;
-  console.log(`[ai/dispatch] jobId=${jobId} step=${step} kind=${def.kind} subtype=${def.subtype} → ${count} unit(s) [0..${count - 1}] on "${def.model}"${tag} (pubsub msgIds: ${msgIds.join(",")})`);
+  console.log(`[ai/dispatch] jobId=${jobId} step=${step} kind=${def.kind} subtype=${def.subtype} → ${count} unit(s) [0..${count - 1}] on "${fake ? FAKE_TOPIC : def.model}"${fake ? " (FAKE)" : ""}${tag} (pubsub msgIds: ${msgIds.join(",")})`);
 }
 
 // Branch on step kind → unit count. fanout/chain → items; chunks → groups; aggregation → 1 combine.

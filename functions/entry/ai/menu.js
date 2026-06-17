@@ -142,7 +142,8 @@ async function composeMenuPlan(form = {}) {
 }
 
 export async function post(req, reply) {
-  const { userId, companyId, values, duration, residents, flags, costTier, location, enabled, dietWeights, jobId: reuseJobId } = req.body || {};
+  const { userId, companyId, values, duration, residents, flags, costTier, location, enabled, dietWeights, jobId: reuseJobId, fake } = req.body || {};
+  const isFake = fake === true;   // dev/test: dispatch steps to the canned topic, not the model
 
   // Location is OPTIONAL and IS an IANA timezone — the single source of truth. When set, derive region
   // + hemisphere (season) and stamp "now" in its tz (compose stays pure). When unset/unknown, leave
@@ -212,7 +213,7 @@ export async function post(req, reply) {
     await hardDeleteRuns(jobRef, isStepRun);
     await jobRef.set({
       model: jobModel, message: summary, userPrompt: summary, plan, stepCount: plan.length,
-      cursor: 0, status: "running", failedSteps: [], attempts: {}, outcome: null,
+      cursor: 0, status: "running", failedSteps: [], attempts: {}, outcome: null, fake: isFake,
     }, { merge: true });
   } else {
     await jobRef.set({
@@ -220,12 +221,14 @@ export async function post(req, reply) {
       // deviate — a menu has no free-text prompt, so it carries the human summary.
       jobId, userId, companyId, model: jobModel, type: "menu",
       message: summary, userPrompt: summary, plan, stepCount: plan.length, cursor: 0,
-      status: "running", createdAt: FieldValue.serverTimestamp(),
+      status: "running", fake: isFake, createdAt: FieldValue.serverTimestamp(),
     });
   }
   // Save/refresh the FORM INPUTS doc (id = jobId) so the dashboard can reload this plan into the form.
   // Results live in llmResults/{jobId}; this carries the inputs + the jobId link. Client never writes here.
-  await db.collection("menuPlans").doc(jobId).set({
+  // Company-scoped BY PATH (companies/{companyId}/menuPlans) — the tenant boundary is structural,
+  // and the history read is a single-field orderBy(createdAt) with NO composite index.
+  await db.collection("companies").doc(companyId).collection("menuPlans").doc(jobId).set({
     jobId, userId, companyId, message: summary,
     input: {
       values: values || {}, duration: duration || {}, residents,

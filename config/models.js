@@ -63,6 +63,14 @@ export const MODELS = [
 
 export const subscriptionOf = (m) => `sub_${m.topic}`;
 export const deadLetterOf   = (m) => `dead_letter_${m.topic}`;
+
+// Fake/canned transport. When a job carries `fake:true`, the orchestrator dispatches
+// steps to THIS topic instead of the step's real model topic; the worker returns canned
+// output (no Ollama) via the SAME Firestore write path. One shared topic — no per-model
+// fakes, no client-side simulation, no artificial delay.
+export const FAKE_TOPIC        = "fake_canned_v1";
+export const FAKE_SUBSCRIPTION = `sub_${FAKE_TOPIC}`;
+export const FAKE_DEAD_LETTER  = `dead_letter_${FAKE_TOPIC}`;
 // Version slug = the topic made name-safe for Docker/GCE (which reject underscores):
 // llama3_1_8b_v1 → llama3-1-8b-v1. Single source of truth for every infra name.
 export const slugOf         = (m) => m.topic.replace(/_/g, "-");

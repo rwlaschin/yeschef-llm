@@ -4,7 +4,7 @@
 // ============================================================
 
 import { PubSub } from "@google-cloud/pubsub";
-import { MODELS, subscriptionOf, deadLetterOf } from "../config/models.js";
+import { MODELS, subscriptionOf, deadLetterOf, FAKE_TOPIC, FAKE_SUBSCRIPTION, FAKE_DEAD_LETTER } from "../config/models.js";
 
 const DEFAULT_SUB_CONFIG = {
   // Base redelivery window. PROD stays short (40s) so a preempted SPOT VM's in-flight
@@ -82,5 +82,16 @@ export async function setup(projectId, models = MODELS) {
     });
     console.log();
   }
+  // Fake/canned transport — one shared topic + subscription for dev/test canned responses.
+  console.log(`[Fake canned]`);
+  await ensureTopic(FAKE_DEAD_LETTER);
+  await ensureTopic(FAKE_TOPIC);
+  await ensureSubscription({
+    ...DEFAULT_SUB_CONFIG,
+    topic: FAKE_TOPIC,
+    subscription: FAKE_SUBSCRIPTION,
+    deadLetter: FAKE_DEAD_LETTER,
+  });
+  console.log();
   console.log("Pub/Sub ready.\n");
 }

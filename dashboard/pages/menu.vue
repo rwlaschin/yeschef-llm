@@ -115,6 +115,7 @@ onMounted(() => {
       .filter((r) => r.type === 'menu')
       .map((r) => ({
         id: r.jobId || r.id,
+        companyId: r.companyId || '',
         message: r.message || '',
         status: r.status || 'pending',
         createdAt: r.createdAt?.toMillis?.() ?? 0,
@@ -127,8 +128,10 @@ const select = async (id) => {
   selected.value = id; bind(id); tab.value = 'results'
   // Load the saved inputs so the form is prefilled for edit/rerun (read-only get; the client never writes).
   try {
-    const snap = await getDoc(doc(getDb(), 'menuPlans', id))
-    preset.value = snap.exists() ? { jobId: id, input: snap.data().input } : null
+    // menuPlans is path-scoped under the company (companies/{companyId}/menuPlans/{jobId}).
+    const cid = history.value.find((h) => h.id === id)?.companyId
+    const snap = cid ? await getDoc(doc(getDb(), 'companies', cid, 'menuPlans', id)) : null
+    preset.value = snap?.exists() ? { jobId: id, input: snap.data().input } : null
   } catch { preset.value = null }
 }
 const onCreated = (jobId) => { selected.value = jobId; bind(jobId); tab.value = 'results' }

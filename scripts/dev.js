@@ -22,6 +22,7 @@ import crypto from "node:crypto";
 import fs from "fs";
 import ejs from "ejs";
 import { setup as setupPubSub } from "../pubsub/setup.js";
+import { killEmulators } from "./kill-emulators.js";
 import { devModels, subscriptionOf, imageOf, containerOf } from "../config/models.js";
 
 dotenvFlow.config();
@@ -235,6 +236,14 @@ async function main() {
   //    subscription would otherwise block the waker from starting a fresh worker.
   removeWorkerContainers();
 
+  // 0a. Free any emulator ports a prior run orphaned. A crash, a hard Ctrl-C, or a
+  //     Docker-down exit can leave the firebase emulator (and its detached `java`
+  //     child) bound to its port with no clean handle — which makes the NEXT
+  //     `npm run dev` die with "port taken". Clearing them here makes startup
+  //     self-healing, the same way removeWorkerContainers() handles stale workers.
+  const freed = killEmulators();
+  if (freed) console.log("Freed orphaned emulator port holder(s) from a prior run.");
+
   // 0b. The orchestrator (/ai) runs in the functions emulator alongside Pub/Sub.
   //     Install its deps on first run (the emulator needs functions/node_modules).
   if (!fs.existsSync("functions/node_modules")) {
@@ -322,7 +331,7 @@ async function main() {
   const ex = available[0]; // derive the example from the actual dev model — never hard-code
   console.log("\nSend a test job (publishes to the emulator topic):");
   console.log(`  PUBSUB_EMULATOR_HOST=${PUBSUB_EMULATOR_HOST} gcloud pubsub topics publish ${ex.topic} \\`);
-  console.log(`    --message='{"jobId":"test-1","query":"List foods safe for a diabetic diet"}' \\`);
+  console.log(`    --message='{"jobId":"test-1","query":"Please give me a random greeting in any language"}' \\`);
   console.log(`    --project=${GCP_PROJECT_ID}`);
   console.log(`\nRe-test cold start any time with:  docker stop ${containerName(ex)}\n`);
 }

@@ -1,31 +1,31 @@
 // ============================================================
 // Kill Emulators - tear down any running Firebase emulators.
 //
-// Reads the emulator ports from firebase.json when present, and falls back to
-// Firebase's documented default port for any emulator not pinned in config.
-// Then finds and kills whatever process is listening on each of those ports.
-//
-// Why by-port (not `firebase emulators:stop`): a hard-killed `npm run dev`, an
-// orphaned java child, or a crashed run can leave emulators bound to their ports
-// with no clean handle to stop them. Killing the port holder always works.
+// Shutdown order:
+//   1. SIGTERM all port holders
+//   2. Wait up to 15s for graceful shutdown
+//   3. SIGKILL only for processes still holding ports
 //
 // Usage:
-//   npm run kill:emulators            # kill all configured/default emulators
-//   node scripts/kill-emulators.js --dry-run   # show what would be killed
+//   npm run kill:emulators
+//   node scripts/kill-emulators.js --dry-run
 // ============================================================
 
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { execSync } from "child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const FIREBASE_JSON = path.join(__dirname, "..", "firebase.json");
+const PROJECT_ROOT = path.join(__dirname, "..");
+const FIREBASE_JSON = path.join(PROJECT_ROOT, "firebase.json");
 
-const dryRun = process.argv.includes("--dry-run");
+// --- Alimenta (yeschef-llm): match `firebase emulators:start --only=pubsub,functions`
+const ACTIVE_EMULATORS = ["functions", "pubsub", "hub", "logging", "ui"];
+const LEGACY_PORTS = [];
+const EXPORT_DIR = null;
+const RESTART_HINT = "npm run dev";
 
-// Firebase's documented default emulator ports — used for an emulator that's
-// declared in firebase.json but omits its port. (https://firebase.google.com/docs/emulator-suite)
 const DEFAULT_PORTS = {
   hub: 4400,
   logging: 4500,
@@ -43,14 +43,10 @@ const DEFAULT_PORTS = {
   extensions: 5001,
 };
 
-// If firebase.json can't be read, scope to this conservative set rather than
-// scanning every default port — several Firebase defaults (e.g. hosting :5000)
-// collide with unrelated services (macOS AirPlay), and we must never kill those.
-const FALLBACK_EMULATORS = ["firestore", "hub", "logging"];
+const FALLBACK_EMULATORS = ["functions", "pubsub", "hub", "logging"];
+const GRACEFUL_WAIT_MS = 15000;
+const POLL_MS = 500;
 
-// Resolve { emulatorName: port } to target. The SET of emulators comes from
-// firebase.json (only what this project actually runs); each port is the
-// configured value, or the documented Firebase default if the entry omits one.
 function resolvePorts() {
   let config = null;
   try {
@@ -60,24 +56,18 @@ function resolvePorts() {
   }
 
   const ports = {};
+  const emulatorNames = config ? ACTIVE_EMULATORS : FALLBACK_EMULATORS;
 
-  if (!config) {
-    for (const name of FALLBACK_EMULATORS) ports[name] = DEFAULT_PORTS[name];
-    return ports;
-  }
-
-  for (const [name, entry] of Object.entries(config)) {
-    // Skip non-emulator settings (e.g. singleProjectMode: true) and anything we
-    // have no default for and that doesn't pin its own port.
+  for (const name of emulatorNames) {
+    const entry = config?.[name];
     const configured = entry && typeof entry.port === "number" ? entry.port : null;
     if (configured === null && !(name in DEFAULT_PORTS)) continue;
     ports[name] = configured ?? DEFAULT_PORTS[name];
   }
+
   return ports;
 }
 
-// PIDs listening on a TCP port (empty if none). lsof exits non-zero when there's
-// no match, which execSync throws on — that's the "nothing here" case.
 function pidsOnPort(port) {
   try {
     return execSync(`lsof -ti tcp:${port}`, { stdio: ["ignore", "pipe", "ignore"] })
@@ -87,28 +77,158 @@ function pidsOnPort(port) {
   }
 }
 
-function main() {
-  const ports = resolvePorts();
-  let killedAny = false;
+function sleep(ms) {
+  execSync(`sleep ${ms / 1000}`);
+}
 
-  for (const [name, port] of Object.entries(ports)) {
-    const pids = pidsOnPort(port);
-    if (pids.length === 0) continue;
-
-    killedAny = true;
-    if (dryRun) {
-      console.log(`Would kill ${name} emulator on :${port} (pid ${pids.join(", ")})`);
-      continue;
-    }
+function removeFirebaseDebugLogs(dryRun) {
+  const dirs = [PROJECT_ROOT, path.join(PROJECT_ROOT, "functions")];
+  const removed = [];
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
     try {
-      execSync(`kill -9 ${pids.join(" ")}`, { stdio: "ignore" });
-      console.log(`Killed ${name} emulator on :${port} (pid ${pids.join(", ")})`);
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.startsWith("firebase-debug") && entry.name.endsWith(".log")) {
+          const logPath = path.join(dir, entry.name);
+          if (!dryRun) fs.unlinkSync(logPath);
+          removed.push(logPath);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return removed;
+}
+
+function emulatorsRunning(ports) {
+  return Object.values(ports).some((port) => pidsOnPort(port).length > 0);
+}
+
+function exportEmulatorData(ports, dryRun) {
+  if (!EXPORT_DIR) return false;
+
+  const hubPort = ports.hub;
+  if (!hubPort || pidsOnPort(hubPort).length === 0) {
+    console.log("Emulator hub not running — skip export.");
+    return false;
+  }
+
+  if (dryRun) {
+    console.log(`Would export emulator data → ${EXPORT_DIR}`);
+    return true;
+  }
+
+  console.log(`Exporting emulator data → ${EXPORT_DIR} ...`);
+  try {
+    execSync(`firebase emulators:export "${EXPORT_DIR}" --force`, {
+      cwd: PROJECT_ROOT,
+      stdio: "inherit",
+      timeout: 180000,
+    });
+    console.log("Export complete.");
+    return true;
+  } catch (err) {
+    console.warn(`Export failed (${err.message}). Relying on SIGTERM export-on-exit.`);
+    return false;
+  }
+}
+
+function collectTargets(portEntries) {
+  const targets = [];
+  for (const [name, port] of portEntries) {
+    for (const pid of pidsOnPort(port)) {
+      targets.push({ name, port, pid });
+    }
+  }
+  return targets;
+}
+
+function anyPortHeld(portEntries) {
+  return portEntries.some(([, port]) => pidsOnPort(port).length > 0);
+}
+
+function shutdownPorts(portEntries, { dryRun, label = "" }) {
+  const targets = collectTargets(portEntries);
+  if (targets.length === 0) return false;
+
+  const tag = label ? `${label} ` : "";
+  const uniquePids = [...new Set(targets.map((t) => t.pid))];
+
+  if (dryRun) {
+    for (const { name, port, pid } of targets) {
+      console.log(`Would SIGTERM ${tag}${name} on :${port} (pid ${pid}), then SIGKILL if still up after ${GRACEFUL_WAIT_MS / 1000}s`);
+    }
+    return true;
+  }
+
+  for (const pid of uniquePids) {
+    try {
+      process.kill(Number(pid), "SIGTERM");
+      console.log(`Sent SIGTERM to pid ${pid}`);
     } catch (err) {
-      console.warn(`Failed to kill ${name} emulator on :${port}: ${err.message}`);
+      console.warn(`SIGTERM failed for pid ${pid}: ${err.message}`);
     }
   }
 
-  if (!killedAny) console.log("No running emulators found on the configured/default ports.");
+  const deadline = Date.now() + GRACEFUL_WAIT_MS;
+  while (Date.now() < deadline) {
+    if (!anyPortHeld(portEntries)) {
+      console.log("Emulators shut down gracefully.");
+      return true;
+    }
+    sleep(POLL_MS);
+  }
+
+  const survivors = collectTargets(portEntries);
+  if (survivors.length === 0) return true;
+
+  console.warn(`Grace period expired — sending SIGKILL to ${survivors.length} stubborn process(es).`);
+  const killedPids = new Set();
+  for (const { name, port, pid } of survivors) {
+    if (killedPids.has(pid)) continue;
+    killedPids.add(pid);
+    try {
+      process.kill(Number(pid), "SIGKILL");
+      console.log(`Sent SIGKILL to ${tag}${name} on :${port} (pid ${pid})`);
+    } catch (err) {
+      console.warn(`SIGKILL failed for ${tag}${name} on :${port} (pid ${pid}): ${err.message}`);
+    }
+  }
+
+  return true;
 }
 
-main();
+export function killEmulators({ dryRun = false } = {}) {
+  const ports = resolvePorts();
+  const portEntries = Object.entries(ports);
+  const legacyEntries = LEGACY_PORTS.map((port) => [`legacy:${port}`, port]);
+
+  console.log("Emulators to clear:", Object.keys(ports).join(", "));
+
+  if (emulatorsRunning(ports)) {
+    exportEmulatorData(ports, dryRun);
+  }
+
+  const stopped =
+    shutdownPorts(portEntries, { dryRun })
+    || shutdownPorts(legacyEntries, { dryRun, label: "legacy" });
+
+  const removedLogs = removeFirebaseDebugLogs(dryRun);
+  if (removedLogs.length) {
+    const prefix = dryRun ? "Would remove" : "Removed";
+    console.log(`${prefix} firebase-debug log(s):`, removedLogs.join(", "));
+  }
+
+  if (!stopped) {
+    console.log("No running emulators found on the configured/default ports.");
+  } else if (!dryRun) {
+    console.log(`Restart with: ${RESTART_HINT}`);
+  }
+
+  return stopped;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  killEmulators({ dryRun: process.argv.includes("--dry-run") });
+}
