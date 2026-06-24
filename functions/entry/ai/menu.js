@@ -142,7 +142,7 @@ async function composeMenuPlan(form = {}) {
 }
 
 export async function post(req, reply) {
-  const { userId, companyId, values, duration, residents, flags, costTier, location, enabled, dietWeights, jobId: reuseJobId, fake } = req.body || {};
+  const { userId, companyId, values, duration, residents, flags, costTier, location, enabled, dietWeights, jobId: reuseJobId, fake, planId, stepId } = req.body || {};
   const isFake = fake === true;   // dev/test: dispatch steps to the canned topic, not the model
 
   // Location is OPTIONAL and IS an IANA timezone — the single source of truth. When set, derive region
@@ -230,6 +230,9 @@ export async function post(req, reply) {
   // and the history read is a single-field orderBy(createdAt) with NO composite index.
   await db.collection("companies").doc(companyId).collection("menuPlans").doc(jobId).set({
     jobId, userId, companyId, message: summary,
+    // Reverse link → the Mongo meal_plan (PLAN CONFIG) + which step this build is for.
+    // Forward link is meal_plan.steps[].jobId; together they bind config ↔ build both ways.
+    ...(planId ? { planId } : {}), ...(stepId ? { stepId } : {}),
     input: {
       values: values || {}, duration: duration || {}, residents,
       flags: flags || {}, costTier: costTier || "", location: location || "",

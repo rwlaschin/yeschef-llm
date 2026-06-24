@@ -148,6 +148,7 @@ const { success, error: showError } = useToast()
 const { env } = useEnvironment()
 const cfg = useRuntimeConfig().public
 const aiBase = computed(() => String(env.value === 'production' ? cfg.aiBaseUrl : cfg.aiBaseUrlLocal).replace(/\/$/, ''))
+const { getToken } = useAuth()
 
 const inputEntries = MENU_ENTRIES.filter((e) => e.group === 'input')
 const bodyEntries = MENU_ENTRIES.filter((e) => e.group === 'body')
@@ -352,7 +353,7 @@ const submit = async () => {
       enabled: { ...enabled },
       ...(reran ? { jobId: loadedJobId.value } : {}), // rerun → recompose & re-run THIS job in place
     }
-    const { jobId } = await $fetch(`${aiBase.value}/menu`, { method: 'POST', timeout: 15000, body })
+    const { jobId } = await $fetch(`${aiBase.value}/menu`, { method: 'POST', timeout: 15000, body, headers: { Authorization: `Bearer ${await getToken()}` } })
     success(reran ? 'Rerun started' : 'Menu plan launched', `${reran ? 'Plan' : 'Job'} ${jobId.slice(0, 8)}…`)
     emit(reran ? 'rerun' : 'created', jobId)
     // The form now matches the saved plan again → button flips back to Rerun (clean).

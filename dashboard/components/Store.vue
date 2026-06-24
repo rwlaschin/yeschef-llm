@@ -741,12 +741,12 @@
 
       </div>
 
-      <!-- GraphQL: Full-Featured Explorer -->
-      <div v-if="selectedDb === 'GraphQL'" class="flex flex-col gap-4 h-full">
+      <!-- Neo4j: GraphQL Explorer (schema introspection + visualizer + query) -->
+      <div v-if="selectedDb === 'Neo4j'" class="flex flex-col gap-4 h-full">
         <div class="panel p-4 space-y-3">
           <div class="flex items-center justify-between">
             <div class="text-xs text-secondary font-semibold">Neo4j GraphQL</div>
-            <div class="text-xs text-muted">{{ graphqlEndpoint.replace('https://', '').replace('/graphql/', '') }}</div>
+            <div class="text-xs text-muted">{{ neo4jHost }}</div>
           </div>
           <div class="flex gap-2">
             <button
@@ -758,8 +758,7 @@
             </button>
             <button
               @click="showVisualizer = !showVisualizer"
-              :disabled="!introspection"
-              class="flex-1 px-3 py-2 text-xs font-medium rounded-lg btn-muted disabled:opacity-50 hover:text-primary transition"
+              class="flex-1 px-3 py-2 text-xs font-medium rounded-lg btn-muted hover:text-primary transition"
             >
               {{ showVisualizer ? 'Hide Graph' : 'View Graph' }}
             </button>
@@ -768,7 +767,7 @@
               :disabled="loadingGraphql || !graphqlQuery"
               class="flex-1 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-gray-900 font-bold rounded-lg transition"
             >
-              {{ loadingGraphql ? '...' : 'Execute' }}
+              {{ loadingGraphql ? '...' : 'Run Query' }}
             </button>
           </div>
           <div v-if="graphqlQueryHistory.length > 0" class="flex items-center gap-2">
@@ -790,19 +789,9 @@
           </div>
         </div>
 
-        <!-- Schema Graph Visualizer -->
-        <div v-if="showVisualizer" class="flex-1 panel overflow-clip rounded-lg min-h-0">
-          <div v-if="graphNodes && Object.keys(graphNodes).length > 0" class="w-full h-full">
-            <v-network-graph
-              :nodes="graphNodes"
-              :edges="graphEdges"
-              :configs="graphConfig"
-              class="w-full h-full"
-            />
-          </div>
-          <div v-else class="flex items-center justify-center h-full text-muted">
-            <div class="text-xs text-center">Load schema first to view graph</div>
-          </div>
+        <!-- Data graph explorer (Neo4j Workspace Explore-style) -->
+        <div v-if="showVisualizer" class="flex-1 min-h-0">
+          <GraphExplorer :env="storeEnv" />
         </div>
 
         <!-- Query Editor + Results -->
@@ -845,7 +834,7 @@ import { getIntrospectionQuery } from 'graphql'
 import { VNetworkGraph } from 'v-network-graph'
 import 'v-network-graph/lib/style.css'
 
-const databases = ['MongoDB', 'Firestore', 'GraphQL']
+const databases = ['MongoDB', 'Firestore', 'Neo4j']
 const selectedDb = ref('MongoDB')
 
 // MongoDB
@@ -981,6 +970,8 @@ const graphqlEndpoint = computed(() =>
     ? (rtConfig.public.graphqlEndpointProd || rtConfig.public.graphqlEndpoint)
     : rtConfig.public.graphqlEndpoint
 )
+// Neo4j GraphQL runs server-side via @neo4j/graphql over the Bolt driver (the app's connection).
+const neo4jHost = computed(() => (graphqlEndpoint.value || '').replace(/^https?:\/\//, '').replace(/\/graphql\/?$/, '').replace(/\/$/, ''))
 const graphqlQuery = ref('')
 const graphqlQueryHistory = ref([])
 const graphqlData = ref(null)

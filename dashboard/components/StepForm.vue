@@ -184,7 +184,7 @@
               <div class="font-medium text-secondary mb-1">Variables</div>
               <ul class="space-y-0.5 font-mono">
                 <li>{{residents}} {{days}} {{weeks}} — numbers</li>
-                <li>{{diets}} {{legals}} {{restrictions}} {{institution}} {{meals}} — lists</li>
+                <li>{{diets}} {{legals}} {{restrictions}} {{preferences}} {{institution}} {{meals}} — lists</li>
                 <li>{{dietsRaw}} {{legalsRaw}} … — same, as strings</li>
                 <li>{{value}} / {{valueList}} — this step's own input</li>
                 <li>{{costTier}} — the cost tier</li>
@@ -253,7 +253,7 @@ const modelOptions = MODELS.map((m) => ({ value: m.topic, label: m.label }))
 const prodModelOptions = [{ value: '', label: '— same as Model (no override) —' }, ...modelOptions]
 const flagOptions = MENU_FLAGS.map((f) => f.key)
 // Required Inputs offers the actual FORM FIELDS (STATIC_FIELDS) — no derived/duplicate values. The chip
-// fields (institution/legals/diets/restrictions) also GATE the step (skipped if empty/off); the rest
+// fields (institution/legals/diets/restrictions/preferences) also GATE the step (skipped if empty/off); the rest
 // (residents, costTier, flags) are always present, so selecting them is just "this step uses it".
 // Derived vars (days, date, season, region…) aren't here — they're in the Handlebars help panel.
 const CHIP_LABELS = Object.fromEntries(MENU_ENTRIES.filter((e) => e.group === 'input').map((e) => [e.key, e.label]))

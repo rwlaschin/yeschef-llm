@@ -1,0 +1,35 @@
+{
+  "_id": "6a2caac3817b5236ffd8bb7b",
+  "subtype": "menu_plan",
+  "kind": "fanout",
+  "active": true,
+  "requiredFlags": [],
+  "context": [
+    "Fetch Legal "
+  ],
+  "tools": [
+    "web_search",
+    "web_fetch"
+  ],
+  "order": "r",
+  "mapOf": "days as |day|",
+  "inputs": [
+    "institution",
+    "diets",
+    "restrictions",
+    "legals",
+    "meals"
+  ],
+  "name": "Build Seasonal Menus",
+  "fail": "Any of: a missing meal; a meal that does not give every diet ({{join diets \", \"}}) its own suitable dish; a meal with no beverages; a banned or restricted ingredient present; a legal/safety or {{costTier}} budget violation; an out-of-season item for {{season (date day)}}{{#if flags.pureed}}; or any dish with an ingredient that will not puree smooth{{/if}}.",
+  "pass": "For day {{day}}: every meal ({{join meals \", \"}}) is present, and within each meal EVERY diet ({{join diets \", \"}}) has its own suitable dish — never one dish covering all diets. Each meal includes appropriate beverages. No banned or restricted ingredient appears. Every dish stays within the legal and food-safety requirements in the context above and within the {{costTier}} budget, and uses produce in season for {{season (date day)}}{{#if flags.pureed}}; every dish uses only blendable ingredients — nothing with bones, shells, pits, hard seeds, or gristle{{/if}}.",
+  "instruction": "Plan day {{day}} of {{itemCount}} ({{date day}}) for {{residents}} residents at a {{join institution \", \"}} facility — provide {{join Meals \", \"}}.\n\nHonor EVERY diet: {{join diets \", \"}}. Stay within the legal and food-safety requirements in the context above. Keep it within a {{costTier}} budget.\nResidents per diet: {{#each (allocate diets residents) as |d|}}{{d.diet}} {{d.demand}}{{#unless @last}}, {{/unless}}{{/each}} (total {{residents}}).\n{{#if (season (date day))}}\nUse produce that is in season for {{season (date day)}}{{#if region}} in {{region}}{{/if}}.\n{{/if}}\n{{#if region}}{{#eq (weekday (date day)) \"Friday\"}}\nMake today's dinner a {{region}} regional theme.\n{{/eq}}{{/if}}\n{{#if flags.pureed}}\nEvery dish must be safe to blend — use only ingredients that can go in a blender (no bones, shells, pits, hard seeds, gristle, or anything that won't puree smooth).\n{{/if}}\n\nThe only functions you may call are: {{join tools \", \"}}. Never call or emit a function/tool call for any other name (e.g. meal_plan, menu_planner) — output your meal plan as plain YAML content, not as a {\"name\": ..., \"parameters\": ...} object.\n",
+  "failStep": "",
+  "successStep": "",
+  "includeInOutput": true,
+  "model": "llama3_1_8b_v1",
+  "createdAt": "2026-06-13T00:56:35.768Z",
+  "updatedAt": "2026-06-15T02:27:53.107Z",
+  "modelProd": "llama3_3_70b_v1",
+  "style": "structured"
+}

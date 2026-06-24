@@ -83,6 +83,10 @@ export default defineNuxtConfig({
       graphqlEndpointProd: process.env.GRAPHQL_ENDPOINT_PROD,
       firebaseApiKey: process.env.NUXT_PUBLIC_FIREBASE_API_KEY,
       firebaseAuthDomain: process.env.NUXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+      // Main yeschef app base URL. Account creation (org + plan onboarding) lives ONLY there, so the
+      // dashboard's "Create account" links out to <appUrl>/signup. Empty until a prod app exists →
+      // the link is hidden (no dead link in dev). Set NUXT_PUBLIC_APP_URL when the app is deployed.
+      appUrl: process.env.NUXT_PUBLIC_APP_URL || "",
     },
   },
   hooks: {

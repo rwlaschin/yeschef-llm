@@ -545,6 +545,12 @@ function parseTextToolCall(content, toolDefs) {
 async function chatWithTools(initialMessages, onChunk, numCtx, toolDefs = TOOLS, style = DEFAULT_STYLE) {
   const messages = [...initialMessages];
   const maxRounds = parseInt(MAX_TOOL_ROUNDS, 10) || 4;
+  // Allow-list of tools actually offered THIS step. Weak/quantized models invent tool names
+  // (often mirroring a snake_case token from the prompt). We can't stop them emitting the call,
+  // but we refuse to run it AND we never hand back a tool-result that would make the model think
+  // the phantom tool is real — see the rejection branch below.
+  const validNames = new Set(toolDefs.map((t) => t.function.name));
+  const realList = [...validNames].join(", ") || "none";
   const sampler = samplerForStyle(await getSampler(), style, await getStyleTemps()); // DB base + per-style temperature
   for (let round = 0; round < maxRounds; round++) {
     const { content, toolCalls: structured } = await chatRound(messages, toolDefs, onChunk, numCtx, { sampler });
@@ -559,6 +565,14 @@ async function chatWithTools(initialMessages, onChunk, numCtx, toolDefs = TOOLS,
       messages.push({ role: "assistant", content, tool_calls: toolCalls });
     }
     for (const call of toolCalls) {
+      // Invented tool — don't execute, and DON'T echo a tool-result (that makes the model believe
+      // the phantom worked and call it again). Answer the dangling tool_call with an explicit
+      // rejection naming the only real tools, so it self-corrects to a valid tool or answers.
+      if (!validNames.has(call.function.name)) {
+        console.warn(`  rejected invented tool: ${call.function.name} (real: ${realList})`);
+        messages.push({ role: "tool", tool_name: call.function.name, content: JSON.stringify({ error: `No tool named "${call.function.name}" exists. The ONLY available tools are: ${realList}. Do not call any other tool — use one of these or answer directly.` }) });
+        continue;
+      }
       let raw;
       try {
         raw = await executeTool(call.function.name, call.function.arguments || {});

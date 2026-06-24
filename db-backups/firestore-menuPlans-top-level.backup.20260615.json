@@ -1,0 +1,170 @@
+[
+  {
+    "id": "0550b87d-6890-44bf-a9db-3db3afa7967c",
+    "data": {
+      "jobId": "0550b87d-6890-44bf-a9db-3db3afa7967c",
+      "input": {
+        "costTier": "institution",
+        "duration": {
+          "weeks": 1,
+          "endDate": "2026-06-19",
+          "days": 7,
+          "businessDaysOnly": false,
+          "startDate": "2026-06-13"
+        },
+        "values": {
+          "legals": "CMS",
+          "institution": "Senior Care",
+          "restrictions": "no nuts,no grapefruit,no cranberries",
+          "diets": "regular,renal,vegetarian",
+          "meals": "breakfast,lunch,dinner"
+        },
+        "flags": {
+          "business_days": false,
+          "pureed": true
+        },
+        "residents": 300,
+        "location": "America/Los_Angeles",
+        "dietWeights": {
+          "renal": 8,
+          "vegetarian": 8,
+          "regular": 50
+        },
+        "enabled": {
+          "legals": true,
+          "institution": true,
+          "nutrition": false,
+          "compliance": true,
+          "recipe": true,
+          "restrictions": true,
+          "order_form": false,
+          "inventory": false,
+          "menu": true,
+          "diets": true,
+          "meals": true
+        }
+      },
+      "createdAt": {
+        "_seconds": 1781367401,
+        "_nanoseconds": 233000000
+      },
+      "companyId": "6a211cddffba3ef1cbfc06dd",
+      "message": "Menu plan · 1w · 300 residents · Senior Care · regular,renal,vegetarian",
+      "userId": "6a211ceaffba3ef1cbfc06de"
+    },
+    "subcollections": {}
+  },
+  {
+    "id": "5edb5db6-6d95-4a07-a98b-b6429366ad5a",
+    "data": {
+      "jobId": "5edb5db6-6d95-4a07-a98b-b6429366ad5a",
+      "input": {
+        "costTier": "institution",
+        "duration": {
+          "weeks": 1,
+          "endDate": "2026-06-19",
+          "days": 7,
+          "businessDaysOnly": false,
+          "startDate": "2026-06-13"
+        },
+        "values": {
+          "legals": "CMS",
+          "institution": "Senior Care",
+          "restrictions": "no nuts,no grapefruit,no cranberries",
+          "diets": "regular,renal,vegetarian",
+          "meals": "breakfast,lunch,dinner"
+        },
+        "flags": {
+          "business_days": false,
+          "pureed": true
+        },
+        "residents": 300,
+        "location": "America/Los_Angeles",
+        "dietWeights": {
+          "renal": 8,
+          "vegetarian": 8,
+          "regular": 50
+        },
+        "enabled": {
+          "legals": true,
+          "institution": true,
+          "nutrition": false,
+          "compliance": true,
+          "recipe": false,
+          "restrictions": true,
+          "order_form": false,
+          "inventory": false,
+          "menu": true,
+          "diets": true,
+          "meals": true
+        }
+      },
+      "createdAt": {
+        "_seconds": 1781362823,
+        "_nanoseconds": 868000000
+      },
+      "companyId": "6a211cddffba3ef1cbfc06dd",
+      "message": "Menu plan · 1w · 300 residents · Senior Care · regular,renal,vegetarian",
+      "userId": "6a211ceaffba3ef1cbfc06de"
+    },
+    "subcollections": {}
+  },
+  {
+    "id": "90ed7a31-4b8e-46d3-a84f-7d59d43ee6ae",
+    "data": {
+      "jobId": "90ed7a31-4b8e-46d3-a84f-7d59d43ee6ae",
+      "input": {
+        "costTier": "institution",
+        "duration": {
+          "weeks": 2,
+          "endDate": "2026-06-27",
+          "days": 14,
+          "businessDaysOnly": false,
+          "startDate": "2026-06-14"
+        },
+        "values": {
+          "legals": "FDA Food Code,CMS",
+          "institution": "Senior Care",
+          "restrictions": "no nuts,no grapefruit,no cranberries,seasonal",
+          "diets": "regular,diabetic,low-sodium,renal,gluten-free,vegetarian",
+          "meals": "breakfast,lunch,dinner"
+        },
+        "flags": {
+          "business_days": false,
+          "pureed": true
+        },
+        "residents": 300,
+        "location": "",
+        "dietWeights": {
+          "renal": 8,
+          "diabetic": 15,
+          "low-sodium": 12,
+          "vegetarian": 8,
+          "regular": 50,
+          "gluten-free": 5
+        },
+        "enabled": {
+          "legals": true,
+          "institution": true,
+          "nutrition": true,
+          "compliance": true,
+          "recipe": true,
+          "restrictions": true,
+          "order_form": true,
+          "inventory": true,
+          "menu": true,
+          "diets": true,
+          "meals": true
+        }
+      },
+      "createdAt": {
+        "_seconds": 1781469565,
+        "_nanoseconds": 978000000
+      },
+      "companyId": "6a211cddffba3ef1cbfc06dd",
+      "message": "Menu plan · 2w · 300 residents · Senior Care · regular,diabetic,low-sodium,renal,gluten-free,vegetarian",
+      "userId": "6a211ceaffba3ef1cbfc06de"
+    },
+    "subcollections": {}
+  }
+]

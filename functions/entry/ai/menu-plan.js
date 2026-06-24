@@ -42,6 +42,16 @@ export const MENU_ENTRIES = [
     roles: ["request"],
   },
   {
+    // Resident food preferences/likes (free text, comma-separated) — what residents WANT, distinct
+    // from `restrictions` (what they must avoid). Surfaced to templates as {{preferences}}. OPTIONAL,
+    // so defaultEnabled:false — an empty enabled input would block submit (MenuForm empty-field gate).
+    key: "preferences", label: "Preferences", group: "input", field: "chips", defaultEnabled: false,
+    default: [],
+    options: ["comfort foods", "home-style cooking", "fresh fruit daily", "soups", "salads", "ethnic variety", "desserts", "seafood", "grilled", "baked goods"],
+    subtype: "query", kind: "fanout", includeInResults: true, contextsFrom: [],
+    roles: ["request"],
+  },
+  {
     // Meals to build, in TIME-OF-DAY order (the option order = display order). Fan a step over them
     // with `meals as |meal|`. Default = the three standard meals.
     key: "meals", label: "Meals", group: "input", field: "chips", defaultEnabled: true,
@@ -52,6 +62,31 @@ export const MENU_ENTRIES = [
   },
 
   // ── BODY entries — fixed pipeline; toggle to skip ──
+  {
+    // Protein backbone — the first step of the new flow. Its own toggle key so a build can compose
+    // JUST this step (enable protein_grid, disable the rest) → a one-step plan. defaultEnabled false
+    // so normal menu builds don't pick it up. Fans out one unit per diet (mapOf "diets as |diet|").
+    key: "protein_grid", label: "Protein Grid", group: "body", defaultEnabled: false,
+    subtype: "protein_grid", kind: "fanout", includeInResults: true,
+    contextsFrom: [],
+    roles: ["request"],
+  },
+  {
+    // Dish layer on the protein backbone. Own toggle key + contextsFrom:[] so a build can
+    // compose JUST this step (enable recipes, disable the rest), exactly like protein_grid.
+    key: "recipes", label: "Recipes", group: "body", defaultEnabled: false,
+    subtype: "recipes", kind: "fanout", includeInResults: true,
+    contextsFrom: [],
+    roles: ["request"],
+  },
+  {
+    // Per-meal nutrient totals. Own toggle key + contextsFrom:[] so a build can compose JUST
+    // this step (enable nutrients, disable the rest), exactly like protein_grid.
+    key: "nutrients", label: "Nutrients", group: "body", defaultEnabled: false,
+    subtype: "nutrients", kind: "fanout", includeInResults: true,
+    contextsFrom: [],
+    roles: ["request"],
+  },
   {
     key: "compliance", label: "Compliance", group: "body", defaultEnabled: true,
     subtype: "compliance", kind: "fanout", includeInResults: true,
@@ -123,4 +158,4 @@ export const LOCATIONS = (typeof Intl.supportedValuesOf === "function" ? Intl.su
 // direct user inputs. DERIVED values are deliberately excluded (they'd duplicate the form field): days/
 // weeks come from Duration, date/time/region/hemisphere from Location. Those are still usable in
 // templates via the {{…}} helpers — listed in the Handlebars help panel, not selected here.
-export const STATIC_FIELDS = ["institution", "legals", "diets", "restrictions", "meals", "residents", "costTier", "flags"];
+export const STATIC_FIELDS = ["institution", "legals", "diets", "restrictions", "preferences", "meals", "residents", "costTier", "flags"];

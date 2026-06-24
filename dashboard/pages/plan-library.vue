@@ -83,9 +83,11 @@ const toast = useToast()
 const { env } = useEnvironment()
 const cfg = useRuntimeConfig().public
 const aiBase = computed(() => String(env.value === 'production' ? cfg.aiBaseUrl : cfg.aiBaseUrlLocal).replace(/\/$/, ''))
-const writeStep = (body) => $fetch(`${aiBase.value}/steps`, { method: 'POST', body })
+const { getToken } = useAuth()
+const authHdr = async () => ({ Authorization: `Bearer ${await getToken()}` })
+const writeStep = async (body) => $fetch(`${aiBase.value}/steps`, { method: 'POST', body, headers: await authHdr() })
 const fetchSteps = async () => {
-  try { steps.value = await $fetch(`${aiBase.value}/steps`) }
+  try { steps.value = await $fetch(`${aiBase.value}/steps`, { headers: await authHdr() }) }
   catch (e) { toast.error('Failed to load steps', e.data?.error || e.message) }
 }
 

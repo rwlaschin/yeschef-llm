@@ -102,7 +102,7 @@ export async function dispatchStep(jobId, step, opts = {}) {
       // `query` (e.g. a retry directive) still wins over the per-unit render.
       const unitQuery = query != null ? query : (Array.isArray(def.items) ? renderUnit(def, i) : null);
       const id = await pubsub().topic(fake ? FAKE_TOPIC : def.model).publishMessage({
-        json: { jobId, step, unit: i, attempt, type: "step", model: def.model, subtype: def.subtype, tools: def.tools || [], ...(fake ? { fake: true } : {}), ...(def.style ? { style: def.style } : {}), ...(report ? { report } : {}), ...(unitQuery != null ? { query: unitQuery } : {}) },
+        json: { jobId, step, unit: i, attempt, type: "step", model: def.model, subtype: def.subtype, tools: def.tools || [], ...(fake ? { fake: true, item: Array.isArray(def.items) ? def.items[i] : null, ctx: { days: def.renderCtx?.days, meals: def.renderCtx?.meals } } : {}), ...(def.style ? { style: def.style } : {}), ...(report ? { report } : {}), ...(unitQuery != null ? { query: unitQuery } : {}) },
       });
       msgIds.push(id);
     }

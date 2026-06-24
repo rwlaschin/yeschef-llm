@@ -17,6 +17,9 @@ import Fastify from "fastify";
 import fastifyCors from "@fastify/cors";
 import fastifyMultipart from "@fastify/multipart";
 import { lazy } from "./lib/lazy.js";
+import { requireAuth } from "./lib/auth.js";
+import { validateBody } from "./lib/validate.js";
+import { menuSchema, planSchema, querySchema, stepsWriteSchema, jobIdSchema } from "./entry/ai/schemas.js";
 
 if (!getApps().length) initializeApp(); // ADC on Cloud Run
 
@@ -60,19 +63,25 @@ ai.addContentTypeParser("application/json", {}, (req, payload, done) => {
   }
 });
 
+// ---- Auth gate ---------------------------------------------
+// Verify a Firebase ID token on every route except /health + /events (Pub/Sub push).
+ai.addHook("preHandler", requireAuth);
+
 // ---- Route table (lazy) ------------------------------------
-ai.post("/plan", lazy(() => import("./entry/ai/plan.js"), "post"));    // UI/YesChef launch a plan
-ai.post("/menu", lazy(() => import("./entry/ai/menu.js"), "post"));    // UI: compose a Menu Plan (no planner) → run step 0
-ai.post("/query", lazy(() => import("./entry/ai/query.js"), "post"));  // UI chat copilot: single-shot query (orchestrator owns the topic)
+// requireAuth (global preHandler above) runs first on every route; validateBody is a
+// per-route preHandler that AJV-checks the JSON body. /events (Pub/Sub) + /health stay open.
+ai.post("/plan", { preHandler: validateBody(planSchema) }, lazy(() => import("./entry/ai/plan.js"), "post"));    // UI/YesChef launch a plan
+ai.post("/menu", { preHandler: validateBody(menuSchema) }, lazy(() => import("./entry/ai/menu.js"), "post"));    // UI: compose a Menu Plan (no planner) → run step 0
+ai.post("/query", { preHandler: validateBody(querySchema) }, lazy(() => import("./entry/ai/query.js"), "post"));  // UI chat copilot: single-shot query
 ai.get("/steps", lazy(() => import("./entry/ai/steps.js"), "list"));   // Step Library list (Mongo plan_library)
-ai.post("/steps", lazy(() => import("./entry/ai/steps.js"), "post"));  // Step Library writes (Mongo plan_library)
+ai.post("/steps", { preHandler: validateBody(stepsWriteSchema) }, lazy(() => import("./entry/ai/steps.js"), "post"));  // Step Library writes (Mongo plan_library)
 // Re-run an EXISTING plan without re-running the planner (hard-deletes the right run range,
 // server-side). Static /resume/plan resolves before the :step param routes (Fastify precedence).
-ai.post("/rebuild", lazy(() => import("./entry/ai/resume.js"), "rebuild"));    // DEV: re-parse existing planner output → run step 0 (no planner re-run)
-ai.post("/resume/plan", lazy(() => import("./entry/ai/resume.js"), "plan"));  // wipe all step runs, run step 0
-ai.post("/resume/:step", lazy(() => import("./entry/ai/resume.js"), "next")); // wipe >N, publish N's finish
-ai.post("/run/:step", lazy(() => import("./entry/ai/resume.js"), "run"));     // DEBUG: run ONE step isolated (report:null, no cascade)
-ai.post("/events", lazy(() => import("./entry/ai/events.js"), "post")); // `orchestrate` topic push
+ai.post("/rebuild", { preHandler: validateBody(jobIdSchema) }, lazy(() => import("./entry/ai/resume.js"), "rebuild"));    // DEV: re-parse existing planner output → run step 0 (no planner re-run)
+ai.post("/resume/plan", { preHandler: validateBody(jobIdSchema) }, lazy(() => import("./entry/ai/resume.js"), "plan"));  // wipe all step runs, run step 0
+ai.post("/resume/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import("./entry/ai/resume.js"), "next")); // wipe >N, publish N's finish
+ai.post("/run/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import("./entry/ai/resume.js"), "run"));     // DEBUG: run ONE step isolated (report:null, no cascade)
+ai.post("/events", lazy(() => import("./entry/ai/events.js"), "post")); // `orchestrate` topic push (Pub/Sub OIDC, body = Google envelope)
 ai.get("/health", () => ({ status: "ok" }));                            // liveness probe (dashboard health panel)
 
 ai.setNotFoundHandler((_req, reply) => reply.code(404).send({ error: "Not found" }));

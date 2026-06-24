@@ -3,24 +3,29 @@
 // safe under SSR too; they're only *used* on the client branch below.
 import { initializeApp, getApps, getApp } from 'firebase/app'
 import { getFirestore } from 'firebase/firestore'
+import { getAuth } from 'firebase/auth'
 
 let clientDb: any = null
 let serverDb: any = null
 
+// Shared client Firebase app (Firestore + Auth use the same one).
+function getClientApp() {
+  const config = useRuntimeConfig()
+  const firebaseConfig: any = { projectId: config.public.gcpProjectId || 'yeschef-c572a' }
+  if (config.public.firebaseApiKey) firebaseConfig.apiKey = config.public.firebaseApiKey
+  if (config.public.firebaseAuthDomain) firebaseConfig.authDomain = config.public.firebaseAuthDomain
+  return getApps().length ? getApp() : initializeApp(firebaseConfig)
+}
+
+// Client Firebase Auth (browser only; null on the server).
+export function getClientAuth() {
+  if (!process.client) return null
+  return getAuth(getClientApp())
+}
+
 export function getDb() {
   if (process.client) {
-    if (!clientDb) {
-      const config = useRuntimeConfig()
-      const firebaseConfig: any = {
-        projectId: config.public.gcpProjectId || 'yeschef-c572a',
-      }
-      // Include the web API key/authDomain if configured (needed for some setups).
-      if (config.public.firebaseApiKey) firebaseConfig.apiKey = config.public.firebaseApiKey
-      if (config.public.firebaseAuthDomain) firebaseConfig.authDomain = config.public.firebaseAuthDomain
-
-      const app = getApps().length ? getApp() : initializeApp(firebaseConfig)
-      clientDb = getFirestore(app)
-    }
+    if (!clientDb) clientDb = getFirestore(getClientApp())
     return clientDb
   }
 

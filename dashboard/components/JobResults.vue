@@ -201,6 +201,8 @@ const toggleStep = (s) => { manualStep[s.index] = !stepOpen(s) }
 const cfg = useRuntimeConfig().public
 const { env } = useEnvironment()
 const aiBase = computed(() => String(env.value === 'production' ? cfg.aiBaseUrl : cfg.aiBaseUrlLocal).replace(/\/$/, ''))
+const { getToken } = useAuth()
+const authHdr = async () => ({ Authorization: `Bearer ${await getToken()}` })
 
 const planReady = computed(() => Array.isArray(job.value?.plan) && job.value.plan.length > 0)
 const hasPlanner = computed(() => !!plan.value)
@@ -210,7 +212,7 @@ async function call(path) {
   if (busy.value) return
   busy.value = true
   try {
-    await $fetch(`${aiBase.value}/${path}`, { method: 'POST', timeout: 15000, body: { jobId: props.jobId } })
+    await $fetch(`${aiBase.value}/${path}`, { method: 'POST', timeout: 15000, body: { jobId: props.jobId }, headers: await authHdr() })
   } catch (e) {
     console.error(`[ui/job] ${path} failed:`, e)
   } finally {
@@ -227,7 +229,7 @@ async function runRebuild() {
   if (busy.value) return
   busy.value = true
   try {
-    await $fetch(`${aiBase.value}/rebuild`, { method: 'POST', timeout: 15000, body: { jobId: props.jobId } })
+    await $fetch(`${aiBase.value}/rebuild`, { method: 'POST', timeout: 15000, body: { jobId: props.jobId }, headers: await authHdr() })
   } catch (e) {
     console.error('[ui/job] rebuild failed:', e)
   } finally {

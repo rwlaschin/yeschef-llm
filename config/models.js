@@ -89,6 +89,9 @@ export const byTopic        = (topic) => MODELS.find((m) => m.topic === topic);
 // the planner's subtypes list from this), the dashboard, pubsub/scripts all read from here.
 export const SUBTYPES = [
   { name: "menu_plan",   description: "Build a meal plan across the required diets, days, and meals." },
+  { name: "protein_grid", description: "Assign ONE protein (type + cut) per day and mealtime for a single diet, gated by cost tier and regional availability — the protein backbone the menu is built on. Fans out one unit per diet." },
+  { name: "recipes", description: "Write a reduced recipe (protein, starch, vegetable, fruit) for each day and mealtime of a single diet — the dish layer built on the protein backbone. Fans out one unit per diet." },
+  { name: "nutrients", description: "Produce per-meal nutrient totals (calories, protein g, sodium mg, carbs g) for each day and mealtime of a single diet. Fans out one unit per diet." },
   { name: "recipe",      description: "Write a full recipe — ingredients and method — for a dish." },
   { name: "nutrition",   description: "Produce nutrition information for an item, recipe, or meal." },
   { name: "inventory",   description: "Determine storage, quantities, and inventory needs." },

@@ -207,12 +207,16 @@ function parseMapOf(mapOf) {
 }
 
 // Build the render context shared by every step, plus per-step value/valueList overlaid per def.
-// form shape: { values:{institution,legals,diets,restrictions}, duration:{weeks,businessDaysOnly,days},
+// form shape: { values:{institution,legals,diets,restrictions,preferences,meals}, duration:{weeks,businessDaysOnly,days},
 //               residents, flags:{pureed:bool}, costTier, enabled:{<name>:bool}, model }
 function baseContext(form) {
   const values = form.values || {};
   const duration = form.duration || {};
-  const days = Math.max(1, Number(duration.days) || 7);
+  // days = explicit override, else derived from the plan duration: weeks × 5 (weekdays
+  // only) or × 7 (full week). The grid/canned output emits one column per day, so a
+  // 6-week weekdays plan → 30 days. Falls back to one week when no duration is set.
+  const weeks = Number(duration.weeks) || 0;
+  const days = Math.max(1, Number(duration.days) || (weeks ? weeks * (duration.businessDaysOnly ? 5 : 7) : 7));
   return {
     // input lists — both array AND raw string forms available to templates
     institution: toList(values.institution),
@@ -223,12 +227,14 @@ function baseContext(form) {
     dietsRaw: values.diets || "",
     restrictions: toList(values.restrictions),
     restrictionsRaw: values.restrictions || "",
+    preferences: toList(values.preferences),
+    preferencesRaw: values.preferences || "",
     meals: toList(values.meals),
     mealsRaw: values.meals || "",
     // scalars / shared
     residents: Math.max(1, Number(form.residents) || 1),
     days,
-    weeks: Number(duration.weeks) || 0,
+    weeks,
     businessDaysOnly: !!duration.businessDaysOnly,
     costTier: form.costTier || "",
     flags: form.flags || {},
@@ -268,7 +274,7 @@ export function composeFromDefs(stepDefs, form, opts = {}) {
 
   // Per-step fan-out items + per-unit var names, resolved up front so a `chain` step can INHERIT them
   // from the one earlier step it names (its context[0]) — same fan-out 1:1, no mapOf of its own.
-  const SINGULAR = { institution: "institution", legals: "legal", diets: "diet", restrictions: "restriction", meals: "meal" };
+  const SINGULAR = { institution: "institution", legals: "legal", diets: "diet", restrictions: "restriction", preferences: "preference", meals: "meal" };
   const itemsByName = {}, itemVarsByName = {};
   for (const def of stepDefs) {
     if (def.kind === "chain") {

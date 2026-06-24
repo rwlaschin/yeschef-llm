@@ -28,6 +28,11 @@
 
         <!-- Right Side Controls -->
         <div class="flex items-center gap-6">
+          <!-- Account -->
+          <ClientOnly>
+            <button v-if="authUser" @click="onLogout" :title="authUser.email || 'Sign out'"
+              class="text-sm text-secondary hover:text-primary transition-colors">Sign out</button>
+          </ClientOnly>
           <!-- Status Dot -->
           <ClientOnly>
             <div class="relative group cursor-pointer" @click="navigateTo('/config')" title="Open settings">
@@ -138,6 +143,9 @@
 import { Bars3Icon, XMarkIcon } from '@heroicons/vue/24/outline'
 
 const { isDark, toggleTheme } = useTheme()
+
+const { user: authUser, logout } = useAuth()
+const onLogout = async () => { await logout(); navigateTo('/login') }
 
 // Nav links — single source, rendered both in the desktop bar and the mobile menu so they can't drift.
 const links = [

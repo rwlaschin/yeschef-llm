@@ -617,6 +617,7 @@ const submitRequest = async () => {
     const { jobId } = await $fetch(planUrl, {
       method: 'POST',
       timeout: 15000,
+      headers: { Authorization: `Bearer ${await useAuth().getToken()}` },
       body: {
         userId: selectedUserId.value,
         companyId: selectedCompanyId.value,

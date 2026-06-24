@@ -23,7 +23,7 @@ import fs from "fs";
 import ejs from "ejs";
 import { setup as setupPubSub } from "../pubsub/setup.js";
 import { killEmulators } from "./kill-emulators.js";
-import { devModels, subscriptionOf, imageOf, containerOf } from "../config/models.js";
+import { devModels, subscriptionOf, imageOf, containerOf, FAKE_SUBSCRIPTION } from "../config/models.js";
 
 dotenvFlow.config();
 
@@ -319,6 +319,23 @@ async function main() {
     TAVILY_API_KEY: process.env.TAVILY_API_KEY, // optional web_search pool provider
     OPENCLAW_GATEWAY_TOKEN, // shared token for the OpenClaw gateway (gateway tiers)
     DEPLOY_ENV: "dev", // worker loads inactive prompt_library entries too in dev
+  });
+
+  // 4b. Fake/canned worker — a bare node worker (no Docker, no Ollama) that drains the shared
+  //     fake subscription and returns canned responses. Fake jobs (fake:true) must NOT wake a
+  //     heavy model container, so they get their own lightweight runner that's always up. Boots
+  //     on Mongo + Pub/Sub only; Ollama is never touched on the canned path (see worker/index.js).
+  start("Fake worker", "node", ["worker/index.js"], {
+    PUBSUB_EMULATOR_HOST,
+    GCP_PROJECT_ID,
+    FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID,
+    SUBSCRIPTION_NAME: FAKE_SUBSCRIPTION,
+    MONGO_URI,
+    MONGO_DB,
+    MONGO_COLLECTION,
+    OLLAMA_MODEL: "canned",            // log-only on the fake path; the model is never called
+    OLLAMA_HOST: "http://127.0.0.1:0", // unused on the fake path
+    DEPLOY_ENV: "dev",
   });
 
   console.log("\n=== Dev environment ready ===");
