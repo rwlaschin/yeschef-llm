@@ -3,6 +3,13 @@ import { fileURLToPath } from "node:url";
 export default defineNuxtConfig({
   compatibilityDate: "2026-05-28",
   ssr: true,
+  app: {
+    head: {
+      title: "YesChef Orchestrator",
+      link: [{ rel: "icon", type: "image/svg+xml", href: "/favicon.svg" }],
+      meta: [{ name: "theme-color", content: "#f5a623" }],
+    },
+  },
   // Shared model registry lives in the parent infra repo (single source of truth).
   // Alias keeps the import clean + refactor-safe instead of a brittle ../../../../ path.
   alias: {

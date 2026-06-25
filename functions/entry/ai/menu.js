@@ -110,14 +110,13 @@ async function composeMenuPlan(form = {}) {
   // Only the CHIP inputs can be empty/off, so only THEY gate a step. Always-present scalars a step may
   // also list (residents, days, costTier, date, …) live outside `values` and never gate (they're just
   // referenced in the template) — without this, selecting `residents` as an input would drop the step.
-  const CHIP_INPUTS = new Set(MENU_ENTRIES.filter((e) => e.group === "input").map((e) => e.key));
   const dropReason = (def) => {
     const toggleKey = toggleKeyForSubtype[def.subtype];
     if (toggleKey && enabled[toggleKey] === false) return `'${toggleKey}' toggled off`;
     const missingFlag = (def.requiredFlags || []).find((f) => !flags[f]);
     if (missingFlag) return `required flag '${missingFlag}' not set`;
-    const badInput = (def.inputs || []).find((inp) => enabled[inp] === false || (CHIP_INPUTS.has(inp) && !values[inp]));
-    if (badInput) return enabled[badInput] === false ? `input '${badInput}' disabled` : `input '${badInput}' empty`;
+    const disabledInput = (def.inputs || []).find((inp) => enabled[inp] === false);
+    if (disabledInput) return `input '${disabledInput}' disabled`;
     return null;
   };
   console.log(`[ai/menu DRY-RUN] ── FILTER (DB order; disabling a data field drops its steps) ──`);
@@ -135,10 +134,7 @@ async function composeMenuPlan(form = {}) {
     console.log(`  ✗ drop  ${r.name} — needs earlier step(s) [${r.context.join(", ")}], none kept`);
   }
 
-  // Prod = the deployed function (the emulator sets FUNCTIONS_EMULATOR=true). Production-model
-  // overrides on steps apply only here; dev and dry-runs use each step's base Model.
-  const isProd = process.env.FUNCTIONS_EMULATOR !== "true";
-  return { plan: composeFromDefs(kept, form, { isProd }) };
+  return { plan: composeFromDefs(kept, form) };
 }
 
 export async function post(req, reply) {
