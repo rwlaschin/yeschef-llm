@@ -26,6 +26,9 @@
 //         the KV cache: a 12B at 256K needs ~24GB+, far past a 16GB box).
 // ============================================================
 
+// OCR
+// Qwen OCR	GLM OCR / Document Parser	glm-ocr
+
 export const MODELS = [
   // Llama dev tier — Llama 3.1 8B (`llama3.1:8b`, ~5GB Q4). It's the largest *modern* Llama
   // that fits a 16–20GB budget: the dense family jumps 8B → 70B with nothing in between, and

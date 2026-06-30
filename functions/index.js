@@ -82,6 +82,7 @@ ai.post("/resume/plan", { preHandler: validateBody(jobIdSchema) }, lazy(() => im
 ai.post("/resume/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import("./entry/ai/resume.js"), "next")); // wipe >N, publish N's finish
 ai.post("/run/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import("./entry/ai/resume.js"), "run"));     // DEBUG: run ONE step isolated (report:null, no cascade)
 ai.post("/events", lazy(() => import("./entry/ai/events.js"), "post")); // `orchestrate` topic push (Pub/Sub OIDC, body = Google envelope)
+ai.post("/categorize", lazy(() => import("./entry/ai/categorize.js"), "post")); // scraper: sync ingredient categorization via Ollama (no auth, no Firestore)
 ai.get("/health", () => ({ status: "ok" }));                            // liveness probe (dashboard health panel)
 
 ai.setNotFoundHandler((_req, reply) => reply.code(404).send({ error: "Not found" }));

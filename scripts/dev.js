@@ -266,6 +266,9 @@ async function main() {
     MONGO_URI, // the /ai function reads/writes the Step Library (plan_library) in Mongo
     MONGO_DB,
     DEPLOY_ENV: "dev",
+    // /ai/categorize uses the HOST's native Ollama (small model, always up).
+    CATEGORIZE_OLLAMA_HOST: process.env.CATEGORIZE_OLLAMA_HOST || "http://localhost:11434",
+    CATEGORIZE_OLLAMA_MODEL: process.env.CATEGORIZE_OLLAMA_MODEL || "llama3.2:3b",
   });
   console.log("Waiting for emulators (Pub/Sub + functions)...");
   await sleep(8000);

@@ -149,6 +149,10 @@ function startContainer(m) {
   // are applied every time — no stale "docker start", no manual `docker rm -f`.
   try { sh(`docker rm -f ${m.container}`); } catch { /* nothing to remove */ }
   console.log(`[waker:${m.model}] starting fresh: docker run ${m.image}`);
+  // Expose Ollama to the host so external tools (n8n scraper) can call it directly.
+  // Set OLLAMA_HOST_PORT=11434 in .env.dev to enable. Only one container should bind
+  // a given port — in dev only one model runs at a time, so this is safe.
+  const ollamaPortFlag = process.env.OLLAMA_HOST_PORT ? `-p ${process.env.OLLAMA_HOST_PORT}:11434` : '';
   const env = [
     `PUBSUB_EMULATOR_HOST=host.docker.internal:8185`,
     `GCP_PROJECT_ID=${GCP_PROJECT_ID}`,
@@ -185,7 +189,7 @@ function startContainer(m) {
   sh(
     `docker run -d --name ${m.container} --entrypoint sh ` +
       `--add-host=host.docker.internal:host-gateway ` +
-      `${gpuFlag} ${envFlags} ${credMount} ${workerMount} ${configMount} ${startMount} ${m.image} /start.sh`
+      `${gpuFlag} ${ollamaPortFlag} ${envFlags} ${credMount} ${workerMount} ${configMount} ${startMount} ${m.image} /start.sh`
   );
   // Pipe this container's logs into the dev console so worker [worker]/Ollama output is
   // visible live (not buried in `docker logs`). Follows the fresh container we just ran.

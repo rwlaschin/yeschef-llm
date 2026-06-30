@@ -52,7 +52,7 @@ function cannedRecipe(payload = {}) {
     "  id: 00000000-0000-4000-8000-000000000001",
     `  name: ${dish}`,
     "  category: lunch",
-    `  diet tags: ${payload.item || "regular"}`,
+    `  diet tags: ${payload.item || "standard"}`,
     "  batch:",
     "    yield portions: 100",
     "    portion weight: 6 oz",
@@ -114,22 +114,34 @@ function poolForDiet(diet) {
   if (d.includes("renal")) return PROTEIN_POOLS.renal;
   if (d.includes("halal")) return PROTEIN_POOLS.halal;
   if (d.includes("kosher")) return PROTEIN_POOLS.kosher;
-  return PROTEIN_POOLS.omnivore; // regular/diabetic/low-sodium/low-fat/gluten-free/lactose-free
+  return PROTEIN_POOLS.omnivore; // standard/diabetic/low-sodium/low-fat/gluten-free/lactose-free
+}
+
+// FNV-1a hash — fast, no stdlib, deterministic across runs. Used to seed protein
+// selection so each (diet, day, mealtime) slot has its own stable index.
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h;
 }
 
 // One diet's slice (this fanout unit). Emits the `Day N | Mealtime | Type | Cut` rows the
 // app's protein-grid parser reads — honouring THIS unit's diet, mealtimes, and day count
-// (passed on the fake dispatch message as payload.item / payload.ctx). Proteins rotate so
-// the grid, heatmap, and rotation views show realistic reuse.
+// (passed on the fake dispatch message as payload.item / payload.ctx).
+// Seed: fnv1a(diet + ":" + day + ":" + mealIndex) — diet-specific, day-specific, stable.
 function cannedProteinGrid(payload = {}) {
   const ctx = payload.ctx || {};
   const meals = Array.isArray(ctx.meals) && ctx.meals.length ? ctx.meals : ["breakfast", "lunch", "dinner"];
   const days = Math.max(1, Number(ctx.days) || 7);
-  const pool = poolForDiet(payload.item);
+  const diet = String(payload.item || "standard");
+  const pool = poolForDiet(diet);
   const lines = ["Day | Mealtime | Type | Cut"];
   for (let d = 1; d <= days; d++) {
     for (let m = 0; m < meals.length; m++) {
-      const [type, cut] = pool[(d * meals.length + m) % pool.length];
+      const [type, cut] = pool[fnv1a(`${diet}:${d}:${m}`) % pool.length];
       lines.push(`Day ${d} | ${meals[m]} | ${type} | ${cut}`);
     }
   }
@@ -170,7 +182,7 @@ function recipePoolForDiet(diet) {
   if (d.includes("kosher")) return RECIPE_POOLS.kosher;
   if (d.includes("diabetic")) return RECIPE_POOLS.diabetic;
   if (d.includes("low-sodium") || d.includes("low sodium")) return RECIPE_POOLS.low_sodium;
-  return RECIPE_POOLS.omnivore; // regular/low-fat/gluten-free/lactose-free
+  return RECIPE_POOLS.omnivore; // standard/low-fat/gluten-free/lactose-free
 }
 
 // One diet's reduced-recipe slice (this fanout unit) — the dish layer on the protein backbone.
