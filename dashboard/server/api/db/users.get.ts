@@ -7,7 +7,7 @@ export default defineEventHandler(async (event) => {
   try {
     const client = await getMongoClient(cfg.mongoUri!)
     const db = client.db(cfg.mongoDb)
-    const users = await db.collection('users').find({}).toArray()
+    const users = await db.collection('entities').find({}).toArray()
 
     return users
   } catch (err) {

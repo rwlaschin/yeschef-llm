@@ -107,7 +107,10 @@ export default defineEventHandler(async (event) => {
         projectId: config.gcpProjectId,
         apiEndpoint: config.pubsubEmulatorHost ? `http://${config.pubsubEmulatorHost}` : undefined,
       })
-      await pubsub.topic('test').exists()
+      // Use a known real topic to verify reachability — topic('test') doesn't exist.
+      // exists() returning false is fine; throwing means the service is unreachable.
+      const { MODELS } = await import('#models') as { MODELS: any[] }
+      await pubsub.topic(MODELS[0].topic).exists()
       status.pubsub = { ok: true, error: '' }
     }
   } catch (e: any) {
@@ -137,16 +140,40 @@ export default defineEventHandler(async (event) => {
 
     if (env === 'production') {
       const { PubSub } = await import('@google-cloud/pubsub')
+      const { GoogleAuth } = await import('google-auth-library')
       const pubsub = config.gcpProjectId ? new PubSub({ projectId: config.gcpProjectId }) : null
-      await Promise.all(MODELS.map(async (m) => {
-        if (!pubsub) { status.models[m.label] = { ok: false, error: 'Project ID not configured' }; return }
+
+      // Fetch all MIG sizes in one aggregated call — much cheaper than N per-MIG requests.
+      // Returns a map of migName → targetSize (desired replicas, 0 = cold/scaled-down).
+      const migSizes: Record<string, number> = {}
+      if (config.gcpProjectId) {
+        try {
+          const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/compute.readonly'] })
+          const client = await auth.getClient()
+          const token = await client.getAccessToken()
+          const url = `https://compute.googleapis.com/compute/v1/projects/${config.gcpProjectId}/aggregated/instanceGroupManagers`
+          const res = await $fetch<any>(url, { headers: { Authorization: `Bearer ${token.token}` }, timeout: 5000 })
+          for (const zone of Object.values(res?.items ?? {}) as any[]) {
+            for (const mig of zone?.instanceGroupManagers ?? []) {
+              migSizes[mig.name] = mig.targetSize ?? 0
+            }
+          }
+        } catch { /* non-fatal — fall through, instances will be undefined */ }
+      }
+
+      const { slugOf } = await import('#models') as { slugOf: (m: any) => string }
+      const modelResults = await Promise.all(MODELS.map(async (m) => {
+        if (!pubsub) return { label: m.label, entry: { ok: false, error: 'Project ID not configured' } }
         try {
           const [exists] = await pubsub.topic(m.topic).exists()
-          status.models[m.label] = { ok: exists, error: exists ? '' : `topic ${m.topic} not deployed` }
+          const migName = `ollama-${slugOf(m)}-mig`
+          const instances = migSizes[migName] ?? 0
+          return { label: m.label, entry: { ok: exists, instances, error: exists ? '' : `topic ${m.topic} not deployed` } }
         } catch (e: any) {
-          status.models[m.label] = { ok: false, error: e.message || 'check failed' }
+          return { label: m.label, entry: { ok: false, instances: 0, error: e.message || 'check failed' } }
         }
       }))
+      for (const { label, entry } of modelResults) status.models[label] = entry
     } else {
       // One `docker ps` → the set of running container names; membership = up.
       let running = new Set<string>()

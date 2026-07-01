@@ -63,6 +63,19 @@ ai.addContentTypeParser("application/json", {}, (req, payload, done) => {
   }
 });
 
+// ---- Scanner/bot rejection ---------------------------------
+// Bail out immediately for requests that can never match a real route — before auth,
+// before any lazy import, before any DB touch. Bots probing for PHP shells, WordPress
+// installs, etc. get a 400 and the instance does no real work.
+const REJECT_EXT = /\.(php|asp|aspx|jsp|cgi|env|git|bak|sql|sh|py|rb|pl|cfg|ini|xml|zip|tar|gz|7z|rar|log|swp|DS_Store)$/i;
+const REJECT_PATH = /\/(wp-|\.well-known\/pki|xmlrpc|phpmyadmin|admin\/|cPanel|cpanel|\.git\/|\.env|shell|webshell|cmd|cmdshell)/i;
+ai.addHook("onRequest", async (request, reply) => {
+  const url = request.raw.url ?? "";
+  if (REJECT_EXT.test(url) || REJECT_PATH.test(url)) {
+    return reply.code(400).send({ error: "Bad request" });
+  }
+});
+
 // ---- Auth gate ---------------------------------------------
 // Verify a Firebase ID token on every route except /health + /events (Pub/Sub push).
 ai.addHook("preHandler", requireAuth);

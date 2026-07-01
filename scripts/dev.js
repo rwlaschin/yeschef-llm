@@ -20,7 +20,7 @@ import { spawn, execSync } from "child_process";
 import { setTimeout as sleep } from "timers/promises";
 import crypto from "node:crypto";
 import fs from "fs";
-import ejs from "ejs";
+import { renderDockerfile } from "../docker/render.js";
 import { setup as setupPubSub } from "../pubsub/setup.js";
 import { killEmulators } from "./kill-emulators.js";
 import { devModels, subscriptionOf, imageOf, containerOf, FAKE_SUBSCRIPTION } from "../config/models.js";
@@ -182,9 +182,8 @@ function imageExists(tag) {
 // gateway, parallel/maxQueue, and the template itself). Worker code is mounted at run-time, so
 // it's NOT in here — which is exactly why editing worker code does NOT trigger a rebuild, but
 // changing a model (or the Dockerfile) DOES.
-function renderDockerfile(m) {
-  const template = fs.readFileSync("docker/Dockerfile.ejs", "utf-8");
-  return ejs.render(template, {
+function buildDockerfileVars(m) {
+  return {
     name: m.name,
     model: m.model,
     gpu: 1,
@@ -192,9 +191,9 @@ function renderDockerfile(m) {
     // .env.dev changes the recipe hash → the image auto-rebuilds on next `npm run dev`.
     parallel: process.env.OLLAMA_NUM_PARALLEL || 2,
     maxQueue: process.env.OLLAMA_MAX_QUEUE || 5,
-    subscriptions: [m.subscription],
+    subscription: m.subscription,
     gateway: m.gateway || "",
-  });
+  };
 }
 
 // The image's "recipe" = a short hash of its rendered Dockerfile PLUS package.json. Stamped on the
@@ -204,7 +203,7 @@ function renderDockerfile(m) {
 // hashing its CONTENTS, adding/bumping a dep wouldn't flip the image to stale and `npm install`
 // would never re-run.
 const recipeHash = (m) =>
-  crypto.createHash("sha256").update(renderDockerfile(m)).update(fs.readFileSync("package.json")).digest("hex").slice(0, 12);
+  crypto.createHash("sha256").update(renderDockerfile(buildDockerfileVars(m))).update(fs.readFileSync("package.json")).digest("hex").slice(0, 12);
 function imageRecipeHash(tag) {
   try { return sh(`docker inspect --format '{{ index .Config.Labels "yeschef.recipe" }}' ${tag}`); }
   catch { return ""; }
@@ -214,7 +213,7 @@ function imageRecipeHash(tag) {
 // stamping the recipe hash so a later run can tell when config has drifted from the baked image.
 function buildImage(m) {
   const tag = imageTag(m);
-  const dockerfile = renderDockerfile(m);
+  const dockerfile = renderDockerfile(buildDockerfileVars(m));
   console.log(`\nBuilding ${tag} — bakes ${m.model}; first build is slow.\n`);
   execSync(
     `echo '${dockerfile.replace(/'/g, "'\\''")}' | docker build -f - -t ${tag} --label yeschef.recipe=${recipeHash(m)} .`,

@@ -989,9 +989,9 @@ async function main() {
   console.log(`  Flow control: maxMessages=${maxMessages} (env=${DEPLOY_ENV}), maxExtensionMinutes=60`);
 
   // Split a comma list into individual names, but do NOT trim/normalize: each name is a
-  // Pub/Sub subscription id used verbatim. "Cleaning" it here would mask an upstream bug
-  // (e.g. a stray space) AND make us subscribe to a name Pub/Sub doesn't have. Pass through
-  // exactly as given — a malformed name should fail loudly, not be silently patched.
+  // SUBSCRIPTION_NAME is a single subscription id — one model, one sub. The split keeps the
+  // loop uniform so the fake sub (appended below in non-prod) uses the same path without a
+  // special case. Pass the value verbatim; "cleaning" it would mask upstream config bugs.
   const subscriptionNames = SUBSCRIPTION_NAME.split(',');
   // Every non-prod worker also drains the shared fake/canned subscription so a fake job's
   // steps get canned responses without a dedicated worker. (Prod never sets fake:true.)

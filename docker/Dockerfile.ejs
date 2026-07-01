@@ -56,7 +56,7 @@ ENV OLLAMA_MODEL=<%= model %>
 ENV OLLAMA_HOST=http://localhost:11434
 ENV OLLAMA_NUM_PARALLEL=<%= parallel %>
 ENV OLLAMA_MAX_QUEUE=<%= maxQueue %>
-ENV SUBSCRIPTION_NAME=<%= subscriptions.join(',') %>
+ENV SUBSCRIPTION_NAME=<%= subscription %>
 
 # The ollama base image sets ENTRYPOINT ["ollama"]; clear it so /start.sh runs
 # (otherwise CMD becomes `ollama /start.sh` → "unknown command").

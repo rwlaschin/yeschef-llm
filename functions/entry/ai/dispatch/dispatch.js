@@ -9,7 +9,7 @@
 import { PubSub } from "@google-cloud/pubsub";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { renderUnit } from "../compose.js";
-import { FAKE_TOPIC } from "../../../../config/models.js";
+import { FAKE_TOPIC } from "../../../config/models.js";
 
 let _pubsub;
 function pubsub() {

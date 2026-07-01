@@ -5,7 +5,7 @@
 import { randomUUID } from "crypto";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { PubSub } from "@google-cloud/pubsub";
-import { MODELS, FAKE_TOPIC } from "../../../config/models.js";
+import { MODELS, FAKE_TOPIC } from "../../config/models.js";
 
 let _pubsub;
 const pubsub = () => (_pubsub ??= new PubSub({ projectId: process.env.GCP_PROJECT_ID }));

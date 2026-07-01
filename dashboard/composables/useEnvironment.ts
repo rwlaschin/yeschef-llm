@@ -15,7 +15,7 @@ export const useEnvironment = () => {
   if (import.meta.client && !hydrated) {
     hydrated = true;
     const saved = window.localStorage.getItem("yeschef-llm-env");
-    if (saved === "local" || saved === "production") env.value = saved;
+    if (saved === "local" || saved === "production") env.value = saved as AppEnv;
   }
 
   const setEnv = (v: AppEnv) => {

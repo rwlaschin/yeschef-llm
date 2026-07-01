@@ -245,32 +245,20 @@ const durationHuman = computed(() =>
 )
 
 // Options
-const companies = ref([])
-const users = ref([])
-const filteredUsers = computed(() => users.value.filter((u) => !companyId.value || u.companyId === companyId.value))
+const { companies, users, companyOptions, userOptions, load: loadOptions } = useOrgData()
 
-const companyOptions = computed(() => companies.value.map((c) => ({ value: c._id, label: c.name })))
-const userOptions = computed(() => filteredUsers.value.map((u) => ({ value: u._id, label: `${u.username} · ${u.role}` })))
-
-const loadOptions = async () => {
-  const query = { env: env.value }
+const loadAndDefault = async () => {
   try {
-    const [c, u] = await Promise.all([
-      $fetch('/api/db/companies', { query }),
-      $fetch('/api/db/users', { query }),
-    ])
-    companies.value = c || []
-    users.value = u || []
-    // Reasonable defaults — preselect the first of each so the form is ready to fire.
+    await loadOptions()
     if (!companyId.value && companies.value[0]) companyId.value = companies.value[0]._id
-    if (!userId.value && filteredUsers.value[0]) userId.value = filteredUsers.value[0]._id
+    if (!userId.value && users.value[0]) userId.value = users.value[0].uid
   } catch (e) {
     showError('Failed to load options', e.message)
   }
 }
-onMounted(loadOptions)
-watch(env, loadOptions)
-watch(companyId, () => { if (!filteredUsers.value.some((u) => u._id === userId.value)) userId.value = filteredUsers.value[0]?._id || '' })
+onMounted(loadAndDefault)
+watch(env, loadAndDefault)
+watch(companyId, () => { if (!users.value.some((u) => u.uid === userId.value)) userId.value = users.value[0]?.uid || '' })
 
 const canSubmit = computed(() =>
   !!companyId.value && !!userId.value && MENU_ENTRIES.some((e) => enabled[e.key])

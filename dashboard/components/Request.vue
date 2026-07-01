@@ -95,18 +95,18 @@
           <Listbox v-model="selectedUserId" :disabled="!selectedCompanyId">
             <div class="relative">
               <ListboxButton :class="['w-full form-input text-left text-sm flex items-center justify-between', !selectedCompanyId && 'opacity-50 cursor-not-allowed']">
-                <span>{{ selectedUser?.username || 'User' }}</span>
+                <span>{{ selectedUser?.name || selectedUser?.username || 'User' }}</span>
                 <span class="text-xs opacity-60">▼</span>
               </ListboxButton>
               <ListboxOptions v-if="selectedCompanyId" :class="[
                 'absolute z-50 w-full mt-1 rounded-lg p-2 space-y-1 border',
                 isDark ? 'bg-gray-950 border-gray-700/60' : 'bg-white border-gray-300'
               ]">
-                <ListboxOption v-for="u in filteredUsers" :key="u._id" :value="u._id" :class="[
+                <ListboxOption v-for="u in filteredUsers" :key="u.uid" :value="u.uid" :class="[
                   'px-3 py-2 rounded cursor-pointer text-sm',
                   isDark ? 'hover:bg-amber-500/20' : 'hover:bg-gray-100'
                 ]">
-                  {{ u.username }} ({{ u.role }})
+                  {{ u.name || u.username || `User ${u.uid?.slice(0, 6)}` }}{{ u.role ? ` (${u.role})` : '' }}
                 </ListboxOption>
                 <div :class="['border-t pt-1 mt-1', isDark ? 'border-amber-500/10' : 'border-gray-200']">
                   <button @click="showCreateUser = true" :class="[
@@ -483,8 +483,8 @@ const underlineLeft = ref(0)
 const underlineWidth = ref(0)
 
 const selectedCompany = computed(() => companies.value.find(c => c._id === selectedCompanyId.value))
-const selectedUser = computed(() => users.value.find(u => u._id === selectedUserId.value))
-const filteredUsers = computed(() => users.value.filter(u => u.companyId === selectedCompanyId.value))
+const selectedUser = computed(() => users.value.find(u => u.uid === selectedUserId.value))
+const filteredUsers = computed(() => users.value) // entities don't carry companyId — membership is separate
 
 const loadCompanies = async () => {
   try {
@@ -538,11 +538,11 @@ const createUser = async () => {
       body: { username, role: newUserRole.value, companyId: selectedCompanyId.value, env: currentEnv.value },
     })
     await loadUsers()
-    selectedUserId.value = u._id           // select the new user
+    selectedUserId.value = u.uid ?? u._id
     showCreateUser.value = false
     newUsername.value = ''
     newUserRole.value = 'chef'
-    success('User created', u.username)
+    success('User created', u.name || u.username)
   } catch (err) {
     showError('Create user failed', err.message)
   }

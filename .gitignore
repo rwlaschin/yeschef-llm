@@ -18,4 +18,8 @@ dist/
 .idea/
 .vscode/
 
+# Generated at deploy time by predeploy hook; never committed
+functions/.env
+functions/.env.*
+
 # NOTE: .env files are intentionally NOT ignored (private repo).

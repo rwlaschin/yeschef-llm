@@ -22,7 +22,7 @@ import { useEnvironment, type AppEnv } from './useEnvironment'
  * Components only ever READ health/segments/statusColor from here.
  */
 
-export interface HealthEntry { ok: boolean; error?: string }
+export interface HealthEntry { ok: boolean; error?: string; instances?: number }
 export interface HealthState {
   databases: { mongodb: HealthEntry; firebase: HealthEntry; neo4j: HealthEntry }
   pubsub: HealthEntry
@@ -55,6 +55,7 @@ let looping = false       // synchronous guard against starting two loops in the
 let running = false       // ≥1 mounted consumer in THIS tab
 let wired = false
 let channel: BroadcastChannel | null = null
+let fetchAbort: AbortController | null = null
 
 function applyState(state: HealthState, ts: number) {
   health.value = state
@@ -73,16 +74,23 @@ async function fetchOnce() {
   // Followers don't touch the network — they ask the leader to re-check and wait for the
   // broadcast. (If we're standalone/leader, isLeader is true and we fall through.)
   if (!isLeader.value) { channel?.postMessage({ type: 'refresh' }); return }
+  // Cancel any in-flight request (e.g. env switched mid-check).
+  fetchAbort?.abort()
+  fetchAbort = new AbortController()
+  const signal = fetchAbort.signal
   checking.value = true
   try {
     // $fetch (Nuxt global) works outside setup — safe in the setTimeout tick.
-    health.value = await $fetch<HealthState>(`/api/health?env=${envRef?.value ?? 'local'}`)
+    health.value = await $fetch<HealthState>(`/api/health?env=${envRef?.value ?? 'local'}`, { signal })
   } catch (e: any) {
+    if ((e as any)?.name === 'AbortError' || signal.aborted) return // superseded — discard silently
     const msg = e?.status === 404 || String(e?.message).includes('fetch') ? 'Backend offline' : 'Check failed'
     health.value = offline(msg)
   } finally {
-    checking.value = false
-    persistAndBroadcast(Date.now())
+    if (!signal.aborted) {
+      checking.value = false
+      persistAndBroadcast(Date.now())
+    }
   }
 }
 

@@ -20,10 +20,10 @@
 // ============================================================
 
 import dotenvFlow from "dotenv-flow";
-import { execSync } from "child_process";
+import { execSync, exec } from "child_process";
 import fs from "fs";
 import crypto from "crypto";
-import ejs from "ejs";
+import { renderDockerfile } from "../docker/render.js";
 import { setup as setupPubSub } from "../pubsub/setup.js";
 import { MODELS, subscriptionOf, imageOf } from "../config/models.js";
 
@@ -53,7 +53,7 @@ for (const [k, v] of Object.entries({
 }
 
 const REGISTRY = `${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/ollama`;
-const VERSION = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+const VERSION = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19).toLowerCase();
 
 // Hash the files that affect the image content: Dockerfile template + all worker/config code.
 // If the hash tag already exists in Artifact Registry, the build is skipped (nothing changed).
@@ -123,10 +123,20 @@ function run(cmd) {
   execSync(cmd, { stdio: "inherit" });
 }
 
-function renderDockerfile(img) {
-  const template = fs.readFileSync("docker/Dockerfile.ejs", "utf-8");
-  return ejs.render(template, img);
+// Async variant for parallel Cloud Build submissions — streams stdout/stderr live.
+function runAsync(cmd) {
+  if (!APPLY) { console.log(`\n[dry-run] ${cmd}\n`); return Promise.resolve(); }
+  console.log(`\n> ${cmd}\n`);
+  return new Promise((resolve, reject) => {
+    const child = exec(cmd, { maxBuffer: 50 * 1024 * 1024 });
+    child.stdout.pipe(process.stdout);
+    child.stderr.pipe(process.stderr);
+    child.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(`Exit ${code}: ${cmd.slice(0, 100)}`))
+    );
+  });
 }
+
 
 function esc(s) {
   return s.replace(/'/g, "'\\''");
@@ -174,11 +184,21 @@ async function deploy() {
   if (APPLY) await setupPubSub(GCP_PROJECT_ID);
   else console.log("[dry-run] setupPubSub(...)");
 
-  // 2. Artifact Registry + docker auth
-  run(
-    `gcloud artifacts repositories create ollama --repository-format=docker ` +
-      `--location=${GCP_REGION} --project=${GCP_PROJECT_ID} || true`
-  );
+  // 2. Artifact Registry + docker auth (check first — avoid noisy ALREADY_EXISTS error)
+  let repoExists = false;
+  try {
+    execSync(
+      `gcloud artifacts repositories describe ollama --location=${GCP_REGION} --project=${GCP_PROJECT_ID} --format="value(name)"`,
+      { stdio: "pipe" }
+    );
+    repoExists = true;
+  } catch { /* doesn't exist yet */ }
+  if (!repoExists) {
+    run(
+      `gcloud artifacts repositories create ollama --repository-format=docker ` +
+        `--location=${GCP_REGION} --project=${GCP_PROJECT_ID}`
+    );
+  }
   run(`gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet`);
 
   // Dry-run only: validate all model names exist in Ollama's registry before building.
@@ -191,67 +211,67 @@ async function deploy() {
     console.log(`  ✓ All ${IMAGES.length} models confirmed in Ollama registry.\n`);
   }
 
-  // Dry-run: iterate ALL models (prints gcloud commands for each), but only build+verify
-  // the first dev model locally (small, already on disk — proves the Dockerfile template works).
-  const dryRunVerifyTarget = !APPLY ? IMAGES.find((m) => m.dev) : null;
-
-  for (const base of IMAGES) {
+  // Pre-compute per-image metadata.
+  const plan = IMAGES.map((base) => {
     const img = { ...DEFAULTS, ...base };
-    const machineType = MACHINE_BY_GPU[img.gpu] || MACHINE_BY_GPU[1];
-    const template = `${img.name}-tmpl-${VERSION}`.slice(0, 61);
-    const mig = `${img.name}-mig`;
-
-    // Content hash — stable tag based on Dockerfile + worker/config source.
-    // If this tag already exists in Artifact Registry, the image is unchanged → skip build.
     const dockerfile = renderDockerfile(img);
     const hash = contentHash(dockerfile);
-    const tagHash = `${REGISTRY}/${img.name}:${hash}`;
-    const tagLatest = `${REGISTRY}/${img.name}:latest`;
+    return {
+      img,
+      dockerfile,
+      hash,
+      tagHash:     `${REGISTRY}/${img.name}:${hash}`,
+      tagLatest:   `${REGISTRY}/${img.name}:latest`,
+      machineType: MACHINE_BY_GPU[img.gpu] || MACHINE_BY_GPU[1],
+      template:    `${img.name}-tmpl-${VERSION}`.slice(0, 61),
+      mig:         `${img.name}-mig`,
+    };
+  });
 
-    console.log(`\n==== ${img.name} (gpu=${img.gpu}, ${machineType}) hash=${hash} ====`);
-
-    const alreadyBuilt = APPLY && imageExistsInRegistry(tagHash);
-    if (alreadyBuilt) {
-      console.log(`  ✓ Image unchanged (${hash}) — skipping build, reusing existing image.`);
-    }
-
-    // 3. Build + push the Docker image.
-    //    dev models  → local docker build (model already on disk from dev)
-    //    prod-only   → Cloud Build (70B images are too large for a laptop)
-    const dfTmpName = `Dockerfile.${img.name}.tmp`;
+  // ── Phase 1: All images — fire every Cloud Build job in parallel, await each in turn ──
+  const cloudBuildJobs = [];
+  for (const p of plan) {
+    const { img, dockerfile, hash, tagHash, tagLatest } = p;
+    console.log(`\n==== ${img.name} (gpu=${img.gpu}, ${p.machineType}) hash=${hash} — queuing Cloud Build ====`);
     if (!APPLY) {
-      if (dryRunVerifyTarget && img.name === dryRunVerifyTarget.name) {
-        // Dry-run: build the first dev model locally to verify the Dockerfile template is correct.
-        // Small model, already on disk — fast. Same template as all other models.
-        console.log(`\n[dry-run] Building ${img.name} locally to verify Dockerfile...`);
-        const localTag = `dry-run-verify-${img.name}`;
-        try {
-          execSync(`echo '${esc(dockerfile)}' | docker build -f - -t ${localTag} .`, { stdio: "inherit" });
-          console.log(`\n[dry-run] ✓ ${img.name} Dockerfile builds cleanly.`);
-        } finally {
-          execSync(`docker rmi ${localTag} --force 2>/dev/null || true`, { stdio: "pipe" });
-        }
-      }
-      run(`docker push ${tagHash}`);
+      run(`gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=cloudbuild.${img.name}.yaml`);
       run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
-    } else if (!alreadyBuilt && img.dev) {
-      // Dev-capable model: build locally (model layers already cached from dev)
-      run(`echo '${esc(dockerfile)}' | docker build -f - -t ${tagHash} .`);
-      run(`docker push ${tagHash}`);
-      run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
-    } else if (!alreadyBuilt) {
-      // Prod-only model (70B): build on Cloud Build — too large for local disk.
-      // Dockerfile written to cwd so it's included in the submitted source tarball.
-      fs.writeFileSync(dfTmpName, dockerfile);
-      run(
-        `gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} ` +
-          `--dockerfile=${dfTmpName} --tag=${tagHash} --timeout=3600`
+      cloudBuildJobs.push({ p, promise: Promise.resolve() });
+    } else if (!imageExistsInRegistry(tagHash)) {
+      const dfName = `Dockerfile.${img.name}.build`;
+      const cbName = `cloudbuild.${img.name}.yaml`;
+      fs.writeFileSync(dfName, dockerfile);
+      fs.writeFileSync(
+        cbName,
+        `steps:\n- name: 'gcr.io/cloud-builders/docker'\n` +
+          `  args: ['build', '-f', '${dfName}', '-t', '${tagHash}', '.']\n` +
+          `  timeout: 3600s\nimages:\n- '${tagHash}'\ntimeout: 3600s\n`
       );
-      run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
-      fs.unlinkSync(dfTmpName);
+      const promise = runAsync(
+        `gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=${cbName}`
+      ).finally(() => {
+        try { fs.unlinkSync(dfName); } catch {}
+        try { fs.unlinkSync(cbName); } catch {}
+      });
+      cloudBuildJobs.push({ p, promise });
+    } else {
+      console.log(`  ✓ Image unchanged (${hash}) — skipping build.`);
+      cloudBuildJobs.push({ p, promise: Promise.resolve() });
     }
+  }
 
-    // Cleanup: delete all digest tags except the current hash (keep latest + current hash only)
+  // All 7 Cloud Build jobs running in parallel — await each in turn.
+  for (const { p, promise } of cloudBuildJobs) {
+    const { tagHash, tagLatest } = p;
+    console.log(`\nAwaiting Cloud Build: ${p.img.name}...`);
+    await promise;
+    run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
+    console.log(`  ✓ ${p.img.name} done.`);
+  }
+
+  // ── Phase 2: Cleanup + instance templates + MIGs (all images now built) ────
+  for (const { img, hash, tagHash, machineType, template, mig } of plan) {
+    // Cleanup: remove old digest tags (keep current hash + latest only).
     run(
       `gcloud artifacts docker images list ${REGISTRY}/${img.name} ` +
         `--include-tags --format="value(version,tags)" --project=${GCP_PROJECT_ID} | ` +
@@ -260,26 +280,39 @@ async function deploy() {
         `${REGISTRY}/${img.name}@{} --project=${GCP_PROJECT_ID} --quiet 2>/dev/null || true`
     );
 
-    // 4. Instance template — SPOT GPU VM on cos-stable.
-    //    Startup script installs NVIDIA drivers, pulls image, runs container.
-    //    No builder VM, no custom GCE disk image — cos-stable is the base.
+    // Instance template — SPOT GPU VM on cos-stable.
     run(
       `gcloud compute instance-templates create ${template} --project=${GCP_PROJECT_ID} ` +
         `--machine-type=${machineType} ` +
         `--image-family=cos-stable --image-project=cos-cloud ` +
         `--accelerator=type=nvidia-l4,count=${img.gpu} --maintenance-policy=TERMINATE ` +
-        `--provisioning-model=SPOT --instance-termination-action=DELETE ` +
+        `--provisioning-model=SPOT --instance-termination-action=STOP ` +
         `--network=${GCP_NETWORK} --scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
         `--metadata=startup-script='${esc(vmStartupScript(img, tagHash))}'`
     );
 
-    // 5. MIG + autoscaler on Pub/Sub backlog (scale 0 → maxReplicas)
-    run(
-      `gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} ` +
-        `--zone=${GCP_ZONE} --template=${template} --size=0 || ` +
+    // MIG + autoscaler on Pub/Sub backlog (scale 0 → maxReplicas).
+    let migExists = false;
+    try {
+      execSync(
+        `gcloud compute instance-groups managed describe ${mig} ` +
+          `--project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} --format="value(name)"`,
+        { stdio: "pipe" }
+      );
+      migExists = true;
+    } catch { /* doesn't exist yet */ }
+
+    if (migExists) {
+      run(
         `gcloud compute instance-groups managed set-instance-template ${mig} ` +
-        `--project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} --template=${template}`
-    );
+          `--project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} --template=${template}`
+      );
+    } else {
+      run(
+        `gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} ` +
+          `--zone=${GCP_ZONE} --template=${template} --size=0`
+      );
+    }
     run(
       `gcloud compute instance-groups managed set-autoscaling ${mig} --project=${GCP_PROJECT_ID} ` +
         `--zone=${GCP_ZONE} --min-num-replicas=0 --max-num-replicas=${img.maxReplicas} ` +
