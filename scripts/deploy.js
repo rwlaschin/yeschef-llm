@@ -1,15 +1,13 @@
 // ============================================================
-// Deploy — GCE spot MIG with Container-Optimized OS (no custom image baking).
+// Deploy — GCE spot MIG with baked custom GCE images (no boot-time Docker pull).
 //
 //   1. build the Docker image (Ollama + worker + baked model) → Artifact Registry
-//   2. instance template: SPOT, GPU L4(s), COS --container-image pulls on first boot
-//   3. managed instance group + autoscaler on Pub/Sub backlog (min 0 → max N)
-//
-// No builder VM, no 200GB GCE disk snapshot, no polling loop.
-// COS caches Artifact Registry layers across the MIG — boot is fast after the first VM.
+//   2. bake a GCE custom image: launch a baker VM, docker pull, stop VM, snapshot
+//   3. instance template: SPOT, GPU L4(s), custom image; startup just runs the container
+//   4. managed instance group + autoscaler on Pub/Sub backlog (min 0 → max N)
 //
 // One VM per replica. GPU count comes from the model's "machine description":
-//   2B / openclaw → 1× L4 (g2-standard-8),  70B → 2× L4 (g2-standard-24, one box).
+//   gpu:1 → 1× L4 (g2-standard-8),  gpu:2 → 2× L4 (g2-standard-24, one box).
 //
 // Spot + scale-to-zero + no cluster fee. Preemption is safe: the worker acks only
 // after the final Firestore write, so a preempted job is redelivered and another
@@ -29,6 +27,9 @@ import { MODELS, subscriptionOf, imageOf } from "../config/models.js";
 
 dotenvFlow.config();
 
+const _log = console.log.bind(console);
+console.log = (...args) => _log(`[${new Date().toLocaleTimeString()}]`, ...args);
+
 const {
   GCP_PROJECT_ID,
   GCP_REGION = "us-central1",
@@ -44,6 +45,7 @@ const {
 // Applies for real by default. Pass --dry-run to only print the commands (no execution).
 const args = process.argv.slice(2);
 const DRY_RUN = args.some((a) => a === "--dry-run" || a === "--dry-run=1" || a === "--dry-run=true");
+const USE_SPOT = args.some((a) => a === "--spot");
 const APPLY = !DRY_RUN;
 
 for (const [k, v] of Object.entries({
@@ -97,7 +99,7 @@ function imageExistsInRegistry(tag) {
 // gpu count → g2 machine type (L4s on a single box)
 const MACHINE_BY_GPU = { 1: "g2-standard-8", 2: "g2-standard-24" };
 
-const DEFAULTS = { parallel: 2, maxQueue: 5, gpu: 1, maxReplicas: 3 };
+const DEFAULTS = { parallel: 2, maxQueue: 5, gpu: 1, maxReplicas: 7 };
 
 // Derived from the single source of truth (config/models.js).
 // gpu = the model's "machine description" (L4s on one VM).
@@ -106,6 +108,7 @@ const IMAGES = MODELS.map((m) => ({
   subscription: subscriptionOf(m),
   model: m.model,
   gpu: m.gpu,
+  diskGb: m.diskGb,
   dev: m.dev,         // true = also runs in dev; false = prod-only (build on Cloud Build)
   gateway: m.gateway || null,
   // ENV-sourced (dotenv-flow: .env.production → .env), DEFAULTS fallback. Feeds BOTH the baked
@@ -142,24 +145,15 @@ function esc(s) {
   return s.replace(/'/g, "'\\''");
 }
 
-// Startup script for COS GPU VMs:
-//   1. Install NVIDIA drivers via cos-extensions (once per VM, ~1-2 min)
-//   2. Authenticate to Artifact Registry
-//   3. Pull + run the worker container with GPU access
-// No custom GCE image needed — cos-stable is the base, no 200GB snapshot.
+// Startup script for baked GCE VMs — Docker image is already on disk; no pull needed.
+// DLVM base image ships with NVIDIA drivers + nvidia-container-toolkit pre-installed,
+// so no GPU driver step is needed at boot. Just run the container.
 function vmStartupScript(img, tag) {
   return [
     "#!/bin/bash",
     "set -e",
-    // Install GPU drivers (idempotent — skips if already installed)
-    "cos-extensions install gpu --wait",
-    // Auth to Artifact Registry
-    `docker-credential-gcr configure-docker --registries=${GCP_REGION}-docker.pkg.dev || \\`,
-    `  gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet`,
-    // Pull image (cached in Artifact Registry; subsequent VMs in the MIG are fast)
-    `docker pull ${tag}`,
-    // Run worker with NVIDIA runtime for GPU access
     `docker run -d --name worker --restart=on-failure \\`,
+    `  --log-driver=gcplogs --log-opt gcp-project=${GCP_PROJECT_ID} \\`,
     `  --runtime=nvidia --gpus all \\`,
     `  -e GCP_PROJECT_ID=${GCP_PROJECT_ID} \\`,
     `  -e FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID || GCP_PROJECT_ID} \\`,
@@ -175,8 +169,123 @@ function vmStartupScript(img, tag) {
   ].join("\n");
 }
 
+// Startup script for the one-time baker VM — CPU-only VM, just pulls the Docker image layers.
+// No GPU needed to download; GPU drivers are installed at runtime on each prod VM boot (fast).
+function bakerStartupScript(tag, region) {
+  return [
+    "#!/bin/bash",
+    "set -e",
+    `ZONE=$(curl -sf "http://metadata.google.internal/computeMetadata/v1/instance/zone" -H "Metadata-Flavor: Google" | awk -F/ '{print $NF}')`,
+    `NAME=$(curl -sf "http://metadata.google.internal/computeMetadata/v1/instance/name" -H "Metadata-Flavor: Google")`,
+    `docker-credential-gcr configure-docker --registries=${region}-docker.pkg.dev || \\`,
+    `  gcloud auth configure-docker ${region}-docker.pkg.dev --quiet`,
+    `docker pull ${tag}`,
+    // Signal completion by writing a metadata key the deploy script polls
+    `gcloud compute instances add-metadata "$NAME" --zone="$ZONE" --metadata=bake-done=true`,
+  ].join("\n");
+}
+
+// Check if a GCE custom image with this name already exists — skip rebake if so.
+function gceImageExists(name) {
+  try {
+    execSync(`gcloud compute images describe ${name} --project=${GCP_PROJECT_ID} --format="value(name)"`, { stdio: "pipe" });
+    return true;
+  } catch { return false; }
+}
+
+// Bake a GCE custom image from a Docker image already in Artifact Registry.
+// Returns the GCE image name to use in the instance template.
+async function bakeGCEImage(img, tag, hash, machineType) {
+  const imageName = `${img.name}-img-${hash}`;
+  if (gceImageExists(imageName)) {
+    console.log(`  ✓ GCE image ${imageName} already exists — skipping bake.`);
+    return imageName;
+  }
+
+  const bakerName = `${img.name}-baker-${VERSION}`.slice(0, 61).replace(/[^a-z0-9-]/g, "-");
+  console.log(`  Baking GCE image for ${img.name} (baker VM: ${bakerName})...`);
+
+  // Baker only needs to docker pull — use e2-medium (cheap). DLVM base image has NVIDIA
+  // drivers pre-installed so the baker itself doesn't need a GPU. GCE images are global
+  // resources, so the baker can run in any region/zone. Try a wide spread to avoid stockouts.
+  const BAKER_ZONES = [
+    `${GCP_REGION}-b`, `${GCP_REGION}-c`, `${GCP_REGION}-f`, `${GCP_REGION}-a`,
+    "us-east1-b", "us-east1-c", "us-east1-d",
+    "us-east4-a", "us-east4-b", "us-east4-c",
+    "us-west1-a", "us-west1-b", "us-west1-c",
+    "us-west2-a", "us-west2-b",
+  ];
+  let bakerZone = null;
+  for (const zone of BAKER_ZONES) {
+    try {
+      console.log(`  Trying baker zone: ${zone}...`);
+      execSync(
+        `gcloud compute instances create ${bakerName} --project=${GCP_PROJECT_ID} --zone=${zone} ` +
+        `--machine-type=e2-medium --image-family=common-cu129-ubuntu-2204-nvidia-580 --image-project=deeplearning-platform-release ` +
+        `--boot-disk-size=${img.diskGb}GB --boot-disk-type=pd-ssd ` +
+        `--network=${GCP_NETWORK} --scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
+        `--metadata=startup-script='${esc(bakerStartupScript(tag, GCP_REGION))}'`,
+        { stdio: "pipe" }  // pipe so we can catch error text; errors print below
+      );
+      bakerZone = zone;
+      console.log(`  ✓ Baker VM created in ${zone}`);
+      break;
+    } catch (e) {
+      const stderr = (e.stderr || e.stdout || e.message || "").toString();
+      process.stderr.write(stderr + "\n");
+      if (
+        stderr.includes("ZONE_RESOURCE_POOL_EXHAUSTED") ||
+        stderr.includes("RESOURCE_NOT_READY") ||
+        stderr.includes("stockout")
+      ) {
+        console.log(`  Zone ${zone} exhausted, trying next...`);
+        continue;
+      }
+      throw new Error(`Baker VM creation failed in ${zone}: ${stderr}`);
+    }
+  }
+  if (!bakerZone) throw new Error(`All zones (${BAKER_ZONES.join(", ")}) exhausted for baker VM — try again later`);
+
+  if (APPLY) {
+    // Poll instance metadata until the baker signals it's done (up to 20 min)
+    console.log(`  Waiting for baker VM to pull image (this takes a few minutes)...`);
+    const deadline = Date.now() + 20 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 30_000));
+      try {
+        const val = execSync(
+          `gcloud compute instances describe ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --format="value(metadata.items[bake-done])"`,
+          { stdio: "pipe" }
+        ).toString().trim();
+        if (val === "true") { console.log("  ✓ Baker done."); break; }
+      } catch { /* still booting */ }
+    }
+
+    // Stop baker VM so we can snapshot its disk
+    run(`gcloud compute instances stop ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID}`);
+
+    // Disk name matches instance name on COS
+    const diskName = execSync(
+      `gcloud compute instances describe ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --format="value(disks[0].source.basename())"`,
+      { stdio: "pipe" }
+    ).toString().trim();
+
+    // Create GCE custom image from the baker's disk (images are global — zone doesn't matter)
+    run(
+      `gcloud compute images create ${imageName} --project=${GCP_PROJECT_ID} ` +
+      `--source-disk=${diskName} --source-disk-zone=${bakerZone} ` +
+      `--family=${img.name} --description="Pre-baked Docker image: ${tag}"`
+    );
+
+    // Delete baker VM + disk
+    run(`gcloud compute instances delete ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --quiet`);
+  }
+
+  return imageName;
+}
+
 async function deploy() {
-  console.log(`\nDeploy — GCE spot MIG (COS container)  ${APPLY ? "(APPLY)" : "(DRY-RUN)"}`);
+  console.log(`\nDeploy — GCE ${USE_SPOT ? "SPOT" : "on-demand"} MIG (DLVM + Docker)  ${APPLY ? "(APPLY)" : "(DRY-RUN)"}`);
   console.log(`Version : ${VERSION}   Project: ${GCP_PROJECT_ID}   Zone: ${GCP_ZONE}`);
   console.log(`Registry: ${REGISTRY}\n`);
 
@@ -260,17 +369,15 @@ async function deploy() {
     }
   }
 
-  // All 7 Cloud Build jobs running in parallel — await each in turn.
-  for (const { p, promise } of cloudBuildJobs) {
-    const { tagHash, tagLatest } = p;
-    console.log(`\nAwaiting Cloud Build: ${p.img.name}...`);
+  // Pipeline: as each build finishes, immediately tag + bake + deploy that image.
+  // Don't wait for all builds — start processing each one as soon as it's ready.
+  await Promise.all(cloudBuildJobs.map(async ({ p, promise }) => {
+    const { img, hash, tagHash, tagLatest, machineType, template, mig } = p;
+    console.log(`\nAwaiting Cloud Build: ${img.name}...`);
     await promise;
     run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
-    console.log(`  ✓ ${p.img.name} done.`);
-  }
+    console.log(`  ✓ ${img.name} done.`);
 
-  // ── Phase 2: Cleanup + instance templates + MIGs (all images now built) ────
-  for (const { img, hash, tagHash, machineType, template, mig } of plan) {
     // Cleanup: remove old digest tags (keep current hash + latest only).
     run(
       `gcloud artifacts docker images list ${REGISTRY}/${img.name} ` +
@@ -280,13 +387,16 @@ async function deploy() {
         `${REGISTRY}/${img.name}@{} --project=${GCP_PROJECT_ID} --quiet 2>/dev/null || true`
     );
 
-    // Instance template — SPOT GPU VM on cos-stable.
+    // Bake GCE custom image — Docker layers pre-loaded, no boot-time pull.
+    const gceImage = await bakeGCEImage(img, tagHash, hash, machineType);
+
+    // Instance template — SPOT GPU VM on baked custom image.
     run(
       `gcloud compute instance-templates create ${template} --project=${GCP_PROJECT_ID} ` +
         `--machine-type=${machineType} ` +
-        `--image-family=cos-stable --image-project=cos-cloud ` +
+        `--image=${gceImage} --image-project=${GCP_PROJECT_ID} ` +
         `--accelerator=type=nvidia-l4,count=${img.gpu} --maintenance-policy=TERMINATE ` +
-        `--provisioning-model=SPOT --instance-termination-action=STOP ` +
+        (USE_SPOT ? `--provisioning-model=SPOT --instance-termination-action=STOP ` : "") +
         `--network=${GCP_NETWORK} --scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
         `--metadata=startup-script='${esc(vmStartupScript(img, tagHash))}'`
     );
@@ -317,12 +427,12 @@ async function deploy() {
       `gcloud compute instance-groups managed set-autoscaling ${mig} --project=${GCP_PROJECT_ID} ` +
         `--zone=${GCP_ZONE} --min-num-replicas=0 --max-num-replicas=${img.maxReplicas} ` +
         `--update-stackdriver-metric=pubsub.googleapis.com/subscription/num_undelivered_messages ` +
-        `--stackdriver-metric-filter='resource.type=\\"pubsub_subscription\\" AND resource.label.subscription_id=\\"${img.subscription}\\"' ` +
+        `--stackdriver-metric-filter='resource.type="pubsub_subscription" AND resource.label.subscription_id="${img.subscription}"' ` +
         `--stackdriver-metric-single-instance-assignment=1`
     );
 
     console.log(`\nPrepared: ${img.name} → ${tagHash}, MIG ${mig} (spot ${img.gpu}× L4, 0→${img.maxReplicas})`);
-  }
+  }));
 
   console.log(`\n${APPLY ? "Deploy complete" : "Dry-run complete (pass --dry-run=0 to execute)"} @ ${VERSION}\n`);
 }

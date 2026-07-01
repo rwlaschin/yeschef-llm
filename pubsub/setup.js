@@ -15,6 +15,9 @@ const DEFAULT_SUB_CONFIG = {
   ackDeadlineSeconds: process.env.NODE_ENV === "dev" ? 300 : 40,
   minRetryDelay: { seconds: 10 },
   maxRetryDelay: { seconds: 30 },
+  // Messages nobody pulls expire after 4 hours — prevents zombie jobs floating forever
+  // when workers are down. 7-day default would let a stuck message linger for days.
+  messageRetentionDuration: { seconds: 4 * 3600 },
 };
 
 // Dead-letter is a TRANSPORT backstop only — the natural terminal sink for messages that can never
@@ -53,19 +56,20 @@ export async function setup(projectId, models = MODELS) {
   }
 
   async function ensureSubscription(cfg) {
-    if (await subscriptionExists(cfg.subscription)) {
-      console.log(`  already exists: ${cfg.subscription}`);
-      return;
-    }
     const deadLetterTopic = `projects/${projectId}/topics/${cfg.deadLetter}`;
-    await client.topic(cfg.topic).createSubscription(cfg.subscription, {
+    const subConfig = {
       ackDeadlineSeconds: cfg.ackDeadlineSeconds,
       deadLetterPolicy: { deadLetterTopic, maxDeliveryAttempts: MAX_DELIVERY_ATTEMPTS },
-      retryPolicy: {
-        minimumBackoff: cfg.minRetryDelay,
-        maximumBackoff: cfg.maxRetryDelay,
-      },
-    });
+      retryPolicy: { minimumBackoff: cfg.minRetryDelay, maximumBackoff: cfg.maxRetryDelay },
+      messageRetentionDuration: cfg.messageRetentionDuration,
+    };
+    if (await subscriptionExists(cfg.subscription)) {
+      const sub = client.subscription(cfg.subscription);
+      await sub.setMetadata(subConfig);
+      console.log(`  updated: ${cfg.subscription}`);
+      return;
+    }
+    await client.topic(cfg.topic).createSubscription(cfg.subscription, subConfig);
     console.log(`  created: ${cfg.subscription} (ack ${cfg.ackDeadlineSeconds}s, dead-letter → ${cfg.deadLetter})`);
   }
 

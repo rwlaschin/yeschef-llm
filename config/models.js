@@ -33,19 +33,20 @@ export const MODELS = [
   // Llama dev tier — Llama 3.1 8B (`llama3.1:8b`, ~5GB Q4). It's the largest *modern* Llama
   // that fits a 16–20GB budget: the dense family jumps 8B → 70B with nothing in between, and
   // the smallest 70B quant (q2_K) is 26GB — over 20GB. Strong reasoning, fits any dev box; gpu:1.
-  { label: "Llama 3.1 8B",  model: "llama3.1:8b",                  topic: "llama3_1_8b_v1",  ctx: 131072, gpu: 1, dev: true  },
-  { label: "Llama 3.3 70B", model: "llama3.3:70b-instruct-q4_K_M", topic: "llama3_3_70b_v1", ctx: 131072, gpu: 2, dev: false }, // 2× L4 — no dev GPU
+  // diskGb = baker VM boot disk. DLVM base image is 50 GB minimum; add model layers on top.
+  { label: "Llama 3.1 8B",  model: "llama3.1:8b",                  topic: "llama3_1_8b_v1",  ctx: 131072, gpu: 1, dev: true,  diskGb: 60  },
+  { label: "Llama 3.3 70B", model: "llama3.3:70b-instruct-q4_K_M", topic: "llama3_3_70b_v1", ctx: 131072, gpu: 2, dev: false, diskGb: 100 }, // 2× L4 — no dev GPU; q4_K_M ≈ 44 GB
   // Gemma 4 12B — Google's encoder-free multimodal model built for agentic workflows.
   // Use the QAT (quantization-aware trained) tag `gemma4:12b-it-qat`: it cuts the memory
   // footprint and runs faster on every backend (Apple/AMD/Intel/NVIDIA/Qualcomm) at nearly
   // the full-precision quality — the right pick for the 16GB-laptop/dev target. Dev-capable;
   // in prod one L4 (24GB) hosts it with room for context. Tool-calling is first-class, so it
   // runs the RAW worker path (chatWithTools) — web_search/web_fetch come free, no gateway.
-  { label: "Gemma 4 12B",   model: "gemma4:12b-it-qat",             topic: "gemma4_12b_v1",  ctx: 262144, gpu: 1, dev: true  },
+  { label: "Gemma 4 12B",   model: "gemma4:12b-it-qat",             topic: "gemma4_12b_v1",  ctx: 262144, gpu: 1, dev: true,  diskGb: 65  },
   // Qwen 3.5 9B — Alibaba's Mar-2026 small model: vision + tools, 256K context, "thinking"
   // mode. `qwen3.5:9b` is a 6.6GB Q4 pull, so it fits a 16GB box with room to spare and runs
   // on the gpu:1 dev tier. Tool-calling is native → raw worker path (chatWithTools), no gateway.
-  { label: "Qwen 3.5 9B",   model: "qwen3.5:9b",                    topic: "qwen3_5_9b_v1",  ctx: 262144, gpu: 1, dev: true  },
+  { label: "Qwen 3.5 9B",   model: "qwen3.5:9b",                    topic: "qwen3_5_9b_v1",  ctx: 262144, gpu: 1, dev: true,  diskGb: 60  },
   // ── OpenClaw gateway tiers ──────────────────────────────────────────────────
   // OpenClaw is NOT a pullable model — it's a gateway (`ollama launch openclaw
   // --model <backing>`, https://docs.ollama.com/integrations/openclaw) that fronts a
@@ -59,9 +60,9 @@ export const MODELS = [
   //   - dev = the gpu:1 tiers (slim + these two small ones); the 70B (gpu:2) tiers need
   //     2× L4 so they're prod-only.
   //   - Topics are openclaw_<backing>_v1; pubsub setup creates the new subs from this list.
-  { label: "OpenClaw (Gemma 4 12B)",   model: "gemma4:12b-it-qat",            topic: "openclaw_gemma4_12b_v1",   ctx: 262144, gpu: 1, dev: true,  gateway: "openclaw", tools: ["web_search", "web_fetch"] },
-  { label: "OpenClaw (Llama 3.1 8B)",  model: "llama3.1:8b",                  topic: "openclaw_llama3_1_8b_v1",  ctx: 131072, gpu: 1, dev: true,  gateway: "openclaw", tools: ["web_search", "web_fetch"] },
-  { label: "OpenClaw (Llama 3.3 70B)", model: "llama3.3:70b-instruct-q4_K_M", topic: "openclaw_llama3_3_70b_v1", ctx: 131072, gpu: 2, dev: false, gateway: "openclaw", tools: ["web_search", "web_fetch"] },
+  { label: "OpenClaw (Gemma 4 12B)",   model: "gemma4:12b-it-qat",            topic: "openclaw_gemma4_12b_v1",   ctx: 262144, gpu: 1, dev: true,  diskGb: 65,  gateway: "openclaw", tools: ["web_search", "web_fetch"] },
+  { label: "OpenClaw (Llama 3.1 8B)",  model: "llama3.1:8b",                  topic: "openclaw_llama3_1_8b_v1",  ctx: 131072, gpu: 1, dev: true,  diskGb: 60,  gateway: "openclaw", tools: ["web_search", "web_fetch"] },
+  { label: "OpenClaw (Llama 3.3 70B)", model: "llama3.3:70b-instruct-q4_K_M", topic: "openclaw_llama3_3_70b_v1", ctx: 131072, gpu: 2, dev: false, diskGb: 100, gateway: "openclaw", tools: ["web_search", "web_fetch"] },
 ];
 
 export const subscriptionOf = (m) => `sub_${m.topic}`;
