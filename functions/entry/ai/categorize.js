@@ -1,55 +1,39 @@
 // POST /ai/categorize — synchronous ingredient categorization via Ollama streaming.
 // Called by the n8n scraper (no Firebase auth). Streams tokens from Ollama, accumulates
-// the full JSON, returns it. No Firestore involved.
+// the full YAML, parses, returns it. No Firestore involved.
 import http from "node:http";
 import https from "node:https";
 import { parse as parseYaml } from "yaml";
+import { getCollection } from "../../lib/mongo.js";
 
 // Categorize uses the HOST's native Ollama (small/fast model), not the Docker worker's.
 const OLLAMA_HOST = process.env.CATEGORIZE_OLLAMA_HOST || process.env.OLLAMA_HOST || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.CATEGORIZE_OLLAMA_MODEL || "llama3.2:3b";
 
-const SYSTEM_PROMPT = `You categorize recipe ingredients for institutional food service. Return ONLY a \`\`\`yaml block. Every ingredient MUST have a category — never leave it blank.
+// FDA FALCPA big-9 — the only allergen values the API returns (model output is normalized to these).
+const BIG9 = ["milk", "eggs", "fish", "shellfish", "tree_nuts", "peanuts", "wheat", "soybeans", "sesame"];
 
-Categories (pick the primary culinary role):
-protein=meat/poultry/fish/eggs/tofu/beans/lentils
-starch=rice/pasta/bread/potato/oats/quinoa/corn/tortilla
-vegetable=onion/garlic/peppers/tomato/broccoli/carrots/mushrooms/celery/greens
-fruit=fruits/berries/citrus/applesauce/dried fruit/plantain/mango/avocado
-beverage=drinks served to residents
-dairy=milk or cream used in cooking/cheese/butter/yogurt/sour cream
-fat=oil/margarine/shortening/mayo/salad dressing
-seasoning=salt/pepper/spices/herbs/sugar/honey/vinegar/sauces/condiments/stock/broth/flour as thickener
-
-allergens from: milk, eggs, fish, shellfish, tree_nuts, peanuts, wheat, soybeans, sesame
-Convert fractions to decimals: 1/2=0.5, 1/4=0.25, 3/4=0.75
-
-Example:
-\`\`\`yaml
-components:
-  - ingredient: chicken breast
-    category: protein
-    quantity: "2"
-    unit: lb
-    prep: diced
-  - ingredient: olive oil
-    category: fat
-    quantity: "2"
-    unit: tbsp
-    prep: null
-  - ingredient: garlic
-    category: vegetable
-    quantity: "3"
-    unit: cloves
-    prep: minced
-  - ingredient: chicken broth
-    category: seasoning
-    quantity: "1"
-    unit: cup
-    prep: null
-allergens:
-  - eggs
-\`\`\``;
+// System prompts live in Mongo prompt_library (mapping.<type>), same shape the worker
+// uses: docs whose mapping has the type key, joined ascending by the mapping value (lex order).
+// Cached per process; refreshed every 60s so dashboard edits apply without a restart.
+const promptCache = new Map();
+async function promptFor(type) {
+  const hit = promptCache.get(type);
+  if (hit && Date.now() - hit.at < 60_000) return hit.text;
+  const col = await getCollection("prompt_library");
+  const docs = await col.find({ [`mapping.${type}`]: { $ne: null } }).toArray();
+  const text = docs
+    .sort((a, b) => {
+      const x = String(a.mapping[type]), y = String(b.mapping[type]);
+      return x < y ? -1 : x > y ? 1 : 0;
+    })
+    .map((p) => p.content)
+    .filter(Boolean)
+    .map((c) => c.replace(/\\([\\`*_{}[\]()#+\-.!>])/g, "$1"))
+    .join("\n\n");
+  promptCache.set(type, { text, at: Date.now() });
+  return text;
+}
 
 async function ollamaChat(messages) {
   const body = JSON.stringify({ model: OLLAMA_MODEL, messages, stream: true });
@@ -97,8 +81,13 @@ export async function post(req, reply) {
     return reply.code(400).send({ error: "ingredients[] required" });
   }
 
-  const numbered = ingredients.map((r, i) => `${i + 1}. ${r}`).join("\n");
+  const [system, allergenSystem] = await Promise.all([promptFor("categorize"), promptFor("allergen_check")]);
+  if (!system) {
+    console.error(`[categorize] no prompt in prompt_library — nothing maps to "categorize"`);
+    return reply.code(503).send({ error: `No categorize prompt in prompt_library` });
+  }
 
+  const numbered = ingredients.map((r, i) => `${i + 1}. ${r}`).join("\n");
   const userMsg = `Recipe: "${name || "unknown"}"\n\nIngredients:\n${numbered}`;
   console.log(`[categorize] model=${OLLAMA_MODEL} host=${OLLAMA_HOST} recipe="${name}" ingredients=${ingredients.length}`);
   console.log(`[categorize] user message:\n${userMsg}`);
@@ -106,7 +95,7 @@ export async function post(req, reply) {
   let raw;
   try {
     raw = await ollamaChat([
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: system },
       { role: "user", content: userMsg },
     ]);
   } catch (e) {
@@ -131,7 +120,33 @@ export async function post(req, reply) {
   const seasonings = allItems
     .filter((c) => c.category === "seasoning")
     .map((c) => ({ ingredient: c.ingredient, quantity: c.quantity ?? undefined, unit: c.unit ?? undefined }));
-  const allergens = Array.isArray(parsed?.allergens) ? parsed.allergens : [];
+  let allergens = (Array.isArray(parsed?.allergens) ? parsed.allergens : [])
+    .filter((a) => typeof a === "string" && a.trim());
+
+  // Second, allergen-only pass: a small model buries allergens when they trail the
+  // categorization output, so a dedicated FALCPA big-9 check gets its own full attention.
+  // Union with the first pass; skip silently if no allergen_check prompt is configured.
+  if (allergenSystem) {
+    try {
+      const aRaw = await ollamaChat([
+        { role: "system", content: allergenSystem },
+        { role: "user", content: userMsg },
+      ]);
+      const aCleaned = String(aRaw).replace(/^```(?:yaml)?\s*/i, "").replace(/```\s*$/, "").trim();
+      console.log(`[categorize] allergen pass raw output for "${name}":\n${aCleaned}`);
+      const aParsed = parseYaml(aCleaned);
+      const extra = (Array.isArray(aParsed?.allergens) ? aParsed.allergens : [])
+        .filter((a) => typeof a === "string" && a.trim());
+      // Normalize to the FALCPA enum — the model sometimes annotates ("milk (parmesan)")
+      allergens = [...new Set(
+        [...allergens, ...extra]
+          .map((a) => BIG9.find((b) => a.toLowerCase().includes(b.replace("_", " ")) || a.toLowerCase().includes(b)))
+          .filter(Boolean),
+      )];
+    } catch (e) {
+      console.error(`[categorize] allergen pass failed for "${name}" — keeping first-pass allergens:`, e.message);
+    }
+  }
 
   console.log(`[categorize] "${name}" → ${components.length} components [${components.map(c => c.category + ':' + c.ingredient).join(', ')}]`);
   console.log(`[categorize] "${name}" → ${seasonings.length} seasonings [${seasonings.map(s => s.ingredient).join(', ')}]`);

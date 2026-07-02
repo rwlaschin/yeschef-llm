@@ -390,11 +390,17 @@ async function deploy() {
     // Bake GCE custom image — Docker layers pre-loaded, no boot-time pull.
     const gceImage = await bakeGCEImage(img, tagHash, hash, machineType);
 
-    // Instance template — SPOT GPU VM on baked custom image.
+    // Instance template — GPU VM on baked custom image.
+    // Boot disk is Hyperdisk Balanced with provisioned throughput: model load into VRAM is
+    // disk-throughput-bound, and pd-ssd/pd-standard throughput scales with size (a 60GB
+    // pd-ssd caps at ~30MB/s → minutes to load). 400MB/s loads a 5GB model in ~13s and
+    // costs ~$0.02/hr of VM runtime.
     run(
       `gcloud compute instance-templates create ${template} --project=${GCP_PROJECT_ID} ` +
         `--machine-type=${machineType} ` +
         `--image=${gceImage} --image-project=${GCP_PROJECT_ID} ` +
+        `--boot-disk-size=${img.diskGb}GB --boot-disk-type=hyperdisk-balanced ` +
+        `--boot-disk-provisioned-iops=3000 --boot-disk-provisioned-throughput=400 ` +
         `--accelerator=type=nvidia-l4,count=${img.gpu} --maintenance-policy=TERMINATE ` +
         (USE_SPOT ? `--provisioning-model=SPOT --instance-termination-action=STOP ` : "") +
         `--network=${GCP_NETWORK} --scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
