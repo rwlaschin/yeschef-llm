@@ -1,0 +1,67 @@
+<!--
+---
+modified: 2026-07-06
+dependencies: [../../dashboard/components/ConfirmDialog.vue]
+---
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mockup: Confirm Dialog</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html { background: #111827; color: #f9fafb; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .font-serif { font-family: Georgia, 'Times New Roman', serif; }
+  .glass { background: rgba(31,41,55,0.4); border: 1px solid rgba(255,255,255,0.1); backdrop-filter: blur(12px); border-radius: 0.5rem; }
+  .btn-muted { background: #374151; color: #e5e7eb; }
+  .btn-muted:hover { background: #4b5563; }
+  .text-primary { color: #fbbf24; }
+  .text-secondary { color: #d1d5db; }
+  .mockup-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; margin-bottom: 8px; }
+  .stage { position: relative; height: 260px; border-radius: 12px; overflow: hidden; background: #030712; }
+</style>
+</head>
+<body class="p-8 space-y-10">
+<h1 class="text-xl font-semibold mb-2">Confirm Dialog</h1>
+<p class="text-sm text-gray-400 mb-6">dashboard/components/ConfirmDialog.vue — single shared confirm/destructive modal, teleported to &lt;body&gt;. Imperative API: <code>open(config) =&gt; Promise&lt;boolean&gt;</code>. Not rendered at all when closed (v-if, not just hidden).</p>
+
+<section data-state="closed">
+  <p class="mockup-label">Closed — v-if="isOpen" is false, nothing renders</p>
+  <div class="stage flex items-center justify-center text-sm text-gray-500">(nothing rendered)</div>
+</section>
+
+<section data-state="normal">
+  <p class="mockup-label">Open — normal confirmation (isDangerous: false, default)</p>
+  <div class="stage">
+    <div class="fixed inset-0 bg-black/60 flex items-center justify-center" style="position:absolute;">
+      <div class="glass p-6 max-w-sm w-full mx-4">
+        <h2 class="text-lg font-serif text-primary mb-4">Confirm</h2>
+        <p class="text-sm text-secondary mb-6">Are you sure?</p>
+        <div class="flex gap-3 justify-end">
+          <button class="px-4 py-2 rounded btn-muted transition font-medium">Cancel</button>
+          <button class="px-4 py-2 rounded font-medium transition bg-amber-500 text-gray-900 hover:bg-amber-600">Confirm</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section data-state="dangerous">
+  <p class="mockup-label">Open — dangerous action (isDangerous: true), custom title/message/confirmText</p>
+  <div class="stage">
+    <div class="fixed inset-0 bg-black/60 flex items-center justify-center" style="position:absolute;">
+      <div class="glass p-6 max-w-sm w-full mx-4">
+        <h2 class="text-lg font-serif text-primary mb-4">Delete tool</h2>
+        <p class="text-sm text-secondary mb-6">This will permanently remove "web_search" from the prompt library. This cannot be undone.</p>
+        <div class="flex gap-3 justify-end">
+          <button class="px-4 py-2 rounded btn-muted transition font-medium">Cancel</button>
+          <button class="px-4 py-2 rounded font-medium transition bg-red-900/30 text-red-400 hover:bg-red-900/50 border border-red-900/50">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

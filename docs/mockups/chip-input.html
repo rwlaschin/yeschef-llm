@@ -1,0 +1,139 @@
+<!--
+---
+modified: 2026-07-06
+dependencies: [../../dashboard/components/ChipInput.vue, ../../dashboard/components/Select.vue]
+---
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mockup: Chip Input</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html { background: #111827; color: #f9fafb; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .form-input { background: rgba(31,41,55,0.4); border: 1px solid rgba(255,255,255,0.1); border-radius: 0.5rem; }
+  .surface-overlay { background: #030712; border: 1px solid rgba(55,65,81,0.6); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); }
+  .text-muted { color: #6b7280; }
+  .text-primary { color: #fbbf24; }
+  .text-secondary { color: #d1d5db; }
+  .mockup-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; margin-bottom: 8px; }
+  .box { width: 320px; }
+  svg.icon { width: 12px; height: 12px; display: inline-block; }
+</style>
+</head>
+<body class="p-8 space-y-10">
+<h1 class="text-xl font-semibold mb-2">Chip Input</h1>
+<p class="text-sm text-gray-400 mb-6">dashboard/components/ChipInput.vue — multiselect-with-manual-entry: selected values render as removable chips, opens a searchable dropdown, typing an unmatched value offers to add it manually. v-model is always string[].</p>
+
+<section data-state="empty">
+  <p class="mockup-label">Closed, nothing selected — placeholder in text-muted</p>
+  <div class="box">
+    <div class="form-input flex flex-wrap items-center gap-1.5 min-h-[2.5rem] px-2 cursor-pointer">
+      <span class="text-muted text-sm">Choose or type…</span>
+      <span class="ml-auto text-xs opacity-60">▼</span>
+    </div>
+  </div>
+</section>
+
+<section data-state="closed-with-chips">
+  <p class="mockup-label">Closed, values selected — rounded-full amber chips with ✕ remove</p>
+  <div class="box">
+    <div class="form-input flex flex-wrap items-center gap-1.5 min-h-[2.5rem] px-2 cursor-pointer">
+      <span class="inline-flex items-center gap-1 rounded-full bg-amber-500/20 text-primary px-2 py-0.5 text-xs">
+        web_search
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </span>
+      <span class="inline-flex items-center gap-1 rounded-full bg-amber-500/20 text-primary px-2 py-0.5 text-xs">
+        web_fetch
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </span>
+      <span class="ml-auto text-xs opacity-60">▼</span>
+    </div>
+  </div>
+</section>
+
+<section data-state="open-dropdown">
+  <p class="mockup-label">Open — search input autofocused, checkmark on selected rows, chevron rotated</p>
+  <div class="box relative">
+    <div class="form-input flex flex-wrap items-center gap-1.5 min-h-[2.5rem] px-2 cursor-pointer relative z-50">
+      <span class="inline-flex items-center gap-1 rounded-full bg-amber-500/20 text-primary px-2 py-0.5 text-xs">
+        web_search
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </span>
+      <span class="ml-auto text-xs opacity-60 rotate-180 inline-block transition-transform">▼</span>
+    </div>
+    <div class="absolute top-full left-0 z-50 w-full pt-1">
+      <div class="surface-overlay rounded-lg p-1 max-h-64 overflow-auto">
+        <input type="text" placeholder="Search or type to add…" class="w-full form-input text-sm mb-1 px-2 py-1.5" readonly>
+        <button class="w-full flex items-center justify-between px-2 py-1 rounded text-xs text-primary font-medium">
+          <span class="truncate">web_search</span>
+          <svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>
+        </button>
+        <button class="w-full flex items-center justify-between px-2 py-1 rounded text-xs text-secondary hover:bg-amber-500/20">
+          <span class="truncate">web_fetch</span>
+        </button>
+        <button class="w-full flex items-center justify-between px-2 py-1 rounded text-xs text-secondary hover:bg-amber-500/20">
+          <span class="truncate">menu_plan</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section data-state="open-add-manual">
+  <p class="mockup-label">Open, typed query matches no option — "+ Add" row offered in amber</p>
+  <div class="box relative">
+    <div class="form-input flex flex-wrap items-center gap-1.5 min-h-[2.5rem] px-2 cursor-pointer relative z-50">
+      <span class="ml-auto text-xs opacity-60 rotate-180 inline-block transition-transform">▼</span>
+    </div>
+    <div class="absolute top-full left-0 z-50 w-full pt-1">
+      <div class="surface-overlay rounded-lg p-1 max-h-64 overflow-auto">
+        <input type="text" value="custom_tool" class="w-full form-input text-sm mb-1 px-2 py-1.5" readonly>
+        <button class="w-full flex items-center justify-between px-2 py-1 rounded text-xs text-secondary hover:bg-amber-500/20">
+          <span class="truncate">web_search</span>
+        </button>
+        <button class="w-full text-left px-2 py-1 rounded text-xs text-amber-400 hover:bg-amber-500/20">+ Add "custom_tool"</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section data-state="at-max">
+  <p class="mockup-label">max reached — "+ Add" and further selection suppressed; only removing a chip frees a slot</p>
+  <div class="box relative">
+    <div class="form-input flex flex-wrap items-center gap-1.5 min-h-[2.5rem] px-2 cursor-pointer relative z-50">
+      <span class="inline-flex items-center gap-1 rounded-full bg-amber-500/20 text-primary px-2 py-0.5 text-xs">
+        web_search
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </span>
+      <span class="ml-auto text-xs opacity-60 rotate-180 inline-block transition-transform">▼</span>
+    </div>
+    <div class="absolute top-full left-0 z-50 w-full pt-1">
+      <div class="surface-overlay rounded-lg p-1 max-h-64 overflow-auto">
+        <input type="text" placeholder="Search or type to add…" class="w-full form-input text-sm mb-1 px-2 py-1.5" readonly>
+        <button class="w-full flex items-center justify-between px-2 py-1 rounded text-xs text-primary font-medium">
+          <span class="truncate">web_search</span>
+          <svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>
+        </button>
+        <div class="px-2 py-1 text-xs text-muted">Max reached — remove a chip to add another</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section data-state="max-1-single-pick">
+  <p class="mockup-label">max=1 — exclusive single-pick; selecting a new option replaces the current value rather than accumulating</p>
+  <div class="box">
+    <div class="form-input flex flex-wrap items-center gap-1.5 min-h-[2.5rem] px-2 cursor-pointer">
+      <span class="inline-flex items-center gap-1 rounded-full bg-amber-500/20 text-primary px-2 py-0.5 text-xs">
+        chain_source_step
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </span>
+      <span class="ml-auto text-xs opacity-60">▼</span>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

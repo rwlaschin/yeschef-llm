@@ -1,0 +1,49 @@
+<!--
+---
+modified: 2026-07-06
+dependencies: [../../dashboard/components/HealthRing.vue]
+---
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mockup: Health Ring</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html { background: #111827; color: #f9fafb; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .mockup-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #6b7280; margin-bottom: 8px; }
+  .ring { border-radius: 9999px; display: block; }
+</style>
+</head>
+<body class="p-8 space-y-10">
+<h1 class="text-xl font-semibold mb-2">Health Ring</h1>
+<p class="text-sm text-gray-400 mb-6">dashboard/components/HealthRing.vue — compact donut status indicator (conic-gradient wedges + radial mask hole). No SVG, no grid, no dividers, no tooltip. Size default 22px.</p>
+
+<section data-state="all-ok">
+  <p class="mockup-label">3 segments, all ok (Mongo / Pub-Sub / Ollama)</p>
+  <span class="ring" style="width:22px; height:22px; background: conic-gradient(rgba(52,211,153,0.9) 0deg 120deg, rgba(52,211,153,0.9) 120deg 240deg, rgba(52,211,153,0.9) 240deg 360deg); -webkit-mask: radial-gradient(circle, transparent 38%, #000 39%); mask: radial-gradient(circle, transparent 38%, #000 39%);"></span>
+</section>
+
+<section data-state="mixed">
+  <p class="mockup-label">3 segments, one failing (hard color stops, no blending)</p>
+  <span class="ring" style="width:22px; height:22px; background: conic-gradient(rgba(52,211,153,0.9) 0deg 120deg, rgba(251,113,133,0.9) 120deg 240deg, rgba(52,211,153,0.9) 240deg 360deg); -webkit-mask: radial-gradient(circle, transparent 38%, #000 39%); mask: radial-gradient(circle, transparent 38%, #000 39%);"></span>
+</section>
+
+<section data-state="all-failing">
+  <p class="mockup-label">All segments failing</p>
+  <span class="ring" style="width:22px; height:22px; background: conic-gradient(rgba(251,113,133,0.9) 0deg 120deg, rgba(251,113,133,0.9) 120deg 240deg, rgba(251,113,133,0.9) 240deg 360deg); -webkit-mask: radial-gradient(circle, transparent 38%, #000 39%); mask: radial-gradient(circle, transparent 38%, #000 39%);"></span>
+</section>
+
+<section data-state="empty">
+  <p class="mockup-label">segments=[] — renders single full-ring "No checks" segment, failing (rose) color</p>
+  <span class="ring" style="width:22px; height:22px; background: conic-gradient(rgba(251,113,133,0.9) 0deg 360deg); -webkit-mask: radial-gradient(circle, transparent 38%, #000 39%); mask: radial-gradient(circle, transparent 38%, #000 39%);"></span>
+</section>
+
+<section data-state="larger-size">
+  <p class="mockup-label">size=48 (larger than the header default, still same rendering logic)</p>
+  <span class="ring" style="width:48px; height:48px; background: conic-gradient(rgba(52,211,153,0.9) 0deg 90deg, rgba(52,211,153,0.9) 90deg 180deg, rgba(251,113,133,0.9) 180deg 270deg, rgba(52,211,153,0.9) 270deg 360deg); -webkit-mask: radial-gradient(circle, transparent 38%, #000 39%); mask: radial-gradient(circle, transparent 38%, #000 39%);"></span>
+</section>
+
+</body>
+</html>

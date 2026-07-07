@@ -1,5 +1,5 @@
 // admission.js — PURE, distributed-safe decisions for the leaseless dispatch model.
-// See design/distributed-dispatch.md. No lease, no holder, no `active` counter — nothing a
+// See docs/design/worker-dispatch.md. No lease, no holder, no `active` counter — nothing a
 // crash can leak. Correctness rests on ONE primitive: first-writer-wins completion (a CAS the
 // caller runs inside a Firestore transaction). These two functions encode the guard.
 //

@@ -16,13 +16,13 @@ import { processDay } from "./lib/inventory.js";
 // planner's subtype list and default tools live here, NOT hardcoded in the worker.
 import { SUBTYPES, DEFAULT_TOOLS, MODELS, unitDocId, defaultSampler, temperatureForStyle, DEFAULT_STYLE, STYLE_TEMPS, FAKE_SUBSCRIPTION } from "../config/models.js";
 import { cannedResponse } from "./cannedResponses.js";
-// Step builders live under steps/ — one file per step kind (see worker/ARCHITECTURE.md).
+// Step builders live under steps/ — one file per step kind (see docs/plans/worker-refactor/plan.md).
 // Pure / dependency-injected modules, unit-tested in steps/*.test.js.
 import { buildMessages, buildStepMessages, sizeNumCtx, TerminalError } from "./steps/step.js";
 import { buildPlannerMessages } from "./steps/planner.js";
 import { buildComplianceMessages } from "./steps/compliance.js";
 import { visibleResponse, splitOutcome } from "./steps/outcome.js";
-// Leaseless, idempotent dispatch decisions (design/distributed-dispatch.md). Pure + unit-tested
+// Leaseless, idempotent dispatch decisions (docs/design/worker-dispatch.md). Pure + unit-tested
 // in admission.test.js. shouldRun gates the receive; completionWrite is the first-writer-wins CAS.
 import { shouldRun, completionWrite } from "./admission.js";
 // Ollama HTTP transport (extracted + unit-tested in ollama.test.js).
@@ -65,9 +65,9 @@ const {
   WEB_TOOL_FALLBACK,                                 // when on, a non-retryable web-tool failure (429 quota /
                                                      // 401/403 auth) DEGRADES to one tool-free round (model
                                                      // answers from its own knowledge) instead of terminal-
-                                                     // failing. Default depends on DEPLOY_ENV (see
+                                                     // failing. Default depends on NODE_ENV (see
                                                      // WEB_TOOL_FALLBACK_ON below); set "true"/"false" to override.
-  DEPLOY_ENV = "production",                         // "dev" → also load inactive prompts
+  NODE_ENV = "production",                           // "dev" → also load inactive prompts
   PROMPT_COLLECTION = "prompt_library",
   TOOL_COLLECTION = "llmtools",
   MODEL_CONFIG_COLLECTION = "model_config",          // sampler params: `_default` doc + per-model overrides
@@ -192,7 +192,7 @@ async function connectMongo() {
 //   - for a type: join all matching prompts, sorted ASC by the lexBetween order key
 //     via plain code-unit compare (matches the dashboard's drag-drop ordering).
 // Match "prod"/"production" in any case — never an exact-string env compare.
-const IS_PROD = /prod(uction)?/i.test(DEPLOY_ENV || "");
+const IS_PROD = /prod(uction)?/i.test(NODE_ENV || "");
 const INCLUDE_INACTIVE = !IS_PROD;
 
 // In-process generation gate. Pub/Sub flow control (maxMessages — see main()) is the INTENDED
@@ -203,7 +203,7 @@ const INCLUDE_INACTIVE = !IS_PROD;
 // server's run-slot count, baked into the image); the excess QUEUES in-process while its Pub/Sub
 // lease keeps extending. It is NOT a lease and NOT cross-server correctness — duplicate concurrent
 // runs of one unit remain harmless via the first-writer-wins CAS (completionWrite). See
-// design/distributed-dispatch.md.
+// docs/design/worker-dispatch.md.
 const GEN_LIMIT = Math.max(1, parseInt(process.env.OLLAMA_NUM_PARALLEL, 10) || (IS_PROD ? 2 : 1));
 const genGate = createSemaphore(GEN_LIMIT);
 console.log(`[worker] generation gate: max ${GEN_LIMIT} concurrent (OLLAMA_NUM_PARALLEL=${process.env.OLLAMA_NUM_PARALLEL ?? "unset"})`);
@@ -437,7 +437,7 @@ const WEB_SEARCH_CAP = Math.max(1, parseInt(WEB_SEARCH_MAX, 10) || 3);
 // WEB_TOOL_FALLBACK ("true"/"false") overrides the env-based default.
 const WEB_TOOL_FALLBACK_ON =
   WEB_TOOL_FALLBACK == null || WEB_TOOL_FALLBACK === ""
-    ? DEPLOY_ENV === "dev"
+    ? NODE_ENV === "dev"
     : /^true$/i.test(WEB_TOOL_FALLBACK);
 
 // Capping the COUNT is not enough — each web result carries full page text, so even 10 results
@@ -911,7 +911,7 @@ async function handleMessage(message) {
     payload.outcome = outcome;
     console.log(`[worker]   ${jobId} → ${runStatus}${outcome ? ` (${outcome})` : ""}`);
 
-    // Completion = first-writer-wins CAS (design/distributed-dispatch.md). In a transaction,
+    // Completion = first-writer-wins CAS (docs/design/worker-dispatch.md). In a transaction,
     // completionWrite returns null if this slot is already terminal for this/a newer attempt, or
     // owned by a newer attempt — so a duplicate concurrent run, or a stale older-attempt completion,
     // never clobbers the winner. Results live in Firestore only (clients react via onSnapshot;
@@ -986,7 +986,7 @@ async function main() {
   // slots), prod → 2 by default and tunable via MAX_CONCURRENCY. maxExtensionMinutes keeps the
   // Pub/Sub lease auto-refreshed (up to 60 min) so a long generation isn't redelivered mid-run.
   const maxMessages = parseInt(process.env.MAX_CONCURRENCY || (IS_PROD ? "2" : "1"), 10);
-  console.log(`  Flow control: maxMessages=${maxMessages} (env=${DEPLOY_ENV}), maxExtensionMinutes=60`);
+  console.log(`  Flow control: maxMessages=${maxMessages} (env=${NODE_ENV}), maxExtensionMinutes=60`);
 
   // Split a comma list into individual names, but do NOT trim/normalize: each name is a
   // SUBSCRIPTION_NAME is a single subscription id — one model, one sub. The split keeps the

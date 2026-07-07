@@ -1,0 +1,123 @@
+<!--
+---
+modified: 2026-07-06
+dependencies: [../../dashboard/components/ToastContainer.vue]
+---
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mockup: Toast</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html { background: #111827; color: #f9fafb; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .glass { background: rgba(31,41,55,0.4); backdrop-filter: blur(12px); border-radius: 0.5rem; }
+  .mockup-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; margin-bottom: 8px; }
+  .stage { position: relative; height: 160px; border-radius: 12px; overflow: hidden; background: #030712; }
+  .toast-stack { position: absolute; bottom: 16px; left: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .toast-card { min-width: 24rem; max-width: 24rem; padding: 1rem; display: flex; align-items: flex-start; gap: 0.75rem; border-width: 1px; }
+</style>
+</head>
+<body class="p-8 space-y-10">
+<h1 class="text-xl font-semibold mb-2">Toast</h1>
+<p class="text-sm text-gray-400 mb-6">dashboard/components/ToastContainer.vue — single global feedback surface driven by useToast(). Fixed bottom-left, stacked, glass cards. Container has pointer-events-none; each card re-enables pointer-events-auto.</p>
+
+<section data-state="success">
+  <p class="mockup-label">type="success" — ✓ icon, green</p>
+  <div class="stage">
+    <div class="toast-stack">
+      <div class="glass toast-card bg-green-500/20 border-green-500/30">
+        <span class="text-xl flex-shrink-0">✓</span>
+        <div class="flex-1 min-w-0">
+          <p class="font-semibold">Prompt saved</p>
+          <p class="text-sm opacity-80 mt-1">prompt_library entry updated.</p>
+        </div>
+        <button class="flex-shrink-0 ml-2 hover:opacity-70 transition">✕</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section data-state="error">
+  <p class="mockup-label">type="error" — ✕ icon, red</p>
+  <div class="stage">
+    <div class="toast-stack">
+      <div class="glass toast-card bg-red-500/20 border-red-500/30">
+        <span class="text-xl flex-shrink-0">✕</span>
+        <div class="flex-1 min-w-0">
+          <p class="font-semibold">Save failed</p>
+          <p class="text-sm opacity-80 mt-1">Could not reach the worker. Try again.</p>
+        </div>
+        <button class="flex-shrink-0 ml-2 hover:opacity-70 transition">✕</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section data-state="info">
+  <p class="mockup-label">type="info" — ℹ icon, blue</p>
+  <div class="stage">
+    <div class="toast-stack">
+      <div class="glass toast-card bg-blue-500/20 border-blue-500/30">
+        <span class="text-xl flex-shrink-0">ℹ</span>
+        <div class="flex-1 min-w-0">
+          <p class="font-semibold">Run queued</p>
+        </div>
+        <button class="flex-shrink-0 ml-2 hover:opacity-70 transition">✕</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section data-state="warning">
+  <p class="mockup-label">type="warning" — ⚠ icon, yellow</p>
+  <div class="stage">
+    <div class="toast-stack">
+      <div class="glass toast-card bg-yellow-500/20 border-yellow-500/30">
+        <span class="text-xl flex-shrink-0">⚠</span>
+        <div class="flex-1 min-w-0">
+          <p class="font-semibold">Model cold-starting</p>
+          <p class="text-sm opacity-80 mt-1">First response may take longer than usual.</p>
+        </div>
+        <button class="flex-shrink-0 ml-2 hover:opacity-70 transition">✕</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section data-state="unrecognized-type">
+  <p class="mockup-label">type=(unrecognized) — falls through with • icon, no color match</p>
+  <div class="stage">
+    <div class="toast-stack">
+      <div class="glass toast-card">
+        <span class="text-xl flex-shrink-0">•</span>
+        <div class="flex-1 min-w-0">
+          <p class="font-semibold">Untyped notice</p>
+        </div>
+        <button class="flex-shrink-0 ml-2 hover:opacity-70 transition">✕</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section data-state="stacked">
+  <p class="mockup-label">Multiple toasts stacked (space-y-3) — TransitionGroup name="toast", slide + fade 300ms both directions</p>
+  <div class="stage" style="height:220px;">
+    <div class="toast-stack">
+      <div class="glass toast-card bg-green-500/20 border-green-500/30">
+        <span class="text-xl flex-shrink-0">✓</span>
+        <div class="flex-1 min-w-0"><p class="font-semibold">Prompt saved</p></div>
+        <button class="flex-shrink-0 ml-2 hover:opacity-70 transition">✕</button>
+      </div>
+      <div class="glass toast-card bg-yellow-500/20 border-yellow-500/30">
+        <span class="text-xl flex-shrink-0">⚠</span>
+        <div class="flex-1 min-w-0"><p class="font-semibold">Model cold-starting</p></div>
+        <button class="flex-shrink-0 ml-2 hover:opacity-70 transition">✕</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

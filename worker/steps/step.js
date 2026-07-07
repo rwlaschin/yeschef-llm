@@ -1,7 +1,7 @@
 // steps/step.js — owns: shared step assembly + context-window sizing.
 // Used by every step builder (planner.js, compliance.js) and the generic step path.
 // Pure where possible; the Firestore/Mongo-backed helpers are passed in via `deps` so this
-// file stays unit-testable (see step.test.js). See design/worker-architecture.md.
+// file stays unit-testable (see step.test.js). See docs/plans/worker-refactor/plan.md.
 
 import { section, joinSections } from "./prompt.js";
 import { unitDocId } from "../../config/models.js";

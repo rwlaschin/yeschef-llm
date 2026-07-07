@@ -23,6 +23,11 @@ import { menuSchema, planSchema, querySchema, stepsWriteSchema, jobIdSchema } fr
 
 if (!getApps().length) initializeApp(); // ADC on Cloud Run
 
+// DEV ONLY: appended to each lazy-import specifier below so Node's ESM loader treats an
+// edited entry file as a distinct module and re-reads it from disk, instead of returning
+// the cached module from a prior request — see lib/lazy.js for the other half of this.
+const bust = () => (process.env.NODE_ENV === "dev" ? `?t=${Date.now()}` : "");
+
 const FASTIFY_OPTS = { maxRequestHeadersSize: 32768 };
 const MAX_CACHE_SECONDS = 60 * 60 * 24 * 30 * 12; // 12 months
 
@@ -83,19 +88,19 @@ ai.addHook("preHandler", requireAuth);
 // ---- Route table (lazy) ------------------------------------
 // requireAuth (global preHandler above) runs first on every route; validateBody is a
 // per-route preHandler that AJV-checks the JSON body. /events (Pub/Sub) + /health stay open.
-ai.post("/plan", { preHandler: validateBody(planSchema) }, lazy(() => import("./entry/ai/plan.js"), "post"));    // UI/YesChef launch a plan
-ai.post("/menu", { preHandler: validateBody(menuSchema) }, lazy(() => import("./entry/ai/menu.js"), "post"));    // UI: compose a Menu Plan (no planner) → run step 0
-ai.post("/query", { preHandler: validateBody(querySchema) }, lazy(() => import("./entry/ai/query.js"), "post"));  // UI chat copilot: single-shot query
-ai.get("/steps", lazy(() => import("./entry/ai/steps.js"), "list"));   // Step Library list (Mongo plan_library)
-ai.post("/steps", { preHandler: validateBody(stepsWriteSchema) }, lazy(() => import("./entry/ai/steps.js"), "post"));  // Step Library writes (Mongo plan_library)
+ai.post("/plan", { preHandler: validateBody(planSchema) }, lazy(() => import(`./entry/ai/plan.js${bust()}`), "post"));    // UI/YesChef launch a plan
+ai.post("/menu", { preHandler: validateBody(menuSchema) }, lazy(() => import(`./entry/ai/menu.js${bust()}`), "post"));    // UI: compose a Menu Plan (no planner) → run step 0
+ai.post("/query", { preHandler: validateBody(querySchema) }, lazy(() => import(`./entry/ai/query.js${bust()}`), "post"));  // UI chat copilot: single-shot query
+ai.get("/steps", lazy(() => import(`./entry/ai/steps.js${bust()}`), "list"));   // Step Library list (Mongo plan_library)
+ai.post("/steps", { preHandler: validateBody(stepsWriteSchema) }, lazy(() => import(`./entry/ai/steps.js${bust()}`), "post"));  // Step Library writes (Mongo plan_library)
 // Re-run an EXISTING plan without re-running the planner (hard-deletes the right run range,
 // server-side). Static /resume/plan resolves before the :step param routes (Fastify precedence).
-ai.post("/rebuild", { preHandler: validateBody(jobIdSchema) }, lazy(() => import("./entry/ai/resume.js"), "rebuild"));    // DEV: re-parse existing planner output → run step 0 (no planner re-run)
-ai.post("/resume/plan", { preHandler: validateBody(jobIdSchema) }, lazy(() => import("./entry/ai/resume.js"), "plan"));  // wipe all step runs, run step 0
-ai.post("/resume/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import("./entry/ai/resume.js"), "next")); // wipe >N, publish N's finish
-ai.post("/run/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import("./entry/ai/resume.js"), "run"));     // DEBUG: run ONE step isolated (report:null, no cascade)
-ai.post("/events", lazy(() => import("./entry/ai/events.js"), "post")); // `orchestrate` topic push (Pub/Sub OIDC, body = Google envelope)
-ai.post("/categorize", lazy(() => import("./entry/ai/categorize.js"), "post")); // scraper: sync ingredient categorization via Ollama (no auth, no Firestore)
+ai.post("/rebuild", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js${bust()}`), "rebuild"));    // DEV: re-parse existing planner output → run step 0 (no planner re-run)
+ai.post("/resume/plan", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js${bust()}`), "plan"));  // wipe all step runs, run step 0
+ai.post("/resume/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js${bust()}`), "next")); // wipe >N, publish N's finish
+ai.post("/run/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js${bust()}`), "run"));     // DEBUG: run ONE step isolated (report:null, no cascade)
+ai.post("/events", lazy(() => import(`./entry/ai/events.js${bust()}`), "post")); // `orchestrate` topic push (Pub/Sub OIDC, body = Google envelope)
+ai.post("/categorize", lazy(() => import(`./entry/ai/categorize.js${bust()}`), "post")); // scraper: sync ingredient categorization via Ollama (no auth, no Firestore)
 ai.get("/health", () => ({ status: "ok" }));                            // liveness probe (dashboard health panel)
 
 ai.setNotFoundHandler((_req, reply) => reply.code(404).send({ error: "Not found" }));

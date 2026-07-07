@@ -25,7 +25,7 @@ const DEFAULT_SUB_CONFIG = {
 // is NOT the give-up authority: that is semantic, owned by the orchestrator (attempts[step] → MAX_GEN
 // → passthrough). Pub/Sub counts EVERY delivery, including healthy redeliveries from spot preemption,
 // so this is set high — a long unit preempted a few times must not dead-letter while still healthy.
-// See design/distributed-dispatch.md.
+// See docs/design/worker-dispatch.md.
 const MAX_DELIVERY_ATTEMPTS = 50;
 
 // `models` defaults to the full registry (prod provisions everything). Dev passes

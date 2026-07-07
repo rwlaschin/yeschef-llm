@@ -1,4 +1,4 @@
-// Tests for the leaseless dispatch decisions (design/distributed-dispatch.md).
+// Tests for the leaseless dispatch decisions (docs/design/worker-dispatch.md).
 // Fast by construction: no Ollama, no Pub/Sub, no Firestore. The concurrency tests use an
 // in-memory store that mimics Firestore runTransaction (optimistic concurrency, retry-on-conflict)
 // plus a barrier that forces simultaneous reads, so "async with multiple workers" races are

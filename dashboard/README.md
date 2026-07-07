@@ -39,7 +39,7 @@ npm run dev  # Starts Ollama, Pub/Sub emulator, and worker
 
 This gives you:
 - ✅ Ollama on `localhost:11434`
-- ✅ Pub/Sub emulator on `localhost:8085`
+- ✅ Pub/Sub emulator on `localhost:8185`
 - ✅ MongoDB Atlas connection (in `.env.dev`)
 - ✅ Worker listening on subscriptions
 
@@ -90,7 +90,7 @@ Dashboard (Nuxt)
 
 **"Pub/Sub connection failed"**
 - Ensure Firebase emulator is running: `firebase emulators:start --only=pubsub`
-- Check `PUBSUB_EMULATOR_HOST=localhost:8085`
+- Check `PUBSUB_EMULATOR_HOST=localhost:8185`
 
 **"No results appearing"**
 - Check that the worker is running: `npm run dev`

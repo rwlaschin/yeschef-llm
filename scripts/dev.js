@@ -53,13 +53,18 @@ for (const [k, v] of Object.entries({ MONGO_URI, MONGO_DB, MONGO_COLLECTION })) 
 }
 
 // Dev-capable models, derived from config/models.js (large/70B excluded via dev:false).
-const DEV_MODELS = devModels().map((m) => ({
-  name: imageOf(m),
-  model: m.model,
-  topic: m.topic,
-  subscription: subscriptionOf(m),
-  gateway: m.gateway || "",
-}));
+// Sorted so llama3.1:8b builds first (smallest/fastest) — the build loop below is sequential
+// and blocking, so this ordering only affects HOW SOON the 8b images finish within that wait,
+// not whether anything starts early; the Waker still waits for the whole loop either way.
+const DEV_MODELS = devModels()
+  .map((m) => ({
+    name: imageOf(m),
+    model: m.model,
+    topic: m.topic,
+    subscription: subscriptionOf(m),
+    gateway: m.gateway || "",
+  }))
+  .sort((a, b) => (b.model === "llama3.1:8b") - (a.model === "llama3.1:8b"));
 const imageTag = (m) => `yeschef-${m.name}:dev`;
 const containerName = containerOf; // single source of truth — see config/models.js
 
@@ -264,7 +269,6 @@ async function main() {
     AI_BASE_URL, // point the orchestrate push sub at the local /ai/events
     MONGO_URI, // the /ai function reads/writes the Step Library (plan_library) in Mongo
     MONGO_DB,
-    DEPLOY_ENV: "dev",
     // /ai/categorize uses the HOST's native Ollama (small model, always up).
     CATEGORIZE_OLLAMA_HOST: process.env.CATEGORIZE_OLLAMA_HOST || "http://localhost:11434",
     CATEGORIZE_OLLAMA_MODEL: process.env.CATEGORIZE_OLLAMA_MODEL || "llama3.2:3b",
@@ -278,31 +282,15 @@ async function main() {
   process.env.PUBSUB_EMULATOR_HOST = PUBSUB_EMULATOR_HOST;
   await setupPubSub(GCP_PROJECT_ID, devModels());
 
-  // 3. Build each dev model image if MISSING or STALE. Stale = its baked recipe (model tag /
-  //    gateway / Dockerfile) no longer matches config — so changing a model in config/models.js
-  //    auto-rebuilds that image here, no manual `docker rmi`. (Worker code is mounted, not baked,
-  //    so code edits never trigger a rebuild.) A failed build is non-fatal — skip that model.
-  const available = [];
-  for (const m of DEV_MODELS) {
-    try {
-      const tag = imageTag(m);
-      if (!imageExists(tag)) {
-        buildImage(m);
-      } else if (imageRecipeHash(tag) !== recipeHash(m)) {
-        console.log(`↻ ${tag} is STALE (model/recipe changed in config) — rebuilding`);
-        buildImage(m);
-      } else {
-        console.log(`✓ Image present: ${tag}`);
-      }
-      available.push(m);
-    } catch (err) {
-      console.warn(`⚠️  Skipping ${m.model} — image build failed: ${err.message}`);
-    }
-  }
-  if (available.length === 0) throw new Error("No dev model images available — cannot start waker.");
+  if (DEV_MODELS.length === 0) throw new Error("No dev models configured — nothing for the waker to watch.");
 
-  // 4. Waker — docker-starts each model's worker on backlog (emulates the MIG autoscaler).
-  const wakerModels = available.map((m) => ({
+  // 3. Waker — docker-starts each model's worker on backlog (emulates the MIG autoscaler). Started
+  //    BEFORE step 4's builds finish, not after: the waker polls per-model in its own loop with a
+  //    try/catch around each model (scripts/waker.js), so a model whose image isn't built yet just
+  //    logs and retries next poll — it never blocks on, or crashes because of, the OTHER models. So
+  //    the moment the FIRST image (llama3.1:8b, built first — see DEV_MODELS sort above) is ready,
+  //    the waker can wake it immediately, while the rest keep building sequentially in step 4 below.
+  const wakerModels = DEV_MODELS.map((m) => ({
     subscription: m.subscription,
     image: imageTag(m),
     container: containerName(m),
@@ -320,7 +308,6 @@ async function main() {
     BRAVE_API_KEY: process.env.BRAVE_API_KEY,   // optional web_search pool provider
     TAVILY_API_KEY: process.env.TAVILY_API_KEY, // optional web_search pool provider
     OPENCLAW_GATEWAY_TOKEN, // shared token for the OpenClaw gateway (gateway tiers)
-    DEPLOY_ENV: "dev", // worker loads inactive prompt_library entries too in dev
   });
 
   // 4b. Fake/canned worker — a bare node worker (no Docker, no Ollama) that drains the shared
@@ -337,8 +324,32 @@ async function main() {
     MONGO_COLLECTION,
     OLLAMA_MODEL: "canned",            // log-only on the fake path; the model is never called
     OLLAMA_HOST: "http://127.0.0.1:0", // unused on the fake path
-    DEPLOY_ENV: "dev",
   });
+
+  // 4. Build each dev model image if MISSING or STALE, sequentially (one `docker build` at a time —
+  //    concurrent builds contend for the same disk/CPU). Stale = its baked recipe (model tag / gateway
+  //    / Dockerfile) no longer matches config — so changing a model in config/models.js auto-rebuilds
+  //    that image here, no manual `docker rmi`. (Worker code is mounted, not baked, so code edits never
+  //    trigger a rebuild.) A failed build is non-fatal — skip that model; the waker (already running,
+  //    watching ALL of DEV_MODELS from step 3 above) will just keep retrying that one model's backlog
+  //    check and logging an error until/unless its image ever becomes available.
+  const available = [];
+  for (const m of DEV_MODELS) {
+    try {
+      const tag = imageTag(m);
+      if (!imageExists(tag)) {
+        buildImage(m);
+      } else if (imageRecipeHash(tag) !== recipeHash(m)) {
+        console.log(`↻ ${tag} is STALE (model/recipe changed in config) — rebuilding`);
+        buildImage(m);
+      } else {
+        console.log(`✓ Image present: ${tag}`);
+      }
+      available.push(m);
+    } catch (err) {
+      console.warn(`⚠️  Skipping ${m.model} — image build failed: ${err.message}`);
+    }
+  }
 
   console.log("\n=== Dev environment ready ===");
   console.log(`  Pub/Sub Emulator : ${PUBSUB_EMULATOR_HOST}`);
@@ -347,6 +358,7 @@ async function main() {
   console.log(`  Models (on demand):`);
   for (const m of available) console.log(`    - ${m.model}  (${m.subscription} → ${containerName(m)})`);
   console.log(`  (70B/large omitted — needs 2× L4 GPUs)`);
+  if (available.length === 0) { console.log("\n(No images built yet — waker is running and will pick them up as they finish.)\n"); return; }
   const ex = available[0]; // derive the example from the actual dev model — never hard-code
   console.log("\nSend a test job (publishes to the emulator topic):");
   console.log(`  PUBSUB_EMULATOR_HOST=${PUBSUB_EMULATOR_HOST} gcloud pubsub topics publish ${ex.topic} \\`);
