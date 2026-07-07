@@ -1,0 +1,68 @@
+<!--
+---
+modified: 2026-07-06
+dependencies: [../../dashboard/components/MarkdownEditor.client.vue]
+---
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mockup: Markdown Editor</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html { background: #111827; color: #f9fafb; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .border-divider { border: 1px solid rgba(55,65,81,0.3); }
+  .cm-wrap { min-height: 22rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  .mockup-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; margin-bottom: 8px; }
+  .box { width: 560px; }
+  .cm-dark { background: #282c34; color: #abb2bf; }
+  .cm-light-mode { background: #ffffff; color: #111827; }
+  .gutter-dark { color: #636d83; background: #21252b; }
+  .gutter-light { color: #9ca3af; background: #f9fafb; }
+  .line { display: flex; }
+  .gutter-col { width: 2.5rem; text-align: right; padding-right: 0.75rem; user-select: none; flex-shrink: 0; }
+</style>
+</head>
+<body class="p-8 space-y-10">
+<h1 class="text-xl font-semibold mb-2">Markdown Editor</h1>
+<p class="text-sm text-gray-400 mb-6">dashboard/components/MarkdownEditor.client.vue — CodeMirror 6 code-editor field for authoring prompt text. NOT a markdown renderer — pure pass-through, byte-for-byte, no syntax mode, only line-wrapping. Client-only (.client.vue).</p>
+
+<section data-state="empty-placeholder">
+  <p class="mockup-label">Empty — placeholder text shown, dark theme (oneDark, default)</p>
+  <div class="box border-divider rounded-lg overflow-hidden">
+    <div class="cm-wrap cm-dark p-3">
+      <div class="line"><span class="gutter-col gutter-dark">1</span><span class="opacity-50">Write the prompt exactly as it should reach the model — whitespace, indentation and # are kept verbatim.</span></div>
+    </div>
+  </div>
+</section>
+
+<section data-state="populated-dark">
+  <p class="mockup-label">Populated — dark theme (@codemirror/theme-one-dark), tab size 2, line-wrapping only</p>
+  <div class="box border-divider rounded-lg overflow-hidden">
+    <div class="cm-wrap cm-dark p-3">
+      <div class="line"><span class="gutter-col gutter-dark">1</span><span># System Prompt</span></div>
+      <div class="line"><span class="gutter-col gutter-dark">2</span><span>You are Remy, a culinary AI assistant.</span></div>
+      <div class="line"><span class="gutter-col gutter-dark">3</span><span></span></div>
+      <div class="line"><span class="gutter-col gutter-dark">4</span><span>## Rules</span></div>
+      <div class="line"><span class="gutter-col gutter-dark">5</span><span>  - Never fabricate nutrition data.</span></div>
+      <div class="line"><span class="gutter-col gutter-dark">6</span><span>  - Preserve # characters verbatim.</span></div>
+    </div>
+  </div>
+</section>
+
+<section data-state="populated-light">
+  <p class="mockup-label">Populated — light theme (hand-built: #111827 text on #ffffff, amber #d97706 caret/selection accents, #f9fafb gutter). Follows useTheme() reactively.</p>
+  <div class="box border-divider rounded-lg overflow-hidden">
+    <div class="cm-wrap cm-light-mode p-3">
+      <div class="line"><span class="gutter-col gutter-light">1</span><span># System Prompt</span></div>
+      <div class="line"><span class="gutter-col gutter-light">2</span><span style="background:#fde68a;">You are Remy, a culinary AI assistant.</span></div>
+      <div class="line"><span class="gutter-col gutter-light">3</span><span></span></div>
+      <div class="line"><span class="gutter-col gutter-light">4</span><span>## Rules</span></div>
+    </div>
+  </div>
+  <p class="text-xs text-gray-500 mt-2">Highlighted line simulates the amber selection background (#fde68a).</p>
+</section>
+
+</body>
+</html>

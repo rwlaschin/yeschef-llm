@@ -1,5 +1,5 @@
 // Pure in-process concurrency gate. This is NOT a lease and NOT cross-server correctness — that
-// lives in the completion CAS (admission.js / design/distributed-dispatch.md). It only bounds how
+// lives in the completion CAS (admission.js / docs/design/worker-dispatch.md). It only bounds how
 // many GENERATIONS this single process runs at once, so a transport that hands us more messages
 // than the local Ollama can serve does not flood it.
 //

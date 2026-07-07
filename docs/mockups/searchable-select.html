@@ -1,0 +1,102 @@
+<!--
+---
+modified: 2026-07-06
+dependencies: [../../dashboard/components/SearchableSelect.vue, ../../dashboard/components/Select.vue]
+---
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mockup: Searchable Select</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html { background: #111827; color: #f9fafb; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .surface-2 { background: rgba(31,41,55,0.4); }
+  .surface-overlay { background: #030712; border: 1px solid rgba(55,65,81,0.6); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); }
+  .surface-solid { background: #111827; }
+  .border-divider { border: 1px solid rgba(55,65,81,0.3); }
+  .text-muted { color: #6b7280; }
+  .text-strong { color: #ffffff; }
+  .text-primary { color: #fbbf24; }
+  .text-secondary { color: #d1d5db; }
+  .mockup-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; margin-bottom: 8px; }
+  .box { width: 300px; }
+</style>
+</head>
+<body class="p-8 space-y-10">
+<h1 class="text-xl font-semibold mb-2">Searchable Select</h1>
+<p class="text-sm text-gray-400 mb-6">dashboard/components/SearchableSelect.vue — Select's API/visual language on Headless UI's Combobox, type-to-filter. Use for long option lists (e.g. ~400 timezones). No cap on filtered results.</p>
+
+<section data-state="closed">
+  <p class="mockup-label">Closed / unfocused text input, placeholder shown</p>
+  <div class="box">
+    <div class="w-full rounded-lg min-h-[2.5rem] surface-2 border-divider flex items-center transition-colors">
+      <input class="w-full px-3 py-2 text-sm bg-transparent text-strong outline-none" placeholder="Search…" readonly>
+      <span class="px-2 text-xs opacity-60">▼</span>
+    </div>
+  </div>
+</section>
+
+<section data-state="browsing-grouped">
+  <p class="mockup-label">Browsing (empty query) — grouped by `group`, first-seen order, sticky opaque group headers</p>
+  <div class="box relative">
+    <div class="w-full rounded-lg min-h-[2.5rem] surface-2 border-divider flex items-center transition-colors">
+      <input class="w-full px-3 py-2 text-sm bg-transparent text-strong outline-none" placeholder="Search…" readonly>
+      <span class="px-2 text-xs opacity-60">▼</span>
+    </div>
+    <div class="absolute z-50 w-full mt-1 surface-overlay rounded-lg p-1 space-y-0.5 max-h-72 overflow-auto">
+      <div class="sticky top-0 z-10 -mx-1 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted surface-solid">Americas</div>
+      <div class="px-2 py-1 rounded cursor-pointer text-xs truncate text-primary font-medium">America/New_York</div>
+      <div class="px-2 py-1 rounded cursor-pointer text-xs truncate text-secondary">America/Chicago</div>
+      <div class="px-2 py-1 rounded cursor-pointer text-xs truncate bg-amber-500/20 text-secondary">America/Denver</div>
+      <div class="sticky top-0 z-10 -mx-1 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted surface-solid">Europe</div>
+      <div class="px-2 py-1 rounded cursor-pointer text-xs truncate text-secondary">Europe/London</div>
+      <div class="px-2 py-1 rounded cursor-pointer text-xs truncate text-secondary">Europe/Berlin</div>
+    </div>
+  </div>
+</section>
+
+<section data-state="searching-flat">
+  <p class="mockup-label">Searching (non-empty query) — grouping dropped, one flat filtered list</p>
+  <div class="box relative">
+    <div class="w-full rounded-lg min-h-[2.5rem] surface-2 border-divider flex items-center transition-colors">
+      <input class="w-full px-3 py-2 text-sm bg-transparent text-strong outline-none" value="denv" readonly>
+      <span class="px-2 text-xs opacity-60">▼</span>
+    </div>
+    <div class="absolute z-50 w-full mt-1 surface-overlay rounded-lg p-1 space-y-0.5 max-h-72 overflow-auto">
+      <div class="px-2 py-1 rounded cursor-pointer text-xs truncate bg-amber-500/20 text-primary font-medium">America/Denver</div>
+    </div>
+  </div>
+</section>
+
+<section data-state="no-matches">
+  <p class="mockup-label">Searching — empty filtered result shows "No matches" in text-muted</p>
+  <div class="box relative">
+    <div class="w-full rounded-lg min-h-[2.5rem] surface-2 border-divider flex items-center transition-colors">
+      <input class="w-full px-3 py-2 text-sm bg-transparent text-strong outline-none" value="zzz" readonly>
+      <span class="px-2 text-xs opacity-60">▼</span>
+    </div>
+    <div class="absolute z-50 w-full mt-1 surface-overlay rounded-lg p-1 space-y-0.5 max-h-72 overflow-auto">
+      <div class="px-2 py-1 text-xs text-muted">No matches</div>
+    </div>
+  </div>
+</section>
+
+<section data-state="ungrouped-options">
+  <p class="mockup-label">Browsing — options with no `group` render ungrouped (mixed with grouped items)</p>
+  <div class="box relative">
+    <div class="w-full rounded-lg min-h-[2.5rem] surface-2 border-divider flex items-center transition-colors">
+      <input class="w-full px-3 py-2 text-sm bg-transparent text-strong outline-none" placeholder="Search…" readonly>
+      <span class="px-2 text-xs opacity-60">▼</span>
+    </div>
+    <div class="absolute z-50 w-full mt-1 surface-overlay rounded-lg p-1 space-y-0.5 max-h-72 overflow-auto">
+      <div class="px-2 py-1 rounded cursor-pointer text-xs truncate text-secondary">UTC</div>
+      <div class="sticky top-0 z-10 -mx-1 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted surface-solid">Americas</div>
+      <div class="px-2 py-1 rounded cursor-pointer text-xs truncate text-secondary">America/New_York</div>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

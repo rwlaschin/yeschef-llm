@@ -1,0 +1,77 @@
+<!--
+---
+modified: 2026-07-06
+dependencies: [../../dashboard/components/CollapsibleSections.vue]
+---
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mockup: Collapsible Sections</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html { background: #111827; color: #f9fafb; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .text-amber-500\/80 { color: rgba(245,158,11,0.8); }
+  .mockup-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; margin-bottom: 8px; }
+  .box { width: 480px; }
+  svg.chev { width: 14px; height: 14px; }
+</style>
+</head>
+<body class="p-8 space-y-10">
+<h1 class="text-xl font-semibold mb-2">Collapsible Sections</h1>
+<p class="text-sm text-gray-400 mb-6">dashboard/components/CollapsibleSections.vue — renders prompt/message text as a navigable outline by splitting on markdown headers (# through ######). Used by Message/Prompt tabs. Every section starts expanded by default.</p>
+
+<section data-state="intro-only">
+  <p class="mockup-label">Header-less intro section — plain &lt;pre&gt; block, no toggle, always visible</p>
+  <div class="box space-y-0.5">
+    <pre class="text-xs whitespace-pre-wrap break-words font-mono opacity-90 m-0">You are a helpful assistant. Follow the instructions below exactly.</pre>
+  </div>
+</section>
+
+<section data-state="headed-expanded">
+  <p class="mockup-label">Headed section, expanded (default state) — chevron rotated 90°, line count hidden while open</p>
+  <div class="box space-y-0.5">
+    <button type="button" class="w-full flex items-center gap-1.5 text-left text-xs font-mono text-amber-500/80 hover:text-amber-500 py-0.5 transition-colors">
+      <svg class="chev rotate-90 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+      <span class="truncate font-medium"># System Prompt</span>
+    </button>
+    <pre class="text-xs whitespace-pre-wrap break-words font-mono opacity-90 pl-5 m-0">Respond in the tone of the brand voice document.
+Never fabricate nutrition data.</pre>
+  </div>
+</section>
+
+<section data-state="headed-collapsed">
+  <p class="mockup-label">Headed section, collapsed — body hidden (v-show), "· N line(s)" count shown in grey</p>
+  <div class="box space-y-0.5">
+    <button type="button" class="w-full flex items-center gap-1.5 text-left text-xs font-mono text-amber-500/80 hover:text-amber-500 py-0.5 transition-colors">
+      <svg class="chev transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+      <span class="truncate font-medium">## Tool Definitions</span>
+      <span class="text-gray-500 shrink-0">· 12 lines</span>
+    </button>
+  </div>
+</section>
+
+<section data-state="mixed-outline">
+  <p class="mockup-label">Full mixed outline — intro + multiple headed sections at various header depths</p>
+  <div class="box space-y-0.5">
+    <pre class="text-xs whitespace-pre-wrap break-words font-mono opacity-90 m-0">Assembled prompt preview:</pre>
+    <div>
+      <button type="button" class="w-full flex items-center gap-1.5 text-left text-xs font-mono text-amber-500/80 hover:text-amber-500 py-0.5 transition-colors">
+        <svg class="chev rotate-90 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+        <span class="truncate font-medium"># Role</span>
+      </button>
+      <pre class="text-xs whitespace-pre-wrap break-words font-mono opacity-90 pl-5 m-0">You are Remy, a culinary AI assistant.</pre>
+    </div>
+    <div>
+      <button type="button" class="w-full flex items-center gap-1.5 text-left text-xs font-mono text-amber-500/80 hover:text-amber-500 py-0.5 transition-colors">
+        <svg class="chev transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+        <span class="truncate font-medium">###### Output Format</span>
+        <span class="text-gray-500 shrink-0">· 4 lines</span>
+      </button>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

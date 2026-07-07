@@ -1,0 +1,99 @@
+<!--
+---
+modified: 2026-07-06
+dependencies: [../../dashboard/components/Select.vue]
+---
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mockup: Select</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html { background: #111827; color: #f9fafb; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .surface-2 { background: rgba(31,41,55,0.4); }
+  .surface-overlay { background: #030712; border: 1px solid rgba(55,65,81,0.6); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); }
+  .border-divider { border: 1px solid rgba(55,65,81,0.3); }
+  .text-muted { color: #6b7280; }
+  .text-strong { color: #ffffff; }
+  .text-primary { color: #fbbf24; }
+  .text-secondary { color: #d1d5db; }
+  .mockup-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #9ca3af; margin-bottom: 8px; }
+  .box { width: 260px; }
+</style>
+</head>
+<body class="p-8 space-y-10">
+<h1 class="text-xl font-semibold mb-2">Select</h1>
+<p class="text-sm text-gray-400 mb-6">dashboard/components/Select.vue — themed single-select dropdown on Headless UI's Listbox. Base dropdown primitive; SearchableSelect is the type-to-filter variant of this same visual language.</p>
+
+<section data-state="closed-no-selection">
+  <p class="mockup-label">Closed, no selection — placeholder in text-muted</p>
+  <div class="box">
+    <button class="w-full px-3 py-2 text-sm rounded-lg min-h-[2.5rem] surface-2 text-strong border-divider text-left flex items-center justify-between transition-colors">
+      <span class="text-muted">Select</span>
+      <span class="text-xs opacity-60 ml-1">▼</span>
+    </button>
+  </div>
+</section>
+
+<section data-state="closed-selected">
+  <p class="mockup-label">Closed, selected — label in normal text color</p>
+  <div class="box">
+    <button class="w-full px-3 py-2 text-sm rounded-lg min-h-[2.5rem] surface-2 text-strong border-divider text-left flex items-center justify-between transition-colors">
+      <span>llama3.1:70b</span>
+      <span class="text-xs opacity-60 ml-1">▼</span>
+    </button>
+  </div>
+</section>
+
+<section data-state="open">
+  <p class="mockup-label">Open — chevron rotated, active row bg-amber-500/20, selected row text-primary font-medium, unselected text-secondary</p>
+  <div class="box relative">
+    <button class="w-full px-3 py-2 text-sm rounded-lg min-h-[2.5rem] surface-2 text-strong border-divider text-left flex items-center justify-between transition-colors">
+      <span>llama3.1:70b</span>
+      <span class="text-xs opacity-60 ml-1 rotate-180 inline-block transition-transform">▼</span>
+    </button>
+    <div class="absolute z-50 w-full mt-1 surface-overlay rounded-lg p-1 space-y-0.5 max-h-60 overflow-auto">
+      <div class="px-2 py-1 rounded cursor-pointer text-xs truncate bg-amber-500/20 text-secondary">mistral:7b</div>
+      <div class="px-2 py-1 rounded cursor-pointer text-xs truncate text-primary font-medium">llama3.1:70b</div>
+      <div class="px-2 py-1 rounded cursor-pointer text-xs truncate text-secondary">qwen2.5:32b</div>
+    </div>
+  </div>
+</section>
+
+<section data-state="empty-options">
+  <p class="mockup-label">Empty options — popover shows "No options" in text-muted</p>
+  <div class="box relative">
+    <button class="w-full px-3 py-2 text-sm rounded-lg min-h-[2.5rem] surface-2 text-strong border-divider text-left flex items-center justify-between transition-colors">
+      <span class="text-muted">Select</span>
+      <span class="text-xs opacity-60 ml-1 rotate-180 inline-block transition-transform">▼</span>
+    </button>
+    <div class="absolute z-50 w-full mt-1 surface-overlay rounded-lg p-1 space-y-0.5 max-h-60 overflow-auto">
+      <div class="px-2 py-1 text-xs text-muted">No options</div>
+    </div>
+  </div>
+</section>
+
+<section data-state="disabled">
+  <p class="mockup-label">Disabled — opacity-50, cursor-not-allowed, hover border suppressed</p>
+  <div class="box">
+    <button disabled class="w-full px-3 py-2 text-sm rounded-lg min-h-[2.5rem] surface-2 text-strong border-divider text-left flex items-center justify-between transition-colors opacity-50 cursor-not-allowed">
+      <span class="text-muted">Select</span>
+      <span class="text-xs opacity-60 ml-1">▼</span>
+    </button>
+  </div>
+</section>
+
+<section data-state="focus">
+  <p class="mockup-label">Focus — focus:ring-2 focus:ring-amber-500/40 on the button</p>
+  <div class="box">
+    <button class="w-full px-3 py-2 text-sm rounded-lg min-h-[2.5rem] surface-2 text-strong border-divider text-left flex items-center justify-between transition-colors ring-2" style="--tw-ring-color: rgba(245,158,11,0.4);">
+      <span>llama3.1:70b</span>
+      <span class="text-xs opacity-60 ml-1">▼</span>
+    </button>
+  </div>
+</section>
+
+</body>
+</html>

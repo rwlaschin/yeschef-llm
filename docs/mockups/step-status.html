@@ -1,0 +1,62 @@
+<!--
+---
+modified: 2026-07-06
+dependencies: [../../dashboard/components/StepStatus.vue]
+---
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mockup: Step Status</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html { background: #111827; color: #f9fafb; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .text-muted { color: #6b7280; }
+  .text-primary { color: #fbbf24; }
+  .text-success { color: #4ade80; }
+  .text-error { color: #f87171; }
+  .mockup-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #6b7280; margin-bottom: 8px; }
+</style>
+</head>
+<body class="p-8 space-y-8">
+<h1 class="text-xl font-semibold mb-2">Step Status</h1>
+<p class="text-sm text-gray-400 mb-6">dashboard/components/StepStatus.vue — one-word status label for a plan/step run. Plain capitalized text, no background/pill; color alone carries the state. Exactly four states + fallback.</p>
+
+<section data-state="pending">
+  <p class="mockup-label">status="pending" (message sent, not started)</p>
+  <span class="text-xs capitalize text-muted">pending</span>
+</section>
+
+<section data-state="running">
+  <p class="mockup-label">status="running" (LLM handling)</p>
+  <span class="text-xs capitalize text-primary">running</span>
+</section>
+
+<section data-state="success">
+  <p class="mockup-label">status="success" (done, passed)</p>
+  <span class="text-xs capitalize text-success">success</span>
+</section>
+
+<section data-state="fail">
+  <p class="mockup-label">status="fail" (error / abort / FAIL — reason lives in outcome field, not shown here)</p>
+  <span class="text-xs capitalize text-error">fail</span>
+</section>
+
+<section data-state="unknown">
+  <p class="mockup-label">status=(unrecognized) — falls back to pending/muted treatment</p>
+  <span class="text-xs capitalize text-muted">whatever</span>
+</section>
+
+<section data-state="in-run-list">
+  <p class="mockup-label">Typical usage — dense inline run list; a "not included in results" run is represented by the PARENT block's reduced opacity, not a fifth status</p>
+  <div class="flex flex-col gap-1 text-xs font-mono">
+    <div class="flex gap-2"><span class="w-32">step-1 · fetch</span><span class="text-success">success</span></div>
+    <div class="flex gap-2"><span class="w-32">step-2 · analyze</span><span class="text-primary">running</span></div>
+    <div class="flex gap-2"><span class="w-32">step-3 · summarize</span><span class="text-muted">pending</span></div>
+    <div class="flex gap-2 opacity-40"><span class="w-32">step-4 · archive (excluded)</span><span class="text-muted">pending</span></div>
+  </div>
+</section>
+
+</body>
+</html>

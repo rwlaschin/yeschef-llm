@@ -37,7 +37,7 @@ const {
   BRAVE_API_KEY,  // optional web_search pool provider (search-pool.js)
   TAVILY_API_KEY, // optional web_search pool provider (search-pool.js)
   OPENCLAW_GATEWAY_TOKEN, // shared bearer token for the OpenClaw gateway (gateway tiers)
-  DEPLOY_ENV = "dev", // forwarded to the worker → loads inactive prompt_library entries in dev
+  NODE_ENV = "dev", // forwarded to the worker → loads inactive prompt_library entries in dev
   DOCKER_GPU, // e.g. "all" if an NVIDIA GPU is present; leave unset on Mac (CPU)
 } = process.env;
 
@@ -163,7 +163,7 @@ function startContainer(m) {
     `MONGO_DB=${MONGO_DB}`,
     `MONGO_COLLECTION=${MONGO_COLLECTION}`,
     `FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID || GCP_PROJECT_ID}`,
-    `DEPLOY_ENV=${DEPLOY_ENV}`,
+    `NODE_ENV=${NODE_ENV}`,
   ];
   if (OLLAMA_API_KEY) env.push(`OLLAMA_API_KEY=${OLLAMA_API_KEY}`);
   if (BRAVE_API_KEY) env.push(`BRAVE_API_KEY=${BRAVE_API_KEY}`);

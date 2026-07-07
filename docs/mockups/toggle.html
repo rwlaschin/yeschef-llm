@@ -1,0 +1,44 @@
+<!--
+---
+modified: 2026-07-06
+dependencies: [../../dashboard/components/Toggle.vue]
+---
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mockup: Toggle</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html { background: #111827; color: #f9fafb; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .mockup-row { display: flex; align-items: center; gap: 2rem; padding: 24px; }
+  .mockup-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #6b7280; margin-bottom: 8px; }
+</style>
+</head>
+<body class="p-8 space-y-10">
+<h1 class="text-xl font-semibold mb-2">Toggle</h1>
+<p class="text-sm text-gray-400 mb-6">dashboard/components/Toggle.vue — boolean on/off switch, pill track + sliding thumb. Whole track is the click target, no confirm step, no disabled state.</p>
+
+<section data-state="off">
+  <p class="mockup-label">State: off (modelValue = false)</p>
+  <div class="mockup-row">
+    <button type="button" class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors bg-gray-700 hover:bg-gray-600" title="Inactive">
+      <span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform translate-x-1"></span>
+    </button>
+    <span class="text-sm text-gray-400">Inactive</span>
+  </div>
+</section>
+
+<section data-state="on">
+  <p class="mockup-label">State: on (modelValue = true)</p>
+  <div class="mockup-row">
+    <button type="button" class="relative inline-flex h-6 w-11 items-center rounded-full transition-colors bg-emerald-600 hover:bg-emerald-700" title="Active">
+      <span class="inline-block h-4 w-4 transform rounded-full bg-white transition-transform translate-x-6"></span>
+    </button>
+    <span class="text-sm text-gray-400">Active</span>
+  </div>
+</section>
+
+</body>
+</html>

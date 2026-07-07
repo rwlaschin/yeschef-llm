@@ -18,7 +18,7 @@ const PROJECT = process.env.FIREBASE_PROJECT_ID || process.env.GCP_PROJECT_ID ||
 const DATABASE = process.env.FIRESTORE_DATABASE || "(default)";
 const FIELD = "expireAt";
 // TTL doesn't cascade to subcollections — enable on each collection-group used by the
-// orchestration saga (see PLAN_ORCHESTRATION_SPEC.md §2/§11), plus each web_search provider's
+// orchestration saga (see docs/design/plan-orchestration.md §2/§11), plus each web_search provider's
 // day-doc subcollection (search-pool.js).
 const COLLECTION_GROUPS = ["jobs", "steps", "units", ...SEARCH_PROVIDER_GROUPS];
 

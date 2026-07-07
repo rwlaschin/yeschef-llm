@@ -1,6 +1,6 @@
 // steps/outcome.js — pull the trailing status block out of a STREAMED response.
 //
-// Marker format (our tweak of developit-ai's PLAN_STATUS block — see PLAN_ORCHESTRATION_SPEC.md):
+// Marker format (our tweak of developit-ai's PLAN_STATUS block — see docs/design/plan-orchestration.md):
 //
 //   PASS → @@::PASS::@@
 //   FAIL → @@::FAIL:<REASON>::@@
