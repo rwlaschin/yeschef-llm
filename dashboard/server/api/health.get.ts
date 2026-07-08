@@ -136,7 +136,9 @@ export default defineEventHandler(async (event) => {
   //    tiers need 2× L4). A model that's "cold" (no recent traffic) is simply not running.
   //  • production: a model is "ok" if its per-model Pub/Sub topic exists (i.e. deployed).
   try {
-    const { MODELS, containerOf } = await import('#models') as { MODELS: any[]; containerOf: (m: any) => string }
+    const { MODELS, containerOf, FAKE_TOPIC, FAKE_MODEL_OPTION } = await import('#models') as {
+      MODELS: any[]; containerOf: (m: any) => string; FAKE_TOPIC: string; FAKE_MODEL_OPTION: { label: string }
+    }
 
     if (env === 'production') {
       const { PubSub } = await import('@google-cloud/pubsub')
@@ -174,6 +176,17 @@ export default defineEventHandler(async (event) => {
         }
       }))
       for (const { label, entry } of modelResults) status.models[label] = entry
+
+      // Fake/canned transport isn't a MIG-backed model — it's a shared Pub/Sub topic
+      // (see config/models.js FAKE_TOPIC). "ok" = the topic is provisioned.
+      if (pubsub) {
+        try {
+          const [exists] = await pubsub.topic(FAKE_TOPIC).exists()
+          status.models[FAKE_MODEL_OPTION.label] = { ok: exists, error: exists ? '' : `topic ${FAKE_TOPIC} not deployed` }
+        } catch (e: any) {
+          status.models[FAKE_MODEL_OPTION.label] = { ok: false, error: e.message || 'check failed' }
+        }
+      }
     } else {
       // One `docker ps` → the set of running container names; membership = up.
       let running = new Set<string>()
@@ -190,6 +203,21 @@ export default defineEventHandler(async (event) => {
       for (const m of MODELS.filter((m) => m.dev)) {
         const ok = running.has(containerOf(m))
         status.models[m.label] = { ok, error: ok ? '' : (dockerErr || 'container not running (cold)') }
+      }
+
+      // Fake/canned worker runs as a bare `node worker/index.js` process (scripts/dev.js),
+      // not a Docker container, so the docker-ps check above can't see it. Same reachability
+      // proxy as the general Pub/Sub check: does its topic exist in the emulator.
+      try {
+        const { PubSub } = await import('@google-cloud/pubsub')
+        const pubsub = new PubSub({
+          projectId: config.gcpProjectId,
+          apiEndpoint: config.pubsubEmulatorHost ? `http://${config.pubsubEmulatorHost}` : undefined,
+        })
+        const [exists] = await pubsub.topic(FAKE_TOPIC).exists()
+        status.models[FAKE_MODEL_OPTION.label] = { ok: exists, error: exists ? '' : `topic ${FAKE_TOPIC} not provisioned` }
+      } catch (e: any) {
+        status.models[FAKE_MODEL_OPTION.label] = { ok: false, error: e.message || 'check failed' }
       }
     }
   } catch (e: any) {

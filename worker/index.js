@@ -84,10 +84,17 @@ const {
 // exceed — comes from the single source of truth (config/models.js). null if not found → no cap.
 const MODEL_MAX_CTX = MODELS.find((m) => m.model === OLLAMA_MODEL)?.ctx ?? null;
 
-for (const [k, v] of Object.entries({
-  GCP_PROJECT_ID, SUBSCRIPTION_NAME, OLLAMA_MODEL, MONGO_URI, MONGO_DB, MONGO_COLLECTION,
-  OLLAMA_API_KEY, // web search is on for every tier — no key, no run
-})) {
+// A fake/canned worker drains ONLY the fake subscription (deploy.js deployFake sets SUBSCRIPTION_NAME
+// to it) and returns canned output — it never talks to Ollama, so it needs no model and no
+// web-search key. It still needs GCP/Mongo/Firestore like any worker.
+const FAKE_ONLY = SUBSCRIPTION_NAME === FAKE_SUBSCRIPTION;
+
+const required = { GCP_PROJECT_ID, SUBSCRIPTION_NAME, MONGO_URI, MONGO_DB, MONGO_COLLECTION };
+if (!FAKE_ONLY) {
+  required.OLLAMA_MODEL = OLLAMA_MODEL;
+  required.OLLAMA_API_KEY = OLLAMA_API_KEY; // web search is on for every real tier — no key, no run
+}
+for (const [k, v] of Object.entries(required)) {
   if (!v) throw new Error(`${k} env var is required`);
 }
 
@@ -873,13 +880,18 @@ async function handleMessage(message) {
     // than Ollama has run-slots (excess queues here while its lease auto-extends). release() in a
     // `finally` so a throw still frees the slot; correctness across workers stays in the CAS below.
     let fullResponse;
-    if (payload.fake) {
-      // Fake/canned topic: no model, no generation gate, no delay. Return canned output
-      // by subtype and stream it through the SAME flusher → Firestore path.
-      fullResponse = cannedResponse(payload.subtype, payload);
+    if (FAKE_ONLY || payload.fake) {
+      // The fake worker (FAKE_ONLY) cans EVERYTHING routed to it — it's a first-class model, so
+      // picking it and sending works like any tier, no fake flag needed. (payload.fake still honored
+      // for the orchestrator's per-step fake dispatch.) No model, no generation gate, no delay:
+      // return canned output by subtype and stream it through the SAME flusher → Firestore path.
+      // The planner carries no subtype (type="planner"); fall back to type so it gets a canned
+      // PLAN (a valid YAML step list) instead of the generic stub — otherwise build.js rejects it.
+      const cannedKey = payload.subtype || payload.type;
+      fullResponse = cannedResponse(cannedKey, payload);
       flusher.push(fullResponse);
       await flusher.flush();
-      console.log(`[worker]   ${jobId} FAKE canned response (subtype=${payload.subtype}, ${fullResponse.length} chars)`);
+      console.log(`[worker]   ${jobId} FAKE canned response (key=${cannedKey}, ${fullResponse.length} chars)`);
     } else {
       if (genGate.waiting > 0 || genGate.active >= genGate.max) {
         console.log(`[worker]   ${jobId} waiting for a generation slot (${genGate.active}/${genGate.max} busy, ${genGate.waiting} queued)`);
@@ -957,7 +969,7 @@ async function handleMessage(message) {
       wroteFail = !!w;
       if (!w) return;
       tx.set(jobRef, { status: "fail", outcome: err.message, attempt: w.attempt, updatedAt: FieldValue.serverTimestamp(), completedAt: FieldValue.serverTimestamp() }, { merge: true });
-    })).catch(() => {});
+    })).catch((e) => console.error(`[worker] ✗ PERSISTENT WRITE FAILURE writing fail-status for ${jobId}: ${e.message}`));
     // Tell the orchestrator we FAILED so its retry → pass-through logic engages — but ONLY if we
     // actually wrote the failure (a superseded run's failure is not ours to report; the owning
     // attempt will). An INFRASTRUCTURE failure (stall/abort/timeout/crash) must drive the auto-flow

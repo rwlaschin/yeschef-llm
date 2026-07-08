@@ -1,0 +1,8 @@
+{
+  "name": "slack-relay",
+  "version": "1.0.0",
+  "description": "Reformats Cloud Monitoring webhook payloads (schema 1.2) into Slack Incoming Webhook messages with debug + disable links.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "start": "node index.js" }
+}

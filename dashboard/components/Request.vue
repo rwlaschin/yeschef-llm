@@ -436,13 +436,21 @@ const messageLog = computed(() => {
 })
 
 // Submit is enabled only with company + user + model + prompt. When a past request
-// is selected, it stays disabled until the prompt is edited — then submitting it
-// creates a NEW request (we never mutate an existing one).
+// is selected, it stays disabled until SOMETHING changes from what was sent — any of
+// prompt/company/user/model/type, not just the prompt — then submitting it creates a
+// NEW request (we never mutate an existing one).
 const canSubmit = computed(() => {
   if (loading.value) return false
   if (!selectedCompanyId.value || !selectedUserId.value || !selectedModel.value || !userPrompt.value.trim()) return false
   if (selectedRequestId.value && selectedRequestData.value) {
-    return userPrompt.value !== (selectedRequestData.value.userPrompt || '')
+    const d = selectedRequestData.value
+    return (
+      userPrompt.value !== (d.userPrompt || '') ||
+      selectedCompanyId.value !== (d.companyId || '') ||
+      selectedUserId.value !== (d.userId || '') ||
+      selectedModel.value !== (d.model || '') ||
+      selectedType.value !== (d.type || '')
+    )
   }
   return true
 })
@@ -575,11 +583,16 @@ const startHistory = () => {
   historyUnsub = onSnapshot(
     q,
     (snap) => {
+      // type is UI-only (never sent to /ai/plan — see planSchema) — the local optimistic
+      // record is the only place the ORIGINAL selection lives, so it always wins over
+      // whatever unrelated `type` the backend happens to store on the job doc.
+      const localByJobId = new Map(loadLocal().map((l) => [l.jobId, l]))
       const remote = snap.docs.map((d) => {
         const x = d.data()
+        const jobId = x.jobId || d.id
         return {
-          jobId: x.jobId || d.id,
-          type: x.type || 'query',
+          jobId,
+          type: localByJobId.get(jobId)?.type || x.type || 'query',
           userPrompt: x.userPrompt || '',
           model: x.model || '',
           companyId: x.companyId || '',
@@ -646,13 +659,15 @@ const submitRequest = async () => {
   }
 }
 
-// Reflect a request's saved company/user/model in the selectors.
+// Reflect a request's saved company/user/model in the selectors. `type` is deliberately
+// NOT restored here — planSchema has no `type` field, so it's never sent to /ai/plan.
+// Firestore's own `type` on the job doc means something backend-internal and unrelated;
+// the UI's Type selection only ever lives in the local optimistic record.
 const applySelectors = (data) => {
   if (!data) return
   if (data.companyId) selectedCompanyId.value = data.companyId
   if (data.userId) selectedUserId.value = data.userId
   if (data.model) selectedModel.value = data.model
-  if (data.type) selectedType.value = data.type
 }
 
 const selectRequest = (jobId) => {
@@ -667,17 +682,19 @@ const selectRequest = (jobId) => {
   selectedRequestData.value = local
   if (local?.userPrompt) userPrompt.value = local.userPrompt
   applySelectors(local)
+  selectedType.value = local?.type || messageTypes.value[0] || 'query'
 
   // Jump to Results for items that already have (or are producing) output; otherwise
   // show the Request tab so you can see/edit the inputs.
   activeTab.value = local && (local.status === 'running' || local.status === 'success' || local.status === 'fail') ? 'results' : 'request'
 
   if (docUnsub) docUnsub()
-  // Client-side real-time read enriches it (status/prompt) when the doc loads.
+  // Client-side real-time read enriches it (status/prompt) when the doc loads. `type` is
+  // carried over from the local record, never from `data` — see applySelectors above.
   docUnsub = onSnapshot(doc(getDb(), resultsCollection(), jobId), (snap) => {
     if (snap.exists()) {
       const data = snap.data()
-      selectedRequestData.value = data
+      selectedRequestData.value = { ...data, type: local?.type || data.type }
       if (data.userPrompt) userPrompt.value = data.userPrompt
       applySelectors(data)
     }

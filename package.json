@@ -16,7 +16,9 @@
     "deploy": "node scripts/deploy-all.js",
     "deploy:workers": "cross-env NODE_ENV=production node scripts/deploy.js",
     "deploy:workers:spot": "cross-env NODE_ENV=production node scripts/deploy.js --spot",
+    "images": "cross-env NODE_ENV=production node scripts/audit-images.mjs",
     "deploy:orchestrator": "firebase deploy --only functions:orchestrator",
+    "deploy:relay": "cross-env NODE_ENV=production node scripts/deploy-relay.js",
     "rollback": "cross-env NODE_ENV=production node scripts/rollback.js"
   },
   "dependencies": {

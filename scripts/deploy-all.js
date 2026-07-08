@@ -3,6 +3,7 @@
 //
 //   workers       GPU/MIG          → scripts/deploy.js (Docker build + GCE MIG)
 //   orchestrator  /ai function     → firebase deploy --only functions:orchestrator
+//   relay         Slack alerting   → scripts/deploy-relay.js (Cloud Run, monitoring/slack-relay)
 //
 // The dashboard is intentionally NOT a target and must NEVER be deployed (insecure).
 // We never run a bare `firebase deploy` — only scoped `--only` — so nothing else in
@@ -18,6 +19,7 @@ import { execSync } from "child_process";
 const steps = [
   { name: "workers (GPU/MIG)", cmd: "npm run deploy:workers" },
   { name: "orchestrator (/ai)", cmd: "npm run deploy:orchestrator" },
+  { name: "relay (Slack alerting)", cmd: "npm run deploy:relay" },
 ];
 
 for (const { name, cmd } of steps) {

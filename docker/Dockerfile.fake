@@ -1,0 +1,19 @@
+# ============================================================
+# Fake/canned worker — CPU-only, no Ollama, no model.
+# Runs the SAME worker/index.js but draining the fake subscription; the canned path
+# (payload.fake) returns deterministic output through the normal Pub/Sub → Firestore
+# write path. Tiny node image, so the VM just boot-pulls it — no GCE-image bake.
+# ============================================================
+FROM node:22-slim
+
+WORKDIR /app
+
+# Deps first so worker/config edits don't trigger a reinstall.
+COPY package.json ./
+RUN npm install --omit=dev
+
+COPY worker/ ./worker/
+COPY config/ ./config/
+
+# SUBSCRIPTION_NAME + Mongo/GCP env come from `docker run -e` (scripts/deploy.js deployFake).
+CMD ["node", "worker/index.js"]

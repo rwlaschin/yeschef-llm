@@ -1,0 +1,14 @@
+# Used by `gcloud builds submit` INSTEAD of .gitignore.
+# Must NOT exclude the Dockerfile.*.build / cloudbuild.*.yaml that deploy.js
+# generates at deploy time — those ARE the build context + config. .gitignore
+# ignores them (safety net against committing), which silently stripped them
+# from the uploaded tarball and broke every Cloud Build.
+.git/
+.gitignore
+node_modules/
+**/node_modules/
+*.log
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/

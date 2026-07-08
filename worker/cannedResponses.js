@@ -5,6 +5,23 @@
 // compliance must emit a terminal status block (@@::PASS::@@) so the worker marks the
 // run success, exactly like a real compliance step. Other subtypes return plain text
 // (no block → success).
+import { FAKE_TOPIC } from "../config/models.js";
+
+// The PLANNER dispatched to the fake worker (type="planner", no subtype) must return a VALID plan —
+// a YAML step list build.js can parse — not the generic stub. Emit ONE step routed back to the fake
+// topic (model=FAKE_TOPIC) so it too returns canned output; build.js parses this → dispatches step 0.
+function cannedPlanner() {
+  return [
+    "```yaml",
+    "- instructions: Canned task step (fake pipeline test).",
+    `  model: ${FAKE_TOPIC}`,
+    "  subtype: task",
+    "  kind: single",
+    "  contexts: []",
+    "  tools: []",
+    "```",
+  ].join("\n");
+}
 
 function cannedCompliance() {
   return [
@@ -203,31 +220,39 @@ function cannedRecipes(payload = {}) {
   return lines.join("\n");
 }
 
-// Per-meal nutrient totals for one diet (this fanout unit). Emits the pipe table the app
-// parses + renders as a nutrition-facts panel vs USDA daily values:
-//   Day | Mealtime | Calories | Protein g | Fat g | Carbs g | Sodium mg | Fiber g
-// Base per-daypart values are nudged by diet (renal/low-sodium ↓ sodium, diabetic ↓ carbs,
-// low-fat ↓ fat) and vary a little day-to-day so the daily averages look realistic.
+// Per-meal nutrient totals for one diet (this fanout unit). Emits EXACTLY the pipe table the
+// nutrients prompt/parser contract expects (plan_library + seed-recipes-nutrients.mjs) — same
+// header, same 4 columns, same order, or the fake won't line up with a real run:
+//   Day | Mealtime | Calories | Protein g | Sodium mg | Carbs g
+// Base per-daypart values are shaped by diet (renal/low-sodium ↓ sodium, renal ↓ protein,
+// diabetic ↓ carbs) then jittered by a diet+day+meal seed — same scheme as cannedProteinGrid —
+// so every diet's table is DISTINCT (two diets sharing coefficients must not emit identical rows)
+// and days vary realistically instead of a fixed wobble cycle.
 function cannedNutrients(payload = {}) {
   const ctx = payload.ctx || {};
   const meals = Array.isArray(ctx.meals) && ctx.meals.length ? ctx.meals : ["breakfast", "lunch", "dinner"];
   const days = Math.max(1, Number(ctx.days) || 7);
-  const diet = String(payload.item || "").toLowerCase();
-  // [calories, protein g, fat g, carbs g, sodium mg, fiber g] per daypart.
-  const BASE = { breakfast: [420, 22, 14, 52, 380, 5], lunch: [620, 34, 22, 70, 560, 7], dinner: [700, 38, 26, 76, 640, 8] };
-  const DEFAULT = [560, 30, 20, 66, 520, 6];
-  const sodiumK = diet.includes("renal") || diet.includes("low-sodium") ? 0.5 : 1;
+  const diet = String(payload.item || "standard").toLowerCase();
+  // [calories, protein g, sodium mg, carbs g] per daypart.
+  const BASE = { breakfast: [380, 24, 320, 46], lunch: [560, 32, 520, 64], dinner: [620, 36, 600, 72] };
+  const DEFAULT = [520, 30, 480, 60];
+  const sodiumK = diet.includes("renal") || diet.includes("low-sodium") || diet.includes("low sodium") ? 0.5 : 1;
+  const proteinK = diet.includes("renal") ? 0.7 : 1;
   const carbsK = diet.includes("diabetic") ? 0.78 : 1;
-  const fatK = diet.includes("low-fat") ? 0.6 : 1;
-  const lines = ["Day | Mealtime | Calories | Protein g | Fat g | Carbs g | Sodium mg | Fiber g"];
+  const lines = ["Day | Mealtime | Calories | Protein g | Sodium mg | Carbs g"];
   for (let d = 1; d <= days; d++) {
-    const wobble = 1 + ((d % 3) - 1) * 0.06; // ±6% day-to-day
-    for (const m of meals) {
-      const [cal, pro, fat, carb, sod, fib] = BASE[m] || DEFAULT;
+    for (let m = 0; m < meals.length; m++) {
+      const meal = meals[m];
+      const [cal, pro, sod, carb] = BASE[meal] || DEFAULT;
+      // Diet+day+meal seed → a stable ±15% jitter unique to this slot, so identical-coefficient
+      // diets still diverge and no two fanout messages return the same table.
+      const jit = 0.85 + (fnv1a(`${diet}:${d}:${meal}`) % 31) / 100;
       lines.push([
-        `Day ${d}`, m,
-        Math.round(cal * wobble), Math.round(pro * wobble), Math.round(fat * fatK * wobble),
-        Math.round(carb * carbsK * wobble), Math.round(sod * sodiumK * wobble), Math.round(fib * wobble),
+        `Day ${d}`, meal,
+        Math.round(cal * jit),
+        Math.round(pro * proteinK * jit),
+        Math.round(sod * sodiumK * jit),
+        Math.round(carb * carbsK * jit),
       ].join(" | "));
     }
   }
@@ -235,6 +260,7 @@ function cannedNutrients(payload = {}) {
 }
 
 const BY_SUBTYPE = {
+  planner:      cannedPlanner,
   compliance:   cannedCompliance,
   menu_plan:    cannedMenuPlan,
   recipe:       cannedRecipe,

@@ -23,7 +23,7 @@ import fs from "fs";
 import crypto from "crypto";
 import { renderDockerfile } from "../docker/render.js";
 import { setup as setupPubSub } from "../pubsub/setup.js";
-import { MODELS, subscriptionOf, imageOf } from "../config/models.js";
+import { MODELS, subscriptionOf, imageOf, FAKE_SUBSCRIPTION } from "../config/models.js";
 
 dotenvFlow.config();
 
@@ -40,6 +40,7 @@ const {
   MONGO_DB,
   MONGO_COLLECTION,
   FIREBASE_PROJECT_ID,
+  OLLAMA_API_KEY, // worker requires this for every non-fake tier (web_search/web_fetch) — no key, no boot
 } = process.env;
 
 // Applies for real by default. Pass --dry-run to only print the commands (no execution).
@@ -49,7 +50,7 @@ const USE_SPOT = args.some((a) => a === "--spot");
 const APPLY = !DRY_RUN;
 
 for (const [k, v] of Object.entries({
-  GCP_PROJECT_ID, GCP_ZONE, GCP_SERVICE_ACCOUNT, MONGO_URI, MONGO_DB, MONGO_COLLECTION,
+  GCP_PROJECT_ID, GCP_ZONE, GCP_SERVICE_ACCOUNT, MONGO_URI, MONGO_DB, MONGO_COLLECTION, OLLAMA_API_KEY,
 })) {
   if (!v) throw new Error(`${k} env var is required`);
 }
@@ -96,6 +97,43 @@ function imageExistsInRegistry(tag) {
   }
 }
 
+const BASE_DOCKERFILE_PATH = "docker/Dockerfile.base";
+
+// Shared base image (Ollama + Node 22 + git/curl) that every per-model Dockerfile.prod.ejs
+// FROMs — built ONCE per unique Dockerfile.base content instead of 7x (once per model) per
+// deploy. Content-hash keyed: only rebuilds when Dockerfile.base itself changes (staleness
+// trade-off is documented in that file). Returns the image tag to use as `baseImage`.
+async function ensureBaseImage() {
+  const hash = crypto.createHash("sha256").update(fs.readFileSync(BASE_DOCKERFILE_PATH)).digest("hex").slice(0, 12);
+  const tag = `${REGISTRY}/ollama-base:${hash}`;
+  const tagLatest = `${REGISTRY}/ollama-base:latest`;
+
+  if (!APPLY) {
+    console.log(`[dry-run] ensure base image ${tag}`);
+    return tag;
+  }
+
+  if (imageExistsInRegistry(tag)) {
+    console.log(`\n✓ Base image unchanged (${hash}) — skipping build.`);
+  } else {
+    console.log(`\n==== ollama-base hash=${hash} — building shared base image ====`);
+    const cbName = "cloudbuild.ollama-base.yaml";
+    fs.writeFileSync(
+      cbName,
+      `steps:\n- name: 'gcr.io/cloud-builders/docker'\n` +
+        `  args: ['build', '-f', '${BASE_DOCKERFILE_PATH}', '-t', '${tag}', '.']\n` +
+        `  timeout: 1200s\nimages:\n- '${tag}'\ntimeout: 1200s\n`
+    );
+    try {
+      run(`gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=${cbName}`);
+    } finally {
+      try { fs.unlinkSync(cbName); } catch {}
+    }
+  }
+  run(`gcloud artifacts docker tags add ${tag} ${tagLatest} --project=${GCP_PROJECT_ID}`);
+  return tag;
+}
+
 // gpu count → g2 machine type (L4s on a single box)
 const MACHINE_BY_GPU = { 1: "g2-standard-8", 2: "g2-standard-24" };
 
@@ -103,7 +141,7 @@ const DEFAULTS = { parallel: 2, maxQueue: 5, gpu: 1, maxReplicas: 7 };
 
 // Derived from the single source of truth (config/models.js).
 // gpu = the model's "machine description" (L4s on one VM).
-const IMAGES = MODELS.map((m) => ({
+const IMAGES_ALL = MODELS.map((m) => ({
   name: imageOf(m),
   subscription: subscriptionOf(m),
   model: m.model,
@@ -116,6 +154,9 @@ const IMAGES = MODELS.map((m) => ({
   parallel: process.env.OLLAMA_NUM_PARALLEL || DEFAULTS.parallel,
   maxQueue: process.env.OLLAMA_MAX_QUEUE || DEFAULTS.maxQueue,
 }));
+// Deploy every GPU model except OpenClaw (Llama 3.3 70B) — held back for now. deployFake (the
+// fake/canned worker) runs independently of this filter.
+const IMAGES = IMAGES_ALL.filter((img) => img.name !== "ollama-openclaw-llama3-3-70b-v1");
 
 function run(cmd) {
   if (!APPLY) {
@@ -145,6 +186,35 @@ function esc(s) {
   return s.replace(/'/g, "'\\''");
 }
 
+// Emit a start/finish pair per phase — NOT a single post-hoc duration log. A single
+// end-of-phase log is blind to a hung or killed process: no start record means no way to
+// even tell it began, let alone diagnose where it died. ident+action+time lets the dashboard
+// show a start with no matching finish as a visibly open, never-closed span.
+function logEvent(model, phase, action, extra = {}) {
+  if (!APPLY) return;
+  const payload = JSON.stringify({ model, phase, action, ts: new Date().toISOString(), ...extra }).replace(/'/g, "'\\''");
+  try {
+    execSync(`gcloud logging write deploy_phases '${payload}' --payload-type=json --severity=INFO --project=${GCP_PROJECT_ID}`, { stdio: "pipe" });
+  } catch { /* observability only — never fail the deploy over a logging hiccup */ }
+}
+
+// Runs fn, logging a "start" event before it begins and a "finish" event in a finally (so
+// finish fires on success AND on a thrown error — only a hard process kill leaves a start
+// with no finish, which is exactly the signal we want for "it blew up silently").
+async function timedPhase(model, phase, fn) {
+  logEvent(model, phase, "start");
+  const t0 = Date.now();
+  let status = "success";
+  try {
+    return await fn();
+  } catch (err) {
+    status = "failed";
+    throw err;
+  } finally {
+    logEvent(model, phase, "finish", { durationSec: (Date.now() - t0) / 1000, status });
+  }
+}
+
 // Startup script for baked GCE VMs — Docker image is already on disk; no pull needed.
 // DLVM base image ships with NVIDIA drivers + nvidia-container-toolkit pre-installed,
 // so no GPU driver step is needed at boot. Just run the container.
@@ -159,6 +229,7 @@ function vmStartupScript(img, tag) {
     `  -e FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID || GCP_PROJECT_ID} \\`,
     `  -e SUBSCRIPTION_NAME=${img.subscription} \\`,
     `  -e OLLAMA_MODEL=${img.model} \\`,
+    `  -e OLLAMA_API_KEY=${OLLAMA_API_KEY} \\`,
     `  -e OLLAMA_HOST=http://localhost:11434 \\`,
     `  -e OLLAMA_NUM_PARALLEL=${img.parallel} \\`,
     `  -e OLLAMA_MAX_QUEUE=${img.maxQueue} \\`,
@@ -177,12 +248,50 @@ function bakerStartupScript(tag, region) {
     "set -e",
     `ZONE=$(curl -sf "http://metadata.google.internal/computeMetadata/v1/instance/zone" -H "Metadata-Flavor: Google" | awk -F/ '{print $NF}')`,
     `NAME=$(curl -sf "http://metadata.google.internal/computeMetadata/v1/instance/name" -H "Metadata-Flavor: Google")`,
+    // Completion is signaled via GUEST ATTRIBUTES (a PUT to the local metadata server) — NOT
+    // `gcloud add-metadata`, which failed on the baker ("Could not fetch resource": no core/project
+    // set + a compute API round-trip) so bake-done never landed and the deploy timed out every run.
+    // A guest-attribute PUT needs no gcloud, no project/zone, no IAM — it can't fail that way.
+    // Any error below trips this ERR trap → status=failed, so the deploy aborts immediately instead
+    // of polling out the full deadline (and leaving a leaked baker billing).
+    `GA="http://metadata.google.internal/computeMetadata/v1/instance/guest-attributes/bake/status"`,
+    `trap 'curl -s -X PUT --data failed -H "Metadata-Flavor: Google" "$GA" >/dev/null 2>&1 || true' ERR`,
+    // The DLVM image ships NVIDIA drivers + nvidia-container-toolkit but NOT Docker itself
+    // (verified: `which docker` fails on a stock baker). Install it and wire the nvidia
+    // runtime into Docker's daemon so `docker run --runtime=nvidia` works once this disk is baked.
+    // Fresh Ubuntu boots run unattended-upgrades in the background holding the dpkg lock —
+    // apt-get install fails immediately (not a wait, a hard error) if it hits that window,
+    // and `set -e` kills the whole script right there with no signal ever written. Wait it out.
+    `for i in $(seq 1 60); do fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; sleep 5; done`,
+    `DEBIAN_FRONTEND=noninteractive apt-get update -y`,
+    `DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io`,
+    `nvidia-ctk runtime configure --runtime=docker`,
+    `systemctl restart docker`,
     `docker-credential-gcr configure-docker --registries=${region}-docker.pkg.dev || \\`,
     `  gcloud auth configure-docker ${region}-docker.pkg.dev --quiet`,
     `docker pull ${tag}`,
-    // Signal completion by writing a metadata key the deploy script polls
-    `gcloud compute instances add-metadata "$NAME" --zone="$ZONE" --metadata=bake-done=true`,
+    // Success → guest attribute bake/status=true (the deploy polls get-guest-attributes for this).
+    `curl -s -X PUT --data true -H "Metadata-Flavor: Google" "$GA"`,
   ].join("\n");
+}
+
+// Keep only the newest N instance-templates per model, deleting the rest. Every deploy
+// created a brand-new template and never cleaned up the old one — 8+ had piled up for a
+// single model going back over a week. Best-effort per-template: a template still actively
+// referenced elsewhere fails to delete without blocking cleanup of the others.
+function cleanupOldTemplates(modelName, keep = 3) {
+  let names;
+  try {
+    names = execSync(
+      `gcloud compute instance-templates list --project=${GCP_PROJECT_ID} ` +
+        `--filter="name~'^${modelName}-tmpl-'" --sort-by="~creationTimestamp" --format="value(name)"`,
+      { stdio: "pipe" }
+    ).toString().trim().split("\n").filter(Boolean);
+  } catch { return; }
+  for (const name of names.slice(keep)) {
+    try { execSync(`gcloud compute instance-templates delete ${name} --project=${GCP_PROJECT_ID} --quiet`, { stdio: "pipe" }); }
+    catch { /* still referenced, or already gone — skip */ }
+  }
 }
 
 // Check if a GCE custom image with this name already exists — skip rebake if so.
@@ -205,8 +314,11 @@ async function bakeGCEImage(img, tag, hash, machineType) {
   const bakerName = `${img.name}-baker-${VERSION}`.slice(0, 61).replace(/[^a-z0-9-]/g, "-");
   console.log(`  Baking GCE image for ${img.name} (baker VM: ${bakerName})...`);
 
-  // Baker only needs to docker pull — use e2-medium (cheap). DLVM base image has NVIDIA
-  // drivers pre-installed so the baker itself doesn't need a GPU. GCE images are global
+  // Baker only needs to docker pull — no GPU needed (DLVM ships NVIDIA drivers pre-installed).
+  // e2-standard-4 over e2-medium: the pull is network/CPU-bound (single multi-GB layer + a SHA256
+  // verify), and e2-medium's shared-core 2 Gbps cap made that step the slowest part of a bake.
+  // e2-standard-4's ~8 Gbps cap + dedicated vCPUs cut it dramatically for ~4x the hourly rate on
+  // a run lasting minutes — a wash on cost, a large win on wall-clock. GCE images are global
   // resources, so the baker can run in any region/zone. Try a wide spread to avoid stockouts.
   const BAKER_ZONES = [
     `${GCP_REGION}-b`, `${GCP_REGION}-c`, `${GCP_REGION}-f`, `${GCP_REGION}-a`,
@@ -221,10 +333,12 @@ async function bakeGCEImage(img, tag, hash, machineType) {
       console.log(`  Trying baker zone: ${zone}...`);
       execSync(
         `gcloud compute instances create ${bakerName} --project=${GCP_PROJECT_ID} --zone=${zone} ` +
-        `--machine-type=e2-medium --image-family=common-cu129-ubuntu-2204-nvidia-580 --image-project=deeplearning-platform-release ` +
+        `--machine-type=e2-standard-4 --image-family=common-cu129-ubuntu-2204-nvidia-580 --image-project=deeplearning-platform-release ` +
         `--boot-disk-size=${img.diskGb}GB --boot-disk-type=pd-ssd ` +
         `--network=${GCP_NETWORK} --scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
-        `--metadata=startup-script='${esc(bakerStartupScript(tag, GCP_REGION))}'`,
+        // Without this, a startup-script death is invisible until the 20-min timeout —
+        // serial-port-1 output is the only trace of a baker VM that never signals bake-done.
+        `--metadata=startup-script='${esc(bakerStartupScript(tag, GCP_REGION))}',serial-port-logging-enable=true,enable-guest-attributes=TRUE`,
         { stdio: "pipe" }  // pipe so we can catch error text; errors print below
       );
       bakerZone = zone;
@@ -249,16 +363,34 @@ async function bakeGCEImage(img, tag, hash, machineType) {
   if (APPLY) {
     // Poll instance metadata until the baker signals it's done (up to 20 min)
     console.log(`  Waiting for baker VM to pull image (this takes a few minutes)...`);
-    const deadline = Date.now() + 20 * 60 * 1000;
+    const deadline = Date.now() + 60 * 60 * 1000;
+    let bakeDone = false;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 30_000));
       try {
-        const val = execSync(
-          `gcloud compute instances describe ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --format="value(metadata.items[bake-done])"`,
+        // Read the baker's guest attribute bake/status ("true" = done, "failed" = startup died).
+        // Not-yet-set → get-guest-attributes errors → caught below → keep polling.
+        const meta = execSync(
+          `gcloud compute instances get-guest-attributes ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --query-path=bake/status --format="value(value)"`,
           { stdio: "pipe" }
         ).toString().trim();
-        if (val === "true") { console.log("  ✓ Baker done."); break; }
-      } catch { /* still booting */ }
+        if (meta === "true") { console.log("  ✓ Baker done."); bakeDone = true; break; }
+        // The baker's ERR trap sets bake/status=failed the instant its startup script dies — stop
+        // waiting NOW rather than polling out the full deadline for a bake that's already dead.
+        if (meta === "failed") { console.log("  ✗ Baker signaled startup failure — aborting bake."); break; }
+      } catch { /* attribute not set yet — still booting/pulling */ }
+    }
+    // A timed-out baker must fail loud, not get snapshotted anyway — a silent timeout here
+    // previously baked broken (Docker-less) images into every model's GCE image undetected.
+    if (!bakeDone) {
+      // Best-effort cleanup — a failed bake must not leak a running (billed) VM the way a
+      // process-wide crash used to when this threw before reaching the stop/delete below.
+      try { execSync(`gcloud compute instances delete ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --quiet`, { stdio: "pipe" }); }
+      catch { /* best-effort — surface the real failure below regardless */ }
+      throw new Error(
+        `Baker VM ${bakerName} never signaled bake-done within 60 min — its startup script likely failed (VM deleted). ` +
+        `Check serial logs from a fresh bake attempt if this recurs.`
+      );
     }
 
     // Stop baker VM so we can snapshot its disk
@@ -282,6 +414,83 @@ async function bakeGCEImage(img, tag, hash, machineType) {
   }
 
   return imageName;
+}
+
+// The FAKE/canned worker is part of the STANDARD deploy — no separate command. It's a CPU-only
+// always-up VM running docker/Dockerfile.fake: no GPU, no model, no baker/bake. It drains
+// FAKE_SUBSCRIPTION and returns canned output through the same Pub/Sub → Firestore path as a real
+// worker. Disabling the GPU workers (edit MODELS / the IMAGES filter) does not affect this.
+async function deployFake() {
+  const name = "worker-fake-canned-v1";
+  const dockerfile = fs.readFileSync("docker/Dockerfile.fake", "utf-8");
+  const hash = contentHash(dockerfile);                     // rebuilds when Dockerfile.fake/worker/config change
+  const tagHash = `${REGISTRY}/${name}:${hash}`;
+  const tagLatest = `${REGISTRY}/${name}:latest`;
+  const vm = name;
+
+  console.log(`\n==== ${name} (CPU, always-up) hash=${hash} ====`);
+
+  if (APPLY && imageExistsInRegistry(tagHash)) {
+    console.log(`  ✓ Image unchanged (${hash}) — skipping build.`);
+  } else {
+    const cbName = `cloudbuild.${name}.yaml`;
+    fs.writeFileSync(
+      cbName,
+      `steps:\n- name: 'gcr.io/cloud-builders/docker'\n` +
+        `  args: ['build', '-f', 'docker/Dockerfile.fake', '-t', '${tagHash}', '.']\n` +
+        `  timeout: 600s\nimages:\n- '${tagHash}'\ntimeout: 600s\n`
+    );
+    try {
+      run(`gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=${cbName}`);
+    } finally {
+      try { fs.unlinkSync(cbName); } catch {}
+    }
+  }
+  run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
+
+  // Container-Optimized OS ships Docker, so boot = pull + run. --restart=always keeps the worker
+  // up across container crashes; Mongo URI is single-quoted (esc) so its commas survive the shell.
+  const startup = [
+    "#!/bin/bash",
+    "set -e",
+    // COS mounts / (and /root) read-only, so the gcr credential helper can't write its default
+    // $HOME/.docker/config.json → the pull runs unauthenticated and Artifact Registry denies it.
+    // Point HOME at writable tmpfs so configure-docker + pull share a writable docker config.
+    "export HOME=/tmp",
+    `docker-credential-gcr configure-docker --registries=${GCP_REGION}-docker.pkg.dev || true`,
+    `docker pull ${tagHash}`,
+    `docker run -d --name worker --restart=always \\`,
+    `  --log-driver=gcplogs --log-opt gcp-project=${GCP_PROJECT_ID} \\`,
+    `  -e GCP_PROJECT_ID=${GCP_PROJECT_ID} \\`,
+    `  -e FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID || GCP_PROJECT_ID} \\`,
+    `  -e SUBSCRIPTION_NAME=${FAKE_SUBSCRIPTION} \\`,
+    `  -e MONGO_URI='${esc(MONGO_URI)}' \\`,
+    `  -e MONGO_DB=${MONGO_DB} \\`,
+    `  -e MONGO_COLLECTION=${MONGO_COLLECTION} \\`,
+    `  ${tagHash}`,
+  ].join("\n");
+
+  // Recreate so the VM always runs the newest image — BUT if the image is unchanged and the VM is
+  // already RUNNING, leave it alone (a GPU-only redeploy must not bounce a healthy fake worker).
+  if (APPLY) {
+    let status = null;
+    try {
+      status = execSync(`gcloud compute instances describe ${vm} --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID} --format="value(status)"`, { stdio: "pipe" }).toString().trim();
+    } catch { /* not present yet */ }
+    if (status === "RUNNING" && imageExistsInRegistry(tagHash)) {
+      console.log(`  ✓ Fake worker already running on current image — leaving it untouched.`);
+      return;
+    }
+    if (status) run(`gcloud compute instances delete ${vm} --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID} --quiet`);
+  }
+  run(
+    `gcloud compute instances create ${vm} --project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} ` +
+      `--machine-type=e2-small --image-family=cos-stable --image-project=cos-cloud ` +
+      `--boot-disk-size=20GB --network=${GCP_NETWORK} ` +
+      `--scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
+      `--metadata=startup-script='${esc(startup)}',serial-port-logging-enable=true`
+  );
+  console.log(`  ✓ Fake worker → VM ${vm} draining ${FAKE_SUBSCRIPTION}`);
 }
 
 async function deploy() {
@@ -310,6 +519,14 @@ async function deploy() {
   }
   run(`gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet`);
 
+  // Fake/canned worker — part of the standard deploy (CPU, no GPU/baker). Deploys first so a later
+  // model failure doesn't block it, and so it's up even when the GPU workers are disabled.
+  await deployFake();
+
+  // 2a. Shared base image (Ollama + Node + git/curl) — built once, reused by all 7 per-model
+  // builds below instead of each re-running apt-get/node-install from scratch.
+  const baseImage = await ensureBaseImage();
+
   // Dry-run only: validate all model names exist in Ollama's registry before building.
   if (!APPLY) {
     console.log("Validating model names against Ollama registry...");
@@ -323,7 +540,7 @@ async function deploy() {
   // Pre-compute per-image metadata.
   const plan = IMAGES.map((base) => {
     const img = { ...DEFAULTS, ...base };
-    const dockerfile = renderDockerfile(img);
+    const dockerfile = renderDockerfile({ ...img, baseImage });
     const hash = contentHash(dockerfile);
     return {
       img,
@@ -350,11 +567,15 @@ async function deploy() {
       const dfName = `Dockerfile.${img.name}.build`;
       const cbName = `cloudbuild.${img.name}.yaml`;
       fs.writeFileSync(dfName, dockerfile);
+      // A 44 GB model (70B) needs a bigger Cloud Build disk than the 100 GB default to hold the
+      // built image; small models use the default. No CPU/machine bump — the ollama.com model
+      // download is the cost, and a bigger builder doesn't speed an external download.
+      const buildOpts = img.diskGb >= 200 ? `options:\n  diskSizeGb: 300\n` : "";
       fs.writeFileSync(
         cbName,
         `steps:\n- name: 'gcr.io/cloud-builders/docker'\n` +
           `  args: ['build', '-f', '${dfName}', '-t', '${tagHash}', '.']\n` +
-          `  timeout: 3600s\nimages:\n- '${tagHash}'\ntimeout: 3600s\n`
+          `  timeout: 3600s\n${buildOpts}images:\n- '${tagHash}'\ntimeout: 3600s\n`
       );
       const promise = runAsync(
         `gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=${cbName}`
@@ -371,10 +592,13 @@ async function deploy() {
 
   // Pipeline: as each build finishes, immediately tag + bake + deploy that image.
   // Don't wait for all builds — start processing each one as soon as it's ready.
-  await Promise.all(cloudBuildJobs.map(async ({ p, promise }) => {
+  // allSettled, not all: one model's failure (e.g. a baker VM error) must not abort the
+  // Node process mid-flight for the OTHER 6 — that's exactly what orphaned baker VMs
+  // stuck running for hours after an earlier IOPS error killed the process outright.
+  const results = await Promise.allSettled(cloudBuildJobs.map(async ({ p, promise }) => {
     const { img, hash, tagHash, tagLatest, machineType, template, mig } = p;
     console.log(`\nAwaiting Cloud Build: ${img.name}...`);
-    await promise;
+    await timedPhase(img.name, "cloudbuild", () => promise);
     run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
     console.log(`  ✓ ${img.name} done.`);
 
@@ -388,7 +612,7 @@ async function deploy() {
     );
 
     // Bake GCE custom image — Docker layers pre-loaded, no boot-time pull.
-    const gceImage = await bakeGCEImage(img, tagHash, hash, machineType);
+    const gceImage = await timedPhase(img.name, "bake", () => bakeGCEImage(img, tagHash, hash, machineType));
 
     // Instance template — GPU VM on baked custom image.
     // Boot disk is Hyperdisk Balanced with provisioned throughput: model load into VRAM is
@@ -400,11 +624,11 @@ async function deploy() {
         `--machine-type=${machineType} ` +
         `--image=${gceImage} --image-project=${GCP_PROJECT_ID} ` +
         `--boot-disk-size=${img.diskGb}GB --boot-disk-type=hyperdisk-balanced ` +
-        `--boot-disk-provisioned-iops=3000 --boot-disk-provisioned-throughput=400 ` +
+        `--boot-disk-provisioned-iops=10000 --boot-disk-provisioned-throughput=400 ` +
         `--accelerator=type=nvidia-l4,count=${img.gpu} --maintenance-policy=TERMINATE ` +
         (USE_SPOT ? `--provisioning-model=SPOT --instance-termination-action=STOP ` : "") +
         `--network=${GCP_NETWORK} --scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
-        `--metadata=startup-script='${esc(vmStartupScript(img, tagHash))}'`
+        `--metadata=startup-script='${esc(vmStartupScript(img, tagHash))}',serial-port-logging-enable=true`
     );
 
     // MIG + autoscaler on Pub/Sub backlog (scale 0 → maxReplicas).
@@ -419,9 +643,20 @@ async function deploy() {
     } catch { /* doesn't exist yet */ }
 
     if (migExists) {
+      // set-instance-template only changes the recipe for instances created AFTER this call —
+      // it does NOT touch already-running ones. A broken instance from a bad deploy would sit
+      // there serving (or failing to serve) traffic indefinitely, undetected, through every
+      // later "successful" deploy. rolling-action actually replaces existing instances: brings
+      // up a new one on the new template BEFORE removing an old one (max-unavailable=0), so a
+      // broken new template surfaces as a stuck rollout instead of silently orphaning nothing.
       run(
         `gcloud compute instance-groups managed set-instance-template ${mig} ` +
           `--project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} --template=${template}`
+      );
+      run(
+        `gcloud compute instance-groups managed rolling-action start-update ${mig} ` +
+          `--project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} --version=template=${template} ` +
+          `--max-surge=1 --max-unavailable=0`
       );
     } else {
       run(
@@ -429,6 +664,7 @@ async function deploy() {
           `--zone=${GCP_ZONE} --template=${template} --size=0`
       );
     }
+    cleanupOldTemplates(img.name);
     run(
       `gcloud compute instance-groups managed set-autoscaling ${mig} --project=${GCP_PROJECT_ID} ` +
         `--zone=${GCP_ZONE} --min-num-replicas=0 --max-num-replicas=${img.maxReplicas} ` +
@@ -438,9 +674,25 @@ async function deploy() {
     );
 
     console.log(`\nPrepared: ${img.name} → ${tagHash}, MIG ${mig} (spot ${img.gpu}× L4, 0→${img.maxReplicas})`);
+    return img.name;
   }));
 
+  const failed = results
+    .map((r, i) => ({ r, name: plan[i].img.name }))
+    .filter(({ r }) => r.status === "rejected");
+
+  console.log(`\n${results.length - failed.length}/${results.length} models prepared successfully.`);
+  if (failed.length) {
+    for (const { r, name } of failed) console.error(`  ✗ ${name}: ${r.reason?.message || r.reason}`);
+  }
+
   console.log(`\n${APPLY ? "Deploy complete" : "Dry-run complete (pass --dry-run=0 to execute)"} @ ${VERSION}\n`);
+
+  // Refresh the stale-artifacts gauge (custom.googleapis.com/registry/stale_artifacts) — a deploy is
+  // exactly when image/template junk changes. Best-effort: never fail the deploy over the gauge.
+  if (APPLY) { try { execSync("node scripts/audit-images.mjs --prune", { stdio: "inherit" }); } catch {} }
+
+  if (failed.length) throw new Error(`${failed.length}/${results.length} model(s) failed to deploy — see above.`);
 }
 
 deploy().catch((err) => {

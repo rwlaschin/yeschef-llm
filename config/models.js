@@ -35,7 +35,7 @@ export const MODELS = [
   // the smallest 70B quant (q2_K) is 26GB — over 20GB. Strong reasoning, fits any dev box; gpu:1.
   // diskGb = baker VM boot disk. DLVM base image is 50 GB minimum; add model layers on top.
   { label: "Llama 3.1 8B",  model: "llama3.1:8b",                  topic: "llama3_1_8b_v1",  ctx: 131072, gpu: 1, dev: true,  diskGb: 60  },
-  { label: "Llama 3.3 70B", model: "llama3.3:70b-instruct-q4_K_M", topic: "llama3_3_70b_v1", ctx: 131072, gpu: 2, dev: false, diskGb: 100 }, // 2× L4 — no dev GPU; q4_K_M ≈ 44 GB
+  { label: "Llama 3.3 70B", model: "llama3.3:70b-instruct-q4_K_M", topic: "llama3_3_70b_v1", ctx: 131072, gpu: 2, dev: false, diskGb: 200}, // 2× L4 — no dev GPU; q4_K_M ≈ 44 GB
   // Gemma 4 12B — Google's encoder-free multimodal model built for agentic workflows.
   // Use the QAT (quantization-aware trained) tag `gemma4:12b-it-qat`: it cuts the memory
   // footprint and runs faster on every backend (Apple/AMD/Intel/NVIDIA/Qualcomm) at nearly
@@ -62,7 +62,7 @@ export const MODELS = [
   //   - Topics are openclaw_<backing>_v1; pubsub setup creates the new subs from this list.
   { label: "OpenClaw (Gemma 4 12B)",   model: "gemma4:12b-it-qat",            topic: "openclaw_gemma4_12b_v1",   ctx: 262144, gpu: 1, dev: true,  diskGb: 65,  gateway: "openclaw", tools: ["web_search", "web_fetch"] },
   { label: "OpenClaw (Llama 3.1 8B)",  model: "llama3.1:8b",                  topic: "openclaw_llama3_1_8b_v1",  ctx: 131072, gpu: 1, dev: true,  diskGb: 60,  gateway: "openclaw", tools: ["web_search", "web_fetch"] },
-  { label: "OpenClaw (Llama 3.3 70B)", model: "llama3.3:70b-instruct-q4_K_M", topic: "openclaw_llama3_3_70b_v1", ctx: 131072, gpu: 2, dev: false, diskGb: 100, gateway: "openclaw", tools: ["web_search", "web_fetch"] },
+  { label: "OpenClaw (Llama 3.3 70B)", model: "llama3.3:70b-instruct-q4_K_M", topic: "openclaw_llama3_3_70b_v1", ctx: 131072, gpu: 2, dev: false, diskGb: 200, gateway: "openclaw", tools: ["web_search", "web_fetch"] },
 ];
 
 export const subscriptionOf = (m) => `sub_${m.topic}`;
@@ -75,6 +75,11 @@ export const deadLetterOf   = (m) => `dead_letter_${m.topic}`;
 export const FAKE_TOPIC        = "fake_canned_v1";
 export const FAKE_SUBSCRIPTION = `sub_${FAKE_TOPIC}`;
 export const FAKE_DEAD_LETTER  = `dead_letter_${FAKE_TOPIC}`;
+// Single source of truth for how fake is PRESENTED as a pickable option (dashboard
+// model dropdown, health check) — it's not a MODELS entry (no gpu/dev/diskGb fields
+// a real tier needs), so consumers that want it in a model list append this directly
+// instead of re-deriving a label/value pair themselves.
+export const FAKE_MODEL_OPTION = { value: FAKE_TOPIC, label: "Fake (canned)" };
 // Version slug = the topic made name-safe for Docker/GCE (which reject underscores):
 // llama3_1_8b_v1 → llama3-1-8b-v1. Single source of truth for every infra name.
 export const slugOf         = (m) => m.topic.replace(/_/g, "-");

@@ -3,7 +3,7 @@ import { initializeApp, getApps } from 'firebase-admin/app'
 import { getFirestore, FieldValue } from 'firebase-admin/firestore'
 import { randomUUID } from 'crypto'
 // Single source of truth shared with the worker infra (yeschef-llm/config/models.js)
-import { byTopic } from '#models'
+import { byTopic, FAKE_TOPIC } from '#models'
 
 const pubsubClients: { [env: string]: PubSub } = {}
 let firestoreDb: any = null
@@ -54,9 +54,10 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  // `model` from the UI is the topic name (e.g. llama3_1_8b_v1). Validate against
-  // the shared registry; the topic is the model's topic.
-  const known = byTopic(model)
+  // `model` from the UI is the topic name (e.g. llama3_1_8b_v1). Validate against the shared
+  // registry. Fake/canned is a first-class pickable model — it's not a MODELS entry but IS a
+  // valid topic, so accept it the same as any tier (routes to FAKE_TOPIC → the fake worker cans it).
+  const known = model === FAKE_TOPIC ? { topic: FAKE_TOPIC } : byTopic(model)
   if (!known) {
     throw createError({
       statusCode: 400,

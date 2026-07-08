@@ -2,6 +2,8 @@
 // Both scripts/dev.js and scripts/deploy.js import this — never inline ejs.render locally.
 //
 // Required vars: name, model, gpu, parallel, maxQueue, subscription, gateway
+// Optional: baseImage — when set (deploy.js only), FROMs the shared pre-built base instead
+// of ollama/ollama:latest + inline apt-get (see docker/Dockerfile.base).
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { join, dirname } from "path";

@@ -1,0 +1,20 @@
+# ============================================================
+# Shared base for PRODUCTION model images (docker/Dockerfile.prod.ejs FROMs this).
+# Built once per deploy, content-hash keyed (see scripts/deploy.js ensureBaseImage),
+# and reused by every model's Cloud Build — avoids re-running apt-get/node-install
+# 7x per deploy (one per model image).
+#
+# Staleness trade-off: apt package versions freeze at whatever `apt-get update`
+# resolved the LAST time this file's content changed — not on every deploy like
+# before. Touch/bump this file to force a refresh and pick up new curl/git/nodejs
+# security patches.
+# ============================================================
+FROM ollama/ollama:latest
+
+# DEBIAN_FRONTEND=noninteractive: a transitive tzdata dep otherwise prompts for a
+# geographic area and hangs the (non-TTY) Cloud Build. Container TZ stays UTC.
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y curl git && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs && \
+    apt-get clean

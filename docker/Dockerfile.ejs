@@ -4,13 +4,22 @@
 # GPU: <%= gpu %>x NVIDIA L4
 # ============================================================
 
+<% if (typeof baseImage !== 'undefined' && baseImage) { %>
+# Prod: baseImage is the shared, pre-built ollama-base (see docker/Dockerfile.base +
+# scripts/deploy.js ensureBaseImage) — avoids re-running apt-get/node-install per model.
+FROM <%= baseImage %>
+<% } else { %>
 FROM ollama/ollama:latest
 
 # Node 22 (OpenClaw requires >=22.19) + git (OpenClaw self-install needs it).
-RUN apt-get update && apt-get install -y curl git && \
+# DEBIAN_FRONTEND=noninteractive: a transitive tzdata dep otherwise prompts for a
+# geographic area and hangs the (non-TTY) Cloud Build. Container TZ stays UTC.
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y curl git && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    apt-get install -y nodejs && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs && \
     apt-get clean
+<% } %>
 <% if (gateway === 'openclaw') { %>
 # OpenClaw gateway tier: bake the CLI so cold starts don't re-download it (~82MB).
 RUN npm install -g openclaw
