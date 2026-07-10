@@ -631,12 +631,25 @@ async function deploy() {
         `--metadata=startup-script='${esc(vmStartupScript(img, tagHash))}',serial-port-logging-enable=true`
     );
 
+    // Clean up legacy Zonal MIG if it exists to avoid conflicts.
+    // Errors are expected if it's already deleted or never existed.
+    if (APPLY) {
+      try {
+        execSync(
+          `gcloud compute instance-groups managed delete ${mig} ` +
+            `--project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} --quiet 2>/dev/null`,
+          { stdio: "ignore" }
+        );
+        console.log(`\nDeleted legacy Zonal MIG ${mig}`);
+      } catch {}
+    }
+
     // MIG + autoscaler on Pub/Sub backlog (scale 0 → maxReplicas).
     let migExists = false;
     try {
       execSync(
         `gcloud compute instance-groups managed describe ${mig} ` +
-          `--project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} --format="value(name)"`,
+          `--project=${GCP_PROJECT_ID} --region=${GCP_REGION} --format="value(name)"`,
         { stdio: "pipe" }
       );
       migExists = true;
@@ -651,23 +664,24 @@ async function deploy() {
       // broken new template surfaces as a stuck rollout instead of silently orphaning nothing.
       run(
         `gcloud compute instance-groups managed set-instance-template ${mig} ` +
-          `--project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} --template=${template}`
+          `--project=${GCP_PROJECT_ID} --region=${GCP_REGION} --template=${template}`
       );
       run(
         `gcloud compute instance-groups managed rolling-action start-update ${mig} ` +
-          `--project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} --version=template=${template} ` +
+          `--project=${GCP_PROJECT_ID} --region=${GCP_REGION} --version=template=${template} ` +
           `--max-surge=1 --max-unavailable=0`
       );
     } else {
       run(
         `gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} ` +
-          `--zone=${GCP_ZONE} --template=${template} --size=0`
+          `--region=${GCP_REGION} --template=${template} --size=0 ` +
+          `--zones=${GCP_REGION}-a,${GCP_REGION}-b,${GCP_REGION}-c`
       );
     }
     cleanupOldTemplates(img.name);
     run(
       `gcloud compute instance-groups managed set-autoscaling ${mig} --project=${GCP_PROJECT_ID} ` +
-        `--zone=${GCP_ZONE} --min-num-replicas=0 --max-num-replicas=${img.maxReplicas} ` +
+        `--region=${GCP_REGION} --min-num-replicas=0 --max-num-replicas=${img.maxReplicas} ` +
         `--update-stackdriver-metric=pubsub.googleapis.com/subscription/num_undelivered_messages ` +
         `--stackdriver-metric-filter='resource.type="pubsub_subscription" AND resource.label.subscription_id="${img.subscription}"' ` +
         `--stackdriver-metric-single-instance-assignment=1`
