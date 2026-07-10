@@ -68,3 +68,20 @@ test("recipe/recipes/protein_grid honor the diet pool (vegan gets no meat)", () 
   assert.doesNotMatch(grid + recipes, /Chicken|Beef|Pork|Salmon|Turkey|Cod/);
   assert.match(cannedResponse("recipe", { item: "vegan" }), /recipe:/);
 });
+
+test("recipe_suggestion returns a strict JSON array of {name, components} recipes", () => {
+  const out = cannedResponse("recipe_suggestion", { item: "vegan" });
+  assert.equal(typeof out, "string");
+  const parsed = JSON.parse(out);
+  assert.ok(Array.isArray(parsed) && parsed.length > 0);
+  for (const r of parsed) {
+    assert.equal(typeof r.name, "string");
+    assert.ok(Array.isArray(r.components));
+  }
+});
+
+test("recipe_suggestion echoes the proteinType requested in the prompt, multi-word included", () => {
+  const query = "Suggest one recipe. Respond with ONLY a JSON array.\n\n1. Greek yogurt — cut: plain, diet: regular, mealtime: breakfast";
+  const parsed = JSON.parse(cannedResponse("recipe_suggestion", { query }));
+  for (const r of parsed) assert.equal(r.proteinType, "Greek yogurt");
+});

@@ -259,6 +259,30 @@ function cannedNutrients(payload = {}) {
   return lines.join("\n");
 }
 
+// Recipe-preview batch (protein grid → recipe suggestions). Emits the strict JSON array the
+// client's parsePreviewResponse expects — plain array, no fences, no wrapping object — where
+// each item has name, components[{ingredient, category, quantity, unit, prep}] and nutrition.
+// Diet-aware via the SAME RECIPE_POOLS as cannedRecipe; deterministic — picks by diet.
+// proteinType must ECHO the protein requested in the prompt (buildPreviewPrompt lines look like
+// "1. <proteinType> — cut: <cut>, diet: <diet>, mealtime: <mealtime>"; proteinType may be
+// multi-word) — the client keeps only items whose proteinType matches the slot's, exactly as it
+// does with a real model's response.
+function cannedRecipeSuggestion(payload = {}) {
+  const requested = [...String(payload.query || "").matchAll(/^\s*\d+\.\s+(.+?)\s+—\s+cut:/gmu)].map((m) => m[1]);
+  const pool = recipePoolForDiet(payload.item);
+  const recipes = pool.slice(0, 2).map(([dish, protein, starch, veg], i) => ({
+    proteinType: requested[i] ?? requested[0] ?? protein,
+    name: dish, summary: "A delicious and balanced meal featuring " + protein + " and " + veg + ", served hot.",
+    components: [
+      { ingredient: protein, category: "protein", quantity: 4, unit: "oz", prep: '1" dice, trimmed' },
+      { ingredient: starch, category: "starch", quantity: 0.5, unit: "cup", prep: "cooked" },
+      { ingredient: veg, category: "vegetable", quantity: 0.5, unit: "cup", prep: "steamed soft" },
+    ],
+    nutrition: { kcal: 520, proteinG: 32, fatG: 18, carbG: 54, sodiumMg: 480, potassiumMg: 720, phosphorusMg: 310, fluidMl: 0 },
+  }));
+  return JSON.stringify(recipes);
+}
+
 const BY_SUBTYPE = {
   planner:      cannedPlanner,
   compliance:   cannedCompliance,
@@ -267,6 +291,7 @@ const BY_SUBTYPE = {
   protein_grid: cannedProteinGrid,
   recipes:      cannedRecipes,
   nutrients:    cannedNutrients,
+  recipe_suggestion: cannedRecipeSuggestion,
 };
 
 export function cannedResponse(subtype, payload = {}) {

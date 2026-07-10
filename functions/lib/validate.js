@@ -25,7 +25,7 @@ export function validateBody(schema) {
     if (req.raw.method === "OPTIONS") return;
     if (validate(req.body ?? {})) return;
     console.error("[validateBody]", req.routeOptions?.url, validate.errors);
-    reply.code(400).send({ error: "Invalid request body", details: validate.errors });
+    reply.code(400).send({ error: "Invalid request body" });
     return reply;
   };
 }

@@ -52,6 +52,8 @@ export const querySchema = {
     companyName: { type: "string", maxLength: 256 },
     fake:        { type: "boolean" },
     style:       { type: "string", maxLength: 64 },
+    subtype:     { type: "string", maxLength: 64 },
+    type:        { type: "string", maxLength: 64 },
   },
 };
 

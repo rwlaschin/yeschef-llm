@@ -21,7 +21,7 @@ const DEFAULT_QUERY_TOPIC = (MODELS.find((m) => m.dev) || MODELS[0]).topic;
 const QUERY_TYPE = "task";
 
 export async function post(req, reply) {
-  const { query, context, history, userId, companyId, companyName, fake, style } = req.body || {};
+  const { query, context, history, userId, companyId, companyName, fake, style, subtype, type } = req.body || {};
   if (!query || typeof query !== "string") return reply.code(400).send({ error: "query is required" });
 
   // fake:true → canned topic (no Ollama, no delay), SAME transport as a real query.
@@ -40,17 +40,19 @@ export async function post(req, reply) {
   ].filter(Boolean).join(" ");
   const effectiveQuery = preamble ? `${preamble}\n\n${query}` : query;
 
+  const effectiveType = type || QUERY_TYPE;
+
   const db = getFirestore();
   const jobId = randomUUID();
   await db.collection("llmResults").doc(jobId).set({
-    jobId, query, type: QUERY_TYPE, model: topic, fake: !!fake,
+    jobId, query, type: effectiveType, subtype: subtype || "", model: topic, fake: !!fake,
     status: "pending", response: "",
     uid: userId || "", companyId: companyId || "", organization: companyName || "",
     context: context || null, isDeleted: false,
     createdAt: FieldValue.serverTimestamp(), completedAt: null,
   });
   await pubsub().topic(topic).publishMessage({
-    json: { jobId, query: effectiveQuery, type: QUERY_TYPE, model: topic, fake: !!fake, style: genStyle },
+    json: { jobId, query: effectiveQuery, type: effectiveType, subtype: subtype || "", model: topic, fake: !!fake, style: genStyle },
   });
   console.log(`[ai/query] jobId=${jobId} → "${topic}"${fake ? " (fake)" : ""} (company=${companyId || "-"})`);
   return reply.send({ jobId });
