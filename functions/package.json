@@ -21,6 +21,7 @@
     "handlebars": "^4.7.9",
     "lru-cache": "^11.0.0",
     "mongodb": "^6.21.0",
+    "neo4j-driver": "^5.28.0",
     "yaml": "^2.5.0"
   }
 }

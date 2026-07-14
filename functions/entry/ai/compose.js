@@ -55,15 +55,20 @@ hb.registerHelper("zip", (...args) => {
 // only ever sees what the prompt renders, so without this the LLM ignores the grid and free-styles.
 // Diet key is space-stripped/lower-cased to match proteinSeedFromGrid; a single-diet grid falls back
 // to its sole slice when the unit's diet doesn't match. Empty → "" (falsy, so {{#if}} skips the block).
-hb.registerHelper("proteinBackbone", (proteins, diet) => {
+hb.registerHelper("proteinBackbone", (proteins, diet, day) => {
   const all = proteins && typeof proteins === "object" ? proteins : {};
   const keys = Object.keys(all);
   if (!keys.length) return "";
   const nd = String(diet || "").replace(/\s+/g, "").toLowerCase();
   const slice = all[nd] || (keys.length === 1 ? all[keys[0]] : null);
   if (!slice) return "";
+  // Optional day filter (day-fanout: {{proteinBackbone proteins slot.diet slot.day}} → just that
+  // day's rows). Handlebars passes an options object as the trailing arg, so only a real number/
+  // numeric string narrows; anything else (the options object, undefined) emits all days.
+  const only = (typeof day === "number" || (typeof day === "string" && /^\d+$/.test(day))) ? Number(day) : null;
+  const days = Object.keys(slice).filter((d) => only == null || Number(d) === only).sort((a, b) => Number(a) - Number(b));
   const lines = [];
-  for (const day of Object.keys(slice).sort((a, b) => Number(a) - Number(b))) {
+  for (const day of days) {
     for (const meal of Object.keys(slice[day] || {})) {
       const p = slice[day][meal];
       if (p && p.type) lines.push(`Day ${day} | ${meal} | ${p.type}${p.cut ? ` ${p.cut}` : ""}`);
@@ -240,6 +245,13 @@ function baseContext(form) {
   // 6-week weekdays plan → 30 days. Falls back to one week when no duration is set.
   const weeks = Number(duration.weeks) || 0;
   const days = Math.max(1, Number(duration.days) || (weeks ? weeks * (duration.businessDaysOnly ? 5 : 7) : 7));
+  // Fan-out unit list for the recipes build: one entry per (diet, day) so each LLM call writes ONE
+  // day for ONE diet — smaller, higher-fidelity prompts (the worker MIGs absorb the unit count).
+  // Diet-major, day-minor; the frontend reconstructs the SAME order to map runs back. No diets → one
+  // unnamed diet so a single-diet/ad-hoc plan still fans out by day.
+  const dietList = toList(values.diets);
+  const dietDays = (dietList.length ? dietList : [""]).flatMap(
+    (diet) => Array.from({ length: days }, (_, i) => ({ diet, day: i + 1 })));
   return {
     // input lists — both array AND raw string forms available to templates
     institution: toList(values.institution),
@@ -248,6 +260,7 @@ function baseContext(form) {
     legalsRaw: values.legals || "",
     diets: toList(values.diets),
     dietsRaw: values.diets || "",
+    dietDays,
     restrictions: toList(values.restrictions),
     restrictionsRaw: values.restrictions || "",
     preferences: toList(values.preferences),

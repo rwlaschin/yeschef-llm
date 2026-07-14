@@ -1007,6 +1007,18 @@ async function handleMessage(message) {
 
 // ---- Main --------------------------------------------------
 async function main() {
+  // Startup ENV dump → Cloud Logging (this container runs with --log-driver=gcplogs). We keep
+  // hitting config drift between dev and prod (NODE_ENV, MAX_CONCURRENCY, SUBSCRIPTION_NAME,
+  // OLLAMA_NUM_PARALLEL), so log the full env at boot — but REDACT secret-looking values
+  // (URI/KEY/TOKEN/SECRET/PASS/CRED/AUTH/MONGO) to their length so credentials never hit the logs.
+  const SECRET_RE = /(KEY|TOKEN|SECRET|PASS|CRED|AUTH|MONGO|URI|PASSWORD)/i;
+  console.log(
+    `[worker] ENV dump (IS_PROD=${IS_PROD}):\n` +
+      Object.keys(process.env).sort()
+        .map((k) => `  ${k}=${SECRET_RE.test(k) ? (process.env[k] ? `<redacted:${process.env[k].length}>` : "") : process.env[k]}`)
+        .join("\n")
+  );
+
   await connectMongo();
 
   const pubsub = new PubSub({ projectId: GCP_PROJECT_ID });

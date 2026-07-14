@@ -11,8 +11,15 @@ import { ORCHESTRATE_TOPIC } from "../../lib/topics.js";
 import { composeFromDefs, pruneOrphans } from "./compose.js";
 import { hardDeleteRuns, isStepRun } from "./resume.js";
 import { MENU_ENTRIES } from "./menu-plan.js";
+import { resolveProteinSeed } from "../../lib/neo4j.js";
 import { stringify as yamlStringify } from "yaml";
 import tzdb from "@vvo/tzdb";
+
+// Count of enabled diets from the comma-joined diets value — the summary shows a count, not the
+// raw list (users don't need the fan-out spelled out, and the list is long and unnormalized).
+function dietCount(diets) {
+  return diets.split(",").map((d) => d.trim()).filter(Boolean).length;
+}
 
 // Serialize a composed plan the SAME way the planner's run renders it — a fenced YAML list of step
 // summaries — so a menu job's `step:"plan"` run reads identically to a Request-page planner run in
@@ -138,7 +145,7 @@ async function composeMenuPlan(form = {}) {
 }
 
 export async function post(req, reply) {
-  const { userId, companyId, values, duration, residents, flags, costTier, location, enabled, dietWeights, proteins, jobId: reuseJobId, fake, planId, stepId } = req.body || {};
+  const { userId, companyId, values, duration, residents, flags, costTier, location, enabled, dietWeights, proteins, jobId: reuseJobId, fake, planId, stepId, siteId } = req.body || {};
   const isFake = fake === true;   // dev/test: dispatch steps to the canned topic, not the model
 
   // Location is OPTIONAL and IS an IANA timezone — the single source of truth. When set, derive region
@@ -164,6 +171,21 @@ export async function post(req, reply) {
   const disabled = Object.keys(enabled || {}).filter((k) => (enabled || {})[k] === false);
   console.log(`[ai/menu DRY-RUN] ── DISABLED ──\n  ${disabled.length ? disabled.join(", ") : "(none)"}`);
 
+  // Resolve the recipes step's protein seed FROM the committed grid (Neo4j Menu{planId}) at
+  // build time — the source of truth the chef approved — instead of trusting the client to send it
+  // (racy React-Query state that arrived empty on multi-diet plans → recipes free-styled). The
+  // client now sends only planId. Read failure/no-grid falls back to whatever the body carried.
+  let resolvedProteins = proteins || {};
+  if (planId) {
+    try {
+      const seed = await resolveProteinSeed(planId, siteId);
+      if (Object.keys(seed).length) resolvedProteins = seed;
+      console.log(`[ai/menu] resolved protein seed from grid planId=${planId} diets=[${Object.keys(seed).join(",")}]`);
+    } catch (e) {
+      console.error(`[ai/menu] protein seed resolve failed planId=${planId}: ${e.message} — falling back to body.proteins`);
+    }
+  }
+
   const { plan } = await composeMenuPlan({
     values: values || {}, // { <entryKey>: comma-delimited string } — keyed by input entry
     enabled: enabled || {},
@@ -172,7 +194,7 @@ export async function post(req, reply) {
     flags: flags || {},
     costTier: costTier || "",
     dietWeights: dietWeights || {}, // { <diet>: relative weight } for the {{allocate}} portion split
-    proteins: proteins || {}, // per-slot grid proteins (normDiet → day → mealtime → {type,cut}) — seeds the recipes step so recipes mirror the grid
+    proteins: resolvedProteins, // per-slot grid proteins (normDiet → day → mealtime → {type,cut}) — resolved server-side from the committed grid so recipes mirror it
     tz, region, hemisphere, date, time,
   });
 
@@ -198,7 +220,7 @@ export async function post(req, reply) {
     `Menu plan · ${duration?.weeks ?? "?"}w${duration?.businessDaysOnly ? " (business days)" : ""}` +
     ` · ${residents ?? 300} residents` +
     (values?.institution ? ` · ${values.institution}` : "") +
-    (values?.diets ? ` · ${values.diets}` : "");
+    (values?.diets ? ` · ${dietCount(values.diets)} diets` : "");
   // No run-level model: each step carries its own (def.model). Record the first step's for the summary.
   const jobModel = plan[0]?.model || "";
 

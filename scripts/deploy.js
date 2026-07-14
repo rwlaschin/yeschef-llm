@@ -24,6 +24,7 @@ import crypto from "crypto";
 import { renderDockerfile } from "../docker/render.js";
 import { setup as setupPubSub } from "../pubsub/setup.js";
 import { MODELS, subscriptionOf, imageOf, FAKE_SUBSCRIPTION } from "../config/models.js";
+import { WORKER_REGIONS } from "../config/regions.js";
 
 dotenvFlow.config();
 
@@ -183,6 +184,21 @@ function runAsync(cmd) {
 
 function esc(s) {
   return s.replace(/'/g, "'\\''");
+}
+
+// Autoscale a MIG on its Pub/Sub subscription backlog: 0 → maxReplicas, one instance per
+// undelivered message (single-instance-assignment=1), full scale-in after a 60s window. SHARED by
+// the GPU tiers AND the fake tier so their scaling policy can't drift — a copy-pasted variant is
+// exactly how the fake MIG silently got stuck at max-replicas=1 while the real tiers were 7.
+function setMigAutoscaling({ mig, region, subscription, maxReplicas }) {
+  return run(
+    `gcloud compute instance-groups managed set-autoscaling ${mig} --project=${GCP_PROJECT_ID} ` +
+      `--region=${region} --min-num-replicas=0 --max-num-replicas=${maxReplicas} ` +
+      `--update-stackdriver-metric=pubsub.googleapis.com/subscription/num_undelivered_messages ` +
+      `--stackdriver-metric-filter='resource.type="pubsub_subscription" AND resource.label.subscription_id="${subscription}"' ` +
+      `--stackdriver-metric-single-instance-assignment=1 ` +
+      `--scale-in-control=max-scaled-in-replicas-percent=100,time-window=60`
+  );
 }
 
 // Emit a start/finish pair per phase — NOT a single post-hoc duration log. A single
@@ -501,7 +517,9 @@ async function deployFake() {
     console.log(`  ✓ Template ${template} already exists — skipping create.`);
   }
 
-  // MIG + autoscaler on the fake subscription backlog (0 → 1). Same mechanism as the GPU tiers, so
+  // MIG + autoscaler on the fake subscription backlog (0 → maxReplicas). Same mechanism as the GPU
+  // tiers — including the same replica ceiling — so fake test runs can exercise multi-instance
+  // scaling (a fanned-out step lands N messages → N fake workers), not just a single serial box. So
   // an idle fake worker scales to zero within the 60s cooldown instead of billing around the clock.
   let migExists = false;
   try {
@@ -516,15 +534,8 @@ async function deployFake() {
   } else {
     run(`gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --template=${template} --size=0 --zones=${GCP_REGION}-a,${GCP_REGION}-b,${GCP_REGION}-c`);
   }
-  run(
-    `gcloud compute instance-groups managed set-autoscaling ${mig} --project=${GCP_PROJECT_ID} ` +
-      `--region=${GCP_REGION} --min-num-replicas=0 --max-num-replicas=1 ` +
-      `--update-stackdriver-metric=pubsub.googleapis.com/subscription/num_undelivered_messages ` +
-      `--stackdriver-metric-filter='resource.type="pubsub_subscription" AND resource.label.subscription_id="${FAKE_SUBSCRIPTION}"' ` +
-      `--stackdriver-metric-single-instance-assignment=1 ` +
-      `--scale-in-control=max-scaled-in-replicas-percent=100,time-window=60`
-  );
-  console.log(`  ✓ Fake worker → MIG ${mig} (e2-micro, 0→1) draining ${FAKE_SUBSCRIPTION}`);
+  setMigAutoscaling({ mig, region: GCP_REGION, subscription: FAKE_SUBSCRIPTION, maxReplicas: DEFAULTS.maxReplicas });
+  console.log(`  ✓ Fake worker → MIG ${mig} (e2-micro, 0→${DEFAULTS.maxReplicas}) draining ${FAKE_SUBSCRIPTION}`);
 }
 
 async function deploy() {
@@ -682,58 +693,58 @@ async function deploy() {
       } catch {}
     }
 
-    // MIG + autoscaler on Pub/Sub backlog (scale 0 → maxReplicas).
-    let migExists = false;
-    try {
-      execSync(
-        `gcloud compute instance-groups managed describe ${mig} ` +
-          `--project=${GCP_PROJECT_ID} --region=${GCP_REGION} --format="value(name)"`,
-        { stdio: "pipe" }
-      );
-      migExists = true;
-    } catch { /* doesn't exist yet */ }
-
-    if (migExists) {
-      // set-instance-template only changes the recipe for instances created AFTER this call —
-      // it does NOT touch already-running ones. A broken instance from a bad deploy would sit
-      // there serving (or failing to serve) traffic indefinitely, undetected, through every
-      // later "successful" deploy. rolling-action actually replaces existing instances: brings
-      // up a new one on the new template BEFORE removing an old one (max-unavailable=0), so a
-      // broken new template surfaces as a stuck rollout instead of silently orphaning nothing.
-      run(
-        `gcloud compute instance-groups managed set-instance-template ${mig} ` +
-          `--project=${GCP_PROJECT_ID} --region=${GCP_REGION} --template=${template}`
-      );
-      run(
-        // These MIGs are scale-to-zero (size 0), so a PERCENT max-surge is rejected — GCP only
-        // allows percent surge on regional MIGs with size ≥ 10. Fixed surge must be 0 or ≥ the
-        // zone count (3), so 3 is the only valid non-zero surge: one fresh instance per zone,
-        // brought up before any old one is drained (max-unavailable=0).
-        `gcloud compute instance-groups managed rolling-action start-update ${mig} ` +
-          `--project=${GCP_PROJECT_ID} --region=${GCP_REGION} --version=template=${template} ` +
-          `--max-surge=3 --max-unavailable=0`
-      );
-    } else {
-      run(
-        // 3 explicit zones so a fixed max-surge of 3 stays legal (surge must be 0 or ≥ zone count),
-        // with target-distribution-shape=ANY so the MIG places wherever L4 capacity exists among
-        // those zones instead of forcing an even spread — dodges single-zone stockouts.
-        `gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} ` +
-          `--region=${GCP_REGION} --template=${template} --size=0 ` +
-          `--zones=${GCP_REGION}-a,${GCP_REGION}-b,${GCP_REGION}-c --target-distribution-shape=ANY`
-      );
-    }
     cleanupOldTemplates(img.name);
-    run(
-      `gcloud compute instance-groups managed set-autoscaling ${mig} --project=${GCP_PROJECT_ID} ` +
-        `--region=${GCP_REGION} --min-num-replicas=0 --max-num-replicas=${img.maxReplicas} ` +
-        `--update-stackdriver-metric=pubsub.googleapis.com/subscription/num_undelivered_messages ` +
-        `--stackdriver-metric-filter='resource.type="pubsub_subscription" AND resource.label.subscription_id="${img.subscription}"' ` +
-        `--stackdriver-metric-single-instance-assignment=1 ` +
-        `--scale-in-control=max-scaled-in-replicas-percent=100,time-window=60`
-    );
 
-    console.log(`\nPrepared: ${img.name} → ${tagHash}, MIG ${mig} (${img.gpu}× L4, 0→${img.maxReplicas})`);
+    // MIG + autoscaler on Pub/Sub backlog (scale 0 → maxReplicas), one per L4 region so a
+    // region-wide stockout in any single region can't stall the whole model. All regions'
+    // autoscalers watch the SAME subscription (see WORKER_REGIONS note re: burst over-provisioning).
+    for (const [region, zones] of WORKER_REGIONS) {
+      // Fixed max-surge must be 0 or ≥ the region's zone count (percent surge is rejected on
+      // scale-to-zero MIGs), so surge = zones.length: one fresh instance per zone.
+      const surge = zones.length;
+      const zoneList = zones.map((z) => `${region}-${z}`).join(",");
+
+      let migExists = false;
+      try {
+        execSync(
+          `gcloud compute instance-groups managed describe ${mig} ` +
+            `--project=${GCP_PROJECT_ID} --region=${region} --format="value(name)"`,
+          { stdio: "pipe" }
+        );
+        migExists = true;
+      } catch { /* doesn't exist yet */ }
+
+      if (migExists) {
+        // set-instance-template only changes the recipe for instances created AFTER this call —
+        // it does NOT touch already-running ones. A broken instance from a bad deploy would sit
+        // there serving (or failing to serve) traffic indefinitely, undetected, through every
+        // later "successful" deploy. rolling-action actually replaces existing instances: brings
+        // up a new one on the new template BEFORE removing an old one (max-unavailable=0), so a
+        // broken new template surfaces as a stuck rollout instead of silently orphaning nothing.
+        run(
+          `gcloud compute instance-groups managed set-instance-template ${mig} ` +
+            `--project=${GCP_PROJECT_ID} --region=${region} --template=${template}`
+        );
+        run(
+          `gcloud compute instance-groups managed rolling-action start-update ${mig} ` +
+            `--project=${GCP_PROJECT_ID} --region=${region} --version=template=${template} ` +
+            `--max-surge=${surge} --max-unavailable=0`
+        );
+      } else {
+        run(
+          // Explicit L4 zones so a fixed max-surge stays legal (surge must be 0 or ≥ zone count),
+          // with target-distribution-shape=ANY so the MIG places wherever L4 capacity exists among
+          // those zones instead of forcing an even spread — dodges single-zone stockouts.
+          `gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} ` +
+            `--region=${region} --template=${template} --size=0 ` +
+            `--zones=${zoneList} --target-distribution-shape=ANY`
+        );
+      }
+      setMigAutoscaling({ mig, region, subscription: img.subscription, maxReplicas: img.maxReplicas });
+      console.log(`  ✓ ${img.name} MIG ${mig} in ${region} (${zoneList}, 0→${img.maxReplicas})`);
+    }
+
+    console.log(`\nPrepared: ${img.name} → ${tagHash} across ${WORKER_REGIONS.length} region(s) (${img.gpu}× L4, 0→${img.maxReplicas})`);
     return img.name;
   }));
 

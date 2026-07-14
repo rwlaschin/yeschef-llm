@@ -120,6 +120,19 @@ const _ai = onRequest(
 );
 export { _ai as ai };
 
+// Startup ENV dump → Cloud Logging. We keep hitting dev/prod config drift (NODE_ENV and the
+// values it gates); log the full env at boot with secret-looking values REDACTED to their length
+// so credentials never hit the logs.
+{
+  const SECRET_RE = /(KEY|TOKEN|SECRET|PASS|CRED|AUTH|MONGO|URI|PASSWORD)/i;
+  console.log(
+    `[orchestrator] ENV dump (NODE_ENV=${process.env.NODE_ENV ?? "unset"}):\n` +
+      Object.keys(process.env).sort()
+        .map((k) => `  ${k}=${SECRET_RE.test(k) ? (process.env[k] ? `<redacted:${process.env[k].length}>` : "") : process.env[k]}`)
+        .join("\n")
+  );
+}
+
 // Create the `orchestrate` topic + push subscription on startup (idempotent).
 if (process.env.K_SERVICE || process.env.FUNCTIONS_EMULATOR === "true") {
   import("./lib/pubsub.js")

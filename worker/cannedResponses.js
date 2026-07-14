@@ -257,10 +257,16 @@ function cannedRecipes(payload = {}) {
   const ctx = payload.ctx || {};
   const meals = Array.isArray(ctx.meals) && ctx.meals.length ? ctx.meals : ["breakfast", "lunch", "dinner"];
   const days = Math.max(1, Number(ctx.days) || 7);
-  const pool = recipePoolForDiet(payload.item);
-  const gridProteins = slotProteinsFor(ctx, payload.item);
+  // Day-fanout: payload.item is a {diet, day} slot → emit ONLY that day. Legacy per-diet fanout:
+  // item is a diet string → emit all days. Absolute day number drives the pool rotation either way.
+  const item = payload.item;
+  const diet = item && typeof item === "object" ? item.diet : item;
+  const onlyDay = item && typeof item === "object" && item.day != null ? Number(item.day) : null;
+  const dayList = onlyDay != null ? [onlyDay] : Array.from({ length: days }, (_, i) => i + 1);
+  const pool = recipePoolForDiet(diet);
+  const gridProteins = slotProteinsFor(ctx, diet);
   const lines = ["Day | Mealtime | Dish | Protein | Starch | Vegetable | Fruit"];
-  for (let d = 1; d <= days; d++) {
+  for (const d of dayList) {
     for (let m = 0; m < meals.length; m++) {
       const meal = meals[m];
       const fallback = pool[(d * meals.length + m) % pool.length];

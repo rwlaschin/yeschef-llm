@@ -21,6 +21,7 @@
 import dotenvFlow from "dotenv-flow";
 import { execSync } from "child_process";
 import { MODELS, imageOf } from "../config/models.js";
+import { WORKER_REGIONS } from "../config/regions.js";
 
 dotenvFlow.config();
 
@@ -33,7 +34,6 @@ if (!env || !["production", "test"].includes(env)) {
 const {
   GCP_PROJECT_ID,
   GCP_REGION = "us-central1",
-  GCP_ZONE,
 } = process.env;
 
 if (!GCP_PROJECT_ID) throw new Error("GCP_PROJECT_ID env var is required");
@@ -103,29 +103,13 @@ function rollbackCloudRun(service) {
 }
 
 // ---- GCE MIG (workers) ------------------------------------------------------
+// Instance templates are GLOBAL, so the newest→previous version lookup is done once per tier.
+// The MIGs themselves are REGIONAL and replicated across WORKER_REGIONS (see config/regions.js),
+// so each region's MIG is repointed independently — mirroring how deploy.js provisions them.
 function rollbackMig(mig) {
   console.log(`\n==== MIG: ${mig} ====`);
-  if (!GCP_ZONE) {
-    console.log(`  GCP_ZONE env var required for MIG rollback — skipping.\n`);
-    return;
-  }
 
-  // The MIG either exists or it doesn't (tier never deployed) — skip cleanly if absent.
-  let currentUrl;
-  try {
-    currentUrl = run(
-      `gcloud compute instance-groups managed describe ${mig} \
-        --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID} \
-        --format="value(instanceTemplate)"`
-    );
-  } catch {
-    console.log(`  MIG not found — skipping (tier not deployed).\n`);
-    return;
-  }
-  const current = currentUrl.split("/").pop();
-
-  // All instance templates for this tier, newest first. Roll back = the one VERSION
-  // immediately older than whatever the MIG currently points at.
+  // All instance templates for this tier, newest first (global resource, region-independent).
   const prefix = mig.replace(/-mig$/, "-tmpl-");
   const templates = run(
     `gcloud compute instance-templates list \
@@ -137,28 +121,42 @@ function rollbackMig(mig) {
     .split("\n")
     .filter(Boolean);
 
-  const idx = templates.indexOf(current);
-  const previous = idx >= 0 ? templates[idx + 1] : templates.find((t) => t !== current);
+  for (const [region] of WORKER_REGIONS) {
+    // The MIG either exists in this region or it doesn't (tier never deployed here) — skip cleanly.
+    let currentUrl;
+    try {
+      currentUrl = run(
+        `gcloud compute instance-groups managed describe ${mig} \
+          --region=${region} --project=${GCP_PROJECT_ID} \
+          --format="value(instanceTemplate)"`
+      );
+    } catch {
+      console.log(`  [${region}] MIG not found — skipping (tier not deployed here).`);
+      continue;
+    }
+    const current = currentUrl.split("/").pop();
 
-  if (!previous) {
-    console.log(`  No previous instance template (current: ${current}), cannot rollback.\n`);
-    return;
+    // Roll back = the one VERSION immediately older than whatever this MIG currently points at.
+    const idx = templates.indexOf(current);
+    const previous = idx >= 0 ? templates[idx + 1] : templates.find((t) => t !== current);
+
+    if (!previous) {
+      console.log(`  [${region}] No previous template (current: ${current}) — cannot rollback.`);
+      continue;
+    }
+
+    console.log(`  [${region}] ${current} → ${previous}`);
+
+    runLive(
+      `gcloud compute instance-groups managed set-instance-template ${mig} \
+        --template=${previous} --region=${region} --project=${GCP_PROJECT_ID}`
+    );
+    // Replace any running instances now; a scaled-to-zero MIG just picks it up on next scale-up.
+    runLive(
+      `gcloud compute instance-groups managed rolling-action replace ${mig} \
+        --region=${region} --project=${GCP_PROJECT_ID}`
+    );
   }
-
-  console.log(`  Current  : ${current}`);
-  console.log(`  Rollback : ${previous}`);
-
-  runLive(
-    `gcloud compute instance-groups managed set-instance-template ${mig} \
-      --template=${previous} --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID}`
-  );
-  // Replace any running instances now; a scaled-to-zero MIG just picks it up on next scale-up.
-  runLive(
-    `gcloud compute instance-groups managed rolling-action replace ${mig} \
-      --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID}`
-  );
-
-  console.log(`  Rolled back to: ${previous}\n`);
 }
 
 async function rollback() {
