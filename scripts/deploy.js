@@ -1,17 +1,17 @@
 // ============================================================
-// Deploy — GCE spot MIG with baked custom GCE images (no boot-time Docker pull).
+// Deploy — GCE MIG with baked custom GCE images (no boot-time Docker pull).
 //
 //   1. build the Docker image (Ollama + worker + baked model) → Artifact Registry
 //   2. bake a GCE custom image: launch a baker VM, docker pull, stop VM, snapshot
-//   3. instance template: SPOT, GPU L4(s), custom image; startup just runs the container
+//   3. instance template: GPU L4(s), custom image; startup just runs the container
 //   4. managed instance group + autoscaler on Pub/Sub backlog (min 0 → max N)
 //
 // One VM per replica. GPU count comes from the model's "machine description":
 //   gpu:1 → 1× L4 (g2-standard-8),  gpu:2 → 2× L4 (g2-standard-24, one box).
 //
-// Spot + scale-to-zero + no cluster fee. Preemption is safe: the worker acks only
-// after the final Firestore write, so a preempted job is redelivered and another
-// spot VM finishes it (jobId idempotency guards partial writes).
+// Scale-to-zero + no cluster fee. The worker acks only after the final Firestore write,
+// so an instance lost to scale-in, host maintenance, or a crash leaves its job unacked —
+// Pub/Sub redelivers it and another VM finishes it (jobId idempotency guards partial writes).
 //
 // Applies for real by default. Pass --dry-run to only PRINT the gcloud/docker
 // commands without executing them (preview the plan).
@@ -46,7 +46,6 @@ const {
 // Applies for real by default. Pass --dry-run to only print the commands (no execution).
 const args = process.argv.slice(2);
 const DRY_RUN = args.some((a) => a === "--dry-run" || a === "--dry-run=1" || a === "--dry-run=true");
-const USE_SPOT = args.some((a) => a === "--spot");
 const APPLY = !DRY_RUN;
 
 for (const [k, v] of Object.entries({
@@ -417,18 +416,22 @@ async function bakeGCEImage(img, tag, hash, machineType) {
 }
 
 // The FAKE/canned worker is part of the STANDARD deploy — no separate command. It's a CPU-only
-// always-up VM running docker/Dockerfile.fake: no GPU, no model, no baker/bake. It drains
+// worker running docker/Dockerfile.fake: no GPU, no model, no baker/bake. It drains
 // FAKE_SUBSCRIPTION and returns canned output through the same Pub/Sub → Firestore path as a real
-// worker. Disabling the GPU workers (edit MODELS / the IMAGES filter) does not affect this.
+// worker. Like the GPU tiers it runs behind a MIG + autoscaler on its own subscription backlog
+// (min 0 → scale-to-zero), so an idle fake worker shuts itself off within the ~60s cooldown
+// instead of billing 24/7. Disabling the GPU workers (edit MODELS / the IMAGES filter) does not
+// affect this.
 async function deployFake() {
   const name = "worker-fake-canned-v1";
   const dockerfile = fs.readFileSync("docker/Dockerfile.fake", "utf-8");
   const hash = contentHash(dockerfile);                     // rebuilds when Dockerfile.fake/worker/config change
   const tagHash = `${REGISTRY}/${name}:${hash}`;
   const tagLatest = `${REGISTRY}/${name}:latest`;
-  const vm = name;
+  const template = `${name}-tmpl-${hash}`;
+  const mig = `${name}-mig`;
 
-  console.log(`\n==== ${name} (CPU, always-up) hash=${hash} ====`);
+  console.log(`\n==== ${name} (CPU MIG, scale-to-zero) hash=${hash} ====`);
 
   if (APPLY && imageExistsInRegistry(tagHash)) {
     console.log(`  ✓ Image unchanged (${hash}) — skipping build.`);
@@ -470,31 +473,50 @@ async function deployFake() {
     `  ${tagHash}`,
   ].join("\n");
 
-  // Recreate so the VM always runs the newest image — BUT if the image is unchanged and the VM is
-  // already RUNNING, leave it alone (a GPU-only redeploy must not bounce a healthy fake worker).
-  if (APPLY) {
-    let status = null;
-    try {
-      status = execSync(`gcloud compute instances describe ${vm} --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID} --format="value(status)"`, { stdio: "pipe" }).toString().trim();
-    } catch { /* not present yet */ }
-    if (status === "RUNNING" && imageExistsInRegistry(tagHash)) {
-      console.log(`  ✓ Fake worker already running on current image — leaving it untouched.`);
-      return;
-    }
-    if (status) run(`gcloud compute instances delete ${vm} --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID} --quiet`);
-  }
+  // Retire the legacy always-up standalone VM if a pre-MIG deploy left one behind — the MIG below
+  // replaces it. (Read-only describe is safe in dry-run; the delete goes through APPLY-gated run.)
+  let legacyVm = "";
+  try {
+    legacyVm = execSync(`gcloud compute instances describe ${name} --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID} --format="value(name)"`, { stdio: "pipe" }).toString().trim();
+  } catch { /* no legacy VM */ }
+  if (legacyVm) run(`gcloud compute instances delete ${name} --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID} --quiet`);
+
+  // CPU instance template — cos-stable, no GPU; boot pulls + runs the fake image.
   run(
-    `gcloud compute instances create ${vm} --project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} ` +
-      `--machine-type=e2-small --image-family=cos-stable --image-project=cos-cloud ` +
+    `gcloud compute instance-templates create ${template} --project=${GCP_PROJECT_ID} ` +
+      `--machine-type=e2-micro --image-family=cos-stable --image-project=cos-cloud ` +
       `--boot-disk-size=20GB --network=${GCP_NETWORK} ` +
       `--scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
       `--metadata=startup-script='${esc(startup)}',serial-port-logging-enable=true`
   );
-  console.log(`  ✓ Fake worker → VM ${vm} draining ${FAKE_SUBSCRIPTION}`);
+
+  // MIG + autoscaler on the fake subscription backlog (0 → 1). Same mechanism as the GPU tiers, so
+  // an idle fake worker scales to zero within the 60s cooldown instead of billing around the clock.
+  let migExists = false;
+  try {
+    execSync(`gcloud compute instance-groups managed describe ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --format="value(name)"`, { stdio: "pipe" });
+    migExists = true;
+  } catch { /* doesn't exist yet */ }
+
+  if (migExists) {
+    run(`gcloud compute instance-groups managed set-instance-template ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --template=${template}`);
+    run(`gcloud compute instance-groups managed rolling-action start-update ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --version=template=${template} --max-surge=1 --max-unavailable=0`);
+  } else {
+    run(`gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --template=${template} --size=0 --zones=${GCP_REGION}-a,${GCP_REGION}-b,${GCP_REGION}-c`);
+  }
+  run(
+    `gcloud compute instance-groups managed set-autoscaling ${mig} --project=${GCP_PROJECT_ID} ` +
+      `--region=${GCP_REGION} --min-num-replicas=0 --max-num-replicas=1 ` +
+      `--update-stackdriver-metric=pubsub.googleapis.com/subscription/num_undelivered_messages ` +
+      `--stackdriver-metric-filter='resource.type="pubsub_subscription" AND resource.label.subscription_id="${FAKE_SUBSCRIPTION}"' ` +
+      `--stackdriver-metric-single-instance-assignment=1 ` +
+      `--scale-in-control=max-scaled-in-replicas-percent=100,time-window=60`
+  );
+  console.log(`  ✓ Fake worker → MIG ${mig} (e2-micro, 0→1) draining ${FAKE_SUBSCRIPTION}`);
 }
 
 async function deploy() {
-  console.log(`\nDeploy — GCE ${USE_SPOT ? "SPOT" : "on-demand"} MIG (DLVM + Docker)  ${APPLY ? "(APPLY)" : "(DRY-RUN)"}`);
+  console.log(`\nDeploy — GCE MIG (DLVM + Docker)  ${APPLY ? "(APPLY)" : "(DRY-RUN)"}`);
   console.log(`Version : ${VERSION}   Project: ${GCP_PROJECT_ID}   Zone: ${GCP_ZONE}`);
   console.log(`Registry: ${REGISTRY}\n`);
 
@@ -626,7 +648,6 @@ async function deploy() {
         `--boot-disk-size=${img.diskGb}GB --boot-disk-type=hyperdisk-balanced ` +
         `--boot-disk-provisioned-iops=10000 --boot-disk-provisioned-throughput=400 ` +
         `--accelerator=type=nvidia-l4,count=${img.gpu} --maintenance-policy=TERMINATE ` +
-        (USE_SPOT ? `--provisioning-model=SPOT --instance-termination-action=STOP ` : "") +
         `--network=${GCP_NETWORK} --scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
         `--metadata=startup-script='${esc(vmStartupScript(img, tagHash))}',serial-port-logging-enable=true`
     );
@@ -684,10 +705,11 @@ async function deploy() {
         `--region=${GCP_REGION} --min-num-replicas=0 --max-num-replicas=${img.maxReplicas} ` +
         `--update-stackdriver-metric=pubsub.googleapis.com/subscription/num_undelivered_messages ` +
         `--stackdriver-metric-filter='resource.type="pubsub_subscription" AND resource.label.subscription_id="${img.subscription}"' ` +
-        `--stackdriver-metric-single-instance-assignment=1`
+        `--stackdriver-metric-single-instance-assignment=1 ` +
+        `--scale-in-control=max-scaled-in-replicas-percent=100,time-window=60`
     );
 
-    console.log(`\nPrepared: ${img.name} → ${tagHash}, MIG ${mig} (spot ${img.gpu}× L4, 0→${img.maxReplicas})`);
+    console.log(`\nPrepared: ${img.name} → ${tagHash}, MIG ${mig} (${img.gpu}× L4, 0→${img.maxReplicas})`);
     return img.name;
   }));
 

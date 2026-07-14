@@ -66,22 +66,109 @@ test("recipe/recipes/protein_grid honor the diet pool (vegan gets no meat)", () 
   assert.equal(grid.split("\n")[0], "Day | Mealtime | Type | Cut");
   assert.equal(recipes.split("\n")[0], "Day | Mealtime | Dish | Protein | Starch | Vegetable | Fruit");
   assert.doesNotMatch(grid + recipes, /Chicken|Beef|Pork|Salmon|Turkey|Cod/);
-  assert.match(cannedResponse("recipe", { item: "vegan" }), /recipe:/);
+  assert.doesNotMatch(JSON.stringify(JSON.parse(cannedResponse("recipe", { item: "vegan", query: "" }))), /Chicken|Beef|Pork|Salmon|Turkey|Cod/);
 });
 
-test("recipe_suggestion returns a strict JSON array of {name, components} recipes", () => {
-  const out = cannedResponse("recipe_suggestion", { item: "vegan" });
+test("recipe with target lines returns a strict JSON array of canonical recipes", () => {
+  const query = "1. Tofu — cut: firm, diet: vegan, mealtime: lunch";
+  const out = cannedResponse("recipe", { item: "vegan", query });
   assert.equal(typeof out, "string");
   const parsed = JSON.parse(out);
   assert.ok(Array.isArray(parsed) && parsed.length > 0);
   for (const r of parsed) {
     assert.equal(typeof r.name, "string");
     assert.ok(Array.isArray(r.components));
+    assert.ok(Array.isArray(r.method), "canonical recipes carry their method");
+    assert.equal(typeof r.nutrition, "object");
   }
 });
 
-test("recipe_suggestion echoes the proteinType requested in the prompt, multi-word included", () => {
+test("recipe echoes the proteinType requested in the prompt, multi-word included", () => {
   const query = "Suggest one recipe. Respond with ONLY a JSON array.\n\n1. Greek yogurt — cut: plain, diet: regular, mealtime: breakfast";
-  const parsed = JSON.parse(cannedResponse("recipe_suggestion", { query }));
+  const parsed = JSON.parse(cannedResponse("recipe", { query }));
   for (const r of parsed) assert.equal(r.proteinType, "Greek yogurt");
+});
+
+test("recipe builds the recipe FROM the requested protein — body matches, not just the label", () => {
+  const query = "1. Greek yogurt — cut: plain, diet: regular, mealtime: breakfast";
+  const r = JSON.parse(cannedResponse("recipe", { query }))[0];
+  const protein = r.components.find((c) => c.category === "protein");
+  assert.equal(protein.ingredient, "Greek yogurt", "protein component must be the requested protein, not a foreign pool row");
+  assert.match(r.name.toLowerCase(), /yogurt/);
+});
+
+test("recipe is mealtime-aware — breakfast drops the savoury veg and adds fruit", () => {
+  const bfast = JSON.parse(cannedResponse("recipe", { query: "1. Greek yogurt — cut: , diet: regular, mealtime: breakfast" }))[0];
+  const cats = bfast.components.map((c) => c.category);
+  assert.ok(!cats.includes("vegetable"), "breakfast must NOT include a vegetable (no yogurt + spinach)");
+  assert.ok(cats.includes("fruit"), "breakfast should include fruit");
+  assert.doesNotMatch(bfast.summary.toLowerCase(), /spinach/, "summary must not pair yogurt with spinach");
+
+  const lunch = JSON.parse(cannedResponse("recipe", { query: "1. Chicken — cut: diced, diet: regular, mealtime: lunch" }))[0];
+  assert.ok(lunch.components.some((c) => c.category === "vegetable"), "lunch/dinner keeps the vegetable");
+});
+
+test("recipe directions-style query returns a single recipe whose method derives from its own components", () => {
+  // Mirrors buildDirectionsPrompt: dish name + one "<prep> <ingredient>" line per component.
+  const query = "Yogurt bowl\nportioned Greek yogurt\ncooked Granola\nfresh Mango";
+  const r = JSON.parse(cannedResponse("recipe", { query }));
+  assert.equal(r.name, "Yogurt bowl", "directions response is the requested dish");
+  assert.ok(Array.isArray(r.method) && r.method.length > 0);
+  const text = r.method.map((s) => s.text).join(" ").toLowerCase();
+  assert.match(text, /greek yogurt/, "steps reference the recipe's protein");
+  assert.doesNotMatch(text, /spinach|broccoli/, "steps must not mention a vegetable the breakfast recipe never had");
+});
+
+test("recipe method steps are strict {text, phase, order} covering both phases", () => {
+  const r = JSON.parse(cannedResponse("recipe", { item: "vegan", query: "" }));
+  assert.ok(Array.isArray(r.method) && r.method.length > 0);
+  const phases = new Set(["make_ahead", "on_line"]);
+  for (const s of r.method) {
+    assert.equal(typeof s.text, "string");
+    assert.ok(s.text.length > 0);
+    assert.ok(phases.has(s.phase), `bad phase: "${s.phase}"`);
+    assert.equal(typeof s.order, "number");
+  }
+  // must cover both phases — make-ahead prep + on-line service
+  const seen = new Set(r.method.map((s) => s.phase));
+  assert.ok(seen.has("make_ahead") && seen.has("on_line"), "both phases present");
+});
+
+// ── recipes step is SEEDED from the proteins grid (Bug fix: recipes ignored the grid) ──────────
+// payload.ctx.proteins carries the grid's per-slot proteins (normDiet → day → mealtime → {type,cut}).
+// cannedRecipes must emit each slot's recipe FROM that protein so recipes MIRROR the proteins grid.
+const recipeRows = (out) => out.split("\n").slice(1).map((l) => l.split("|").map((c) => c.trim()));
+const proteinAt = (out, day, meal) => {
+  const row = recipeRows(out).find((c) => c[0] === `Day ${day}` && c[1] === meal);
+  return row ? row[3] : null;   // column order: Day | Mealtime | Dish | Protein | Starch | Veg | Fruit
+};
+const dishAt = (out, day, meal) => {
+  const row = recipeRows(out).find((c) => c[0] === `Day ${day}` && c[1] === meal);
+  return row ? row[2] : null;
+};
+
+test("recipes seeded from the grid emit each slot's assigned protein (mirrors the grid)", () => {
+  const proteins = { "diet1": {
+    1: { breakfast: { type: "Greek yogurt" }, lunch: { type: "Turkey", cut: "breast" }, dinner: { type: "Cod", cut: "fillet" } },
+    2: { breakfast: { type: "Pork Loin", cut: "smoked" } },
+  } };
+  const out = cannedResponse("recipes", { item: "diet 1", ctx: { meals: ["breakfast", "lunch", "dinner"], days: 2, proteins } });
+  assert.equal(proteinAt(out, 1, "breakfast"), "Greek yogurt");   // the reported bug: was "Baked cod"
+  assert.equal(proteinAt(out, 1, "lunch"), "Turkey");
+  assert.equal(proteinAt(out, 1, "dinner"), "Cod");
+  assert.equal(proteinAt(out, 2, "breakfast"), "Pork Loin");
+  // dish reflects the grid protein (Greek yogurt → the yogurt-bowl pool row)
+  assert.match(dishAt(out, 1, "breakfast"), /yogurt/i);
+});
+
+test("recipes seed matches the unit's diet even when item is null (single-diet grid)", () => {
+  const proteins = { "diet1": { 1: { breakfast: { type: "Greek yogurt" } } } };
+  const out = cannedResponse("recipes", { item: null, ctx: { meals: ["breakfast"], days: 1, proteins } });
+  assert.equal(proteinAt(out, 1, "breakfast"), "Greek yogurt");
+});
+
+test("recipes fall back to the diet pool when no grid proteins are provided", () => {
+  const out = cannedResponse("recipes", { item: "vegan", ctx: { meals: ["breakfast"], days: 1 } });
+  const p = proteinAt(out, 1, "breakfast");
+  assert.ok(["Tofu", "Lentil", "Chickpea", "Black bean", "Tempeh", "Quinoa", "Edamame", "Seitan"].includes(p), `vegan pool protein, got "${p}"`);
 });

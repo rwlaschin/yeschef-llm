@@ -26,7 +26,7 @@ The fake/canned-response transport — deterministic, no-Ollama output for dev a
 
 ## Feature Overview
 
-Real inference runs on spot GPU VMs behind Ollama: slow, costly, non-deterministic, and sometimes simply not running in dev. That makes it a poor substrate for UI development, E2E tests, and pipeline plumbing checks, where what's under test is the transport and the parsers — not the model. Fake/canned mode gives every LLM entry point a `fake: true` escape hatch: the job is dispatched to a dedicated canned topic instead of a model topic, and a CPU worker returns deterministic, contract-shaped output through the identical Firestore write path. Because nothing downstream of topic selection changes, a fake run exercises the full real pipeline — dispatch, admission CAS, streaming flusher, completion transaction, orchestrator reports — with zero inference cost and stable output.
+Real inference runs on GPU VMs behind Ollama: slow, costly, non-deterministic, and sometimes simply not running in dev. That makes it a poor substrate for UI development, E2E tests, and pipeline plumbing checks, where what's under test is the transport and the parsers — not the model. Fake/canned mode gives every LLM entry point a `fake: true` escape hatch: the job is dispatched to a dedicated canned topic instead of a model topic, and a CPU worker returns deterministic, contract-shaped output through the identical Firestore write path. Because nothing downstream of topic selection changes, a fake run exercises the full real pipeline — dispatch, admission CAS, streaming flusher, completion transaction, orchestrator reports — with zero inference cost and stable output.
 
 ## Architecture
 

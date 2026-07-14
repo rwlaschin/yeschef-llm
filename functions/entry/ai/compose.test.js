@@ -120,3 +120,30 @@ test("a non-compliance step with no failStep leaves it null", () => {
   const plan = composeFromDefs([a, b], form());
   assert.equal(plan[1].failStep, null);
 });
+
+test("renderCtx.proteins threads through to a NON-fanned step (single-diet recipes build)", () => {
+  const proteins = { diet1: { 1: { breakfast: { type: "Greek yogurt" } } } };
+  // Empty diets → the recipes fanout resolves to one unit (not fanned).
+  const recipes = { name: "recipes", subtype: "recipes", kind: "fanout", mapOf: "diets", instruction: "r", pass: "", fail: "", context: [] };
+  const plan = composeFromDefs([recipes], form({ values: { diets: "" }, proteins, duration: { days: 2 } }));
+  assert.equal(plan[0].items, undefined);                 // not fanned (one unit)
+  assert.deepEqual(plan[0].renderCtx.proteins, proteins); // ...but proteins still ride renderCtx → fake dispatch
+  assert.equal(plan[0].renderCtx.days, 2);
+});
+
+test("renderCtx.proteins threads through to a FANNED step (multi-diet)", () => {
+  const proteins = { renal: { 1: { breakfast: { type: "Cod" } } }, standard: {} };
+  const recipes = { name: "recipes", subtype: "recipes", kind: "fanout", mapOf: "diets", instruction: "r {{diet}}", pass: "", fail: "", context: [] };
+  const plan = composeFromDefs([recipes], form({ values: { diets: "renal, standard" }, proteins }));
+  assert.equal(plan[0].items.length, 2);                  // fanned per diet
+  assert.deepEqual(plan[0].renderCtx.proteins, proteins);
+});
+
+test("proteinBackbone keeps the cut in the name WITHOUT parentheses", () => {
+  const proteins = { renal: { 1: { breakfast: { type: "Chicken", cut: "thigh" } } } };
+  const recipes = { name: "recipes", subtype: "recipes", kind: "fanout", mapOf: "diets", instruction: "{{proteinBackbone proteins diet}}", pass: "", fail: "", context: [] };
+  const plan = composeFromDefs([recipes], form({ values: { diets: "renal" }, proteins }));
+  const rendered = renderUnit(plan[0], 0);
+  assert.match(rendered, /Chicken thigh/);                 // cut stays in the name (space-joined)
+  assert.doesNotMatch(rendered, /\(/);                     // …and NEVER wrapped in parentheses
+});

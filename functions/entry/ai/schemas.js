@@ -18,6 +18,7 @@ export const menuSchema = {
     flags:               OBJ,
     enabled:             OBJ,
     dietWeights:         OBJ,
+    proteins:            OBJ,  // per-slot grid proteins (normDiet → day → mealtime → {type,cut}) — seeds the recipes build so recipes mirror the grid
     costTier:            { type: "string", maxLength: 100 },
     costTierDescription: { type: "string", maxLength: 4000 },
     location:            { type: "string", maxLength: 200 },

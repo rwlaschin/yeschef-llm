@@ -11,16 +11,16 @@ The end-to-end path a single LLM request takes: `yeschef` UI → `/api/llm` → 
 
 - **Regulated data must not leave our infra.** Cloud-hosted model tags (e.g. `kimi-k2.5:cloud`) are ruled out for any tier handling company data — only local/self-hosted models run in production. Per-token cloud cost also makes them non-viable at scale.
 - **Multi-tenant scoping.** Every request and Firestore doc is scoped to `userId` + `companyId`; the backend verifies company access via Neo4j before publishing. A bug here is a cross-tenant data leak.
-- **Spot preemption correctness.** Workers run on spot GPU instances that can die mid-request at any time. The ack/idempotency contract (see [[worker-dispatch]]) is the only thing standing between that and duplicated or lost results — do not change ack timing without re-reading it.
+- **Mid-request loss correctness.** Workers run on GPU instances that can die mid-request at any time — scale-in (autoscaler removing an idle instance), host maintenance (`onHostMaintenance=TERMINATE`), or a process/VM crash. The ack/idempotency contract (see [[worker-dispatch]]) is the only thing standing between that and duplicated or lost results — do not change ack timing without re-reading it.
 - **Secrets in `.env` / `.env.production`** — `GOOGLE_APPLICATION_CREDENTIALS`, Mongo URI, OpenClaw gateway token. Never logged, never committed.
 
 ## Design Constraints
 
 - **Single source of truth for models/topics**: `config/models.js`, imported everywhere via `#models`. Changing a topic name means changing one place.
-- **One Docker image, two run targets** — the image (Ollama + worker + baked model) is built once; dev runs it directly via a `waker`, prod bakes it into a GCE custom image for spot MIGs. No separate dev/prod build paths.
+- **One Docker image, two run targets** — the image (Ollama + worker + baked model) is built once; dev runs it directly via a `waker`, prod bakes it into a GCE custom image for the MIGs. No separate dev/prod build paths.
 - **No runtime model pull** — the model is baked into the image at build time so cold-start never blocks on a download.
 - **Local Macs have no GPU** — dev always runs the *slim* tier, CPU-only (slow but functionally correct).
-- **Ack only after the final Firestore write** — required for spot-safe redelivery (see [[worker-dispatch]]); nothing in this pipeline may ack earlier as an optimization.
+- **Ack only after the final Firestore write** — required for redelivery-based recovery on instance loss (see [[worker-dispatch]]); nothing in this pipeline may ack earlier as an optimization.
 
 ## Feature Overview
 
@@ -48,7 +48,7 @@ OpenClaw's gateway exposes an OpenAI-compatible endpoint (`POST http://localhost
 ```
 build Docker image (Ollama + worker + model baked in — no runtime pull)
    ├─ dev:    waker docker-starts it  ──────────────►  local emulation
-   └─ deploy: bake into GCE custom image  ──────────►  spot GPU VMs (MIG)
+   └─ deploy: bake into GCE custom image  ──────────►  GPU VMs (MIG)
 ```
 
 The expensive GPU machine scales 0↔N; a cheap always-on **waker** brings it up on demand — it only *triggers*, it never consumes/acks the message, so cold-start time never counts against the Pub/Sub ack lease (the lease clock starts when the worker itself pulls, post-boot).
@@ -56,13 +56,13 @@ The expensive GPU machine scales 0↔N; a cheap always-on **waker** brings it up
 | | Wake mechanism | Notes |
 |---|---|---|
 | Dev | `scripts/waker.js` polls the emulator subscription; `docker start`s the container when a message exists and it's down | faithful stand-in for the prod autoscaler |
-| Prod | GCE MIG autoscaler scales spot GPU VMs on Pub/Sub backlog (`num_undelivered_messages`), 0→N→0 | raw Compute; spot discount + scale-to-zero, no cluster fee |
+| Prod | GCE MIG autoscaler scales GPU VMs on Pub/Sub backlog (`num_undelivered_messages`), 0→N→0 | raw Compute; scale-to-zero, no cluster fee |
 
 One VM per replica; GPU count is the model's machine description — 2B/OpenClaw → 1×L4 (`g2-standard-8`), 70B → 2×L4 on a single box (`g2-standard-24`). Distributed/multi-VM spread of one model across machines was considered and **rejected** — Ollama doesn't support it (llama.cpp-only feature) and 70B-Q4 (~40GB) fits a single 2×L4 box (48GB).
 
 > **Status:** dev (Docker + waker) and image build/push are implemented. The GCE custom-image bake + MIG + autoscaler steps are written but not yet run — verify project params (zone/network/service account/GPU quota) and MIG scale-to-zero before a real deploy.
 
-**Spot instance resilience.**
+**Instance-loss resilience.**
 - *Message retry* — dead-letter after 5 failed attempts; a worker crash returns the message to the queue automatically; 40s ack deadline before retry.
 - *Stale job cleanup* — Cloud Scheduler every 5 minutes marks `status: "streaming" AND createdAt < now - 10 minutes"` as `error`.
 - *Idempotency* — the worker uses `jobId` as the lookup key; a retried message that already has `llmResults/{jobId}` data is skipped. (Full CAS/idempotency detail: [[worker-dispatch]].)
@@ -191,7 +191,7 @@ This subsystem is backend/API-only — the calling interface is `yeschef`'s Remy
 
 ## Dependencies
 
-- [[worker-dispatch]] — the worker-side idempotency/ack contract that makes the "Spot instance resilience" guarantees above true.
+- [[worker-dispatch]] — the worker-side idempotency/ack contract that makes the "Instance-loss resilience" guarantees above true.
 
 ## Diagrams
 
@@ -202,7 +202,7 @@ Client → Pub/Sub topic → worker/index.js → MongoDB Atlas (RAG) → Ollama 
 ```
 build Docker image (Ollama + worker + model baked in — no runtime pull)
    ├─ dev:    waker docker-starts it  ──────────────►  local emulation
-   └─ deploy: bake into GCE custom image  ──────────►  spot GPU VMs (MIG)
+   └─ deploy: bake into GCE custom image  ──────────►  GPU VMs (MIG)
 ```
 
 ## References

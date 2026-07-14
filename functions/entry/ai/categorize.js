@@ -3,7 +3,7 @@
 // the full YAML, parses, returns it. No Firestore involved.
 import http from "node:http";
 import https from "node:https";
-import { parse as parseYaml } from "yaml";
+import { parseYamlBlock, extractYamlString } from "../../../config/yaml.js";
 import { getCollection } from "../../lib/mongo.js";
 import { detectAllergens } from "../../lib/allergenLookup.js";
 import { overrideCategory } from "../../lib/categoryOverride.js";
@@ -36,14 +36,6 @@ async function promptFor(type) {
     .join("\n\n");
   promptCache.set(type, { text, at: Date.now() });
   return text;
-}
-
-// Extract the FIRST ```yaml fenced block. Small models often ramble after the closing fence
-// (repeat the block, add commentary) — anchoring only the start/end of the whole string breaks
-// on that trailing text, so grab just the fenced content instead.
-function extractYamlBlock(raw) {
-  const fenced = /```(?:yaml)?\s*\n([\s\S]*?)\n?```/i.exec(raw);
-  return (fenced ? fenced[1] : raw).trim();
 }
 
 // Categorize/cleanup is a text-processing task (extract/transform), not creative generation —
@@ -171,9 +163,9 @@ async function chatWithYamlRetry(system, userMsg, label, maxAttempts = 3) {
     try {
       const raw = await ollamaChat(messages);
       lastRaw = raw;
-      const cleaned = extractYamlBlock(raw);
+      const cleaned = extractYamlString(raw);
       console.log(`[categorize] ${label} raw output (attempt ${attempt}):\n${cleaned}`);
-      return parseYaml(cleaned);
+      return parseYamlBlock(raw);
     } catch (e) {
       lastError = e.message;
       console.error(`[categorize] ${label} attempt ${attempt}/${maxAttempts} failed: ${e.message}`);

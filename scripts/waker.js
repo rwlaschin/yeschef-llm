@@ -9,7 +9,7 @@
 // Models come from WAKER_MODELS (JSON array of { subscription, image, container,
 // model }). Falls back to single-model env vars if WAKER_MODELS is unset.
 //
-// Prod equivalent: a MIG autoscaler per model, scaling spot GPU VMs on the
+// Prod equivalent: a MIG autoscaler per model, scaling GPU VMs on the
 // `num_undelivered_messages` metric. Here, `docker start` stands in.
 //
 // Dev-only: requires PUBSUB_EMULATOR_HOST.
@@ -131,7 +131,9 @@ function stopAllLogStreams() {
 function killWorkerContainers() {
   try {
     const ids = sh(`docker ps -aq --filter name=yeschef-worker-`).split("\n").filter(Boolean);
-    if (ids.length) sh(`docker rm -f ${ids.join(" ")}`);
+    // GRACEFUL, never `-f`: stop (SIGTERM → worker exits after the in-flight round) then remove.
+    // Force-removing a running worker (`rm -f` = SIGKILL) kills a query mid-inference — never do it.
+    if (ids.length) { sh(`docker stop ${ids.join(" ")}`); sh(`docker rm ${ids.join(" ")}`); }
   } catch { /* docker down, or nothing to remove */ }
 }
 
@@ -144,10 +146,11 @@ process.on("SIGINT", cleanupAndExit);
 process.on("SIGTERM", cleanupAndExit);
 
 function startContainer(m) {
-  // ALWAYS recreate from current config: remove any existing container (running or
-  // exited) and `docker run` fresh. This guarantees the latest mounts/code/start.sh
-  // are applied every time — no stale "docker start", no manual `docker rm -f`.
-  try { sh(`docker rm -f ${m.container}`); } catch { /* nothing to remove */ }
+  // Recreate from current config so the latest mounts/code/start.sh apply. This runs ONLY when the
+  // container isn't already running (the caller checks containerRunning first), so we're removing a
+  // STOPPED/exited leftover — graceful `stop` (no-op if already stopped) then `rm`, never `rm -f`.
+  try { sh(`docker stop ${m.container}`); } catch { /* not running */ }
+  try { sh(`docker rm ${m.container}`); } catch { /* nothing to remove */ }
   console.log(`[waker:${m.model}] starting fresh: docker run ${m.image}`);
   // Expose Ollama to the host so external tools (n8n scraper) can call it directly.
   // Set OLLAMA_HOST_PORT=11434 in .env.dev to enable. Only one container should bind

@@ -6,7 +6,7 @@
 //
 // The orchestrator is a gen2 Firebase Function (`export { _ai as ai }` in functions/index.js),
 // so it runs as a Cloud Run service named `ai` — rolling it back = shifting 100% traffic to the
-// previous revision. The workers are GCE spot MIGs (deploy.js): each MIG points at a versioned
+// previous revision. The workers are GCE MIGs (deploy.js): each MIG points at a versioned
 // instance template `ollama-<slug>-tmpl-<VERSION>`; rolling one back = pointing the MIG at the
 // template one version older and replacing any running instances.
 //

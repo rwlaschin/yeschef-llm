@@ -5,17 +5,17 @@ dependencies: []
 
 # Worker Dispatch
 
-Distributed unit dispatch for the worker fleet — leaseless, idempotent, at-least-once. Read this before touching `worker/admission.js`, `worker/semaphore.js`, ack/nack timing, or anything about retries/crash-recovery. Implements the low-level correctness primitive that [[llm-pipeline]]'s "spot instance resilience" section relies on.
+Distributed unit dispatch for the worker fleet — leaseless, idempotent, at-least-once. Read this before touching `worker/admission.js`, `worker/semaphore.js`, ack/nack timing, or anything about retries/crash-recovery. Implements the low-level correctness primitive that [[llm-pipeline]]'s "Instance-loss resilience" section relies on.
 
 ## Sensitive Areas
 
 - **The completion write is the single correctness boundary.** It must always be a transaction (the transaction *is* the compare-and-swap). Writing status outside a transaction reintroduces the race this design exists to prevent.
 - **Ack timing.** A message must never be acked before the terminal Firestore write completes — acking early converts a real crash into silent data loss (Pub/Sub won't redeliver a message that's already been acked).
-- **`attempt` is bumped only by the orchestrator, on a genuine retry** — the worker never increments it itself, whether on preemption, redelivery, or a duplicate concurrent run. Conflating "redelivered" with "retried" would let a healthy spot-preempted unit look like a new attempt when it's still the same one.
+- **`attempt` is bumped only by the orchestrator, on a genuine retry** — the worker never increments it itself, whether on instance loss, redelivery, or a duplicate concurrent run. Conflating "redelivered" with "retried" would let a healthy unit that lost its instance to scale-in or maintenance look like a new attempt when it's still the same one.
 
 ## Design Constraints
 
-- Workers run on **spot instances**; any worker is guaranteed to die before some units finish. No design may depend on a single process owning a unit start-to-finish.
+- Workers run on **autoscaled GCE instances** that can be removed by scale-in, host maintenance (`onHostMaintenance=TERMINATE`), or a process/VM crash; any worker is guaranteed to die before some units finish. No design may depend on a single process owning a unit start-to-finish.
 - **No lease, no holder, no global `active` counter** — nothing persistent that a crash can leak or strand.
 - Correctness rests on exactly one primitive: **first-writer-wins completion.** Capacity, dedup, and recovery are emergent or advisory, never enforced state.
 - Per-instance Pub/Sub flow control `maxMessages = 1` — a worker only pulls what it can actually run.
@@ -23,7 +23,7 @@ Distributed unit dispatch for the worker fleet — leaseless, idempotent, at-lea
 
 ## Feature Overview
 
-Ollama workers run on preemptible spot GPU VMs, so any worker can die mid-unit at any moment — there is no safe way to assume a worker that started a unit will finish it. This design makes that fact irrelevant to correctness: instead of a lease/holder model (which leaks state when its holder dies), completion is decided by a single atomic transaction per unit, and everything else — which worker picks up a redelivered message, how many run concurrently — is left to emerge from Pub/Sub's own redelivery and backlog mechanics. The payoff is a dispatch layer with zero crash-recovery code: a crash is just "the message wasn't acked," and redelivery *is* the recovery.
+Ollama workers run on autoscaled GPU VMs, so any worker can die mid-unit at any moment — scale-in, host maintenance, or a process/VM crash — there is no safe way to assume a worker that started a unit will finish it. This design makes that fact irrelevant to correctness: instead of a lease/holder model (which leaks state when its holder dies), completion is decided by a single atomic transaction per unit, and everything else — which worker picks up a redelivered message, how many run concurrently — is left to emerge from Pub/Sub's own redelivery and backlog mechanics. The payoff is a dispatch layer with zero crash-recovery code: a crash is just "the message wasn't acked," and redelivery *is* the recovery.
 
 Implemented in `worker/admission.js` (pure, unit-tested in `admission.test.js`) + `worker/index.js`.
 
@@ -87,23 +87,23 @@ Unit slot: `llmResults/{job}/steps/{unit}` → `{ status, response, attempt, out
 | Already terminal for this attempt (duplicate) | ack | nothing to do |
 | Superseded by a newer attempt | ack | a retry already overtook this delivery |
 | Genuine failure (thrown error) | mark `fail` via the CAS, ack | orchestrator decides retry, not Pub/Sub |
-| Crash/preemption mid-run | (no ack) | Pub/Sub redelivers → another worker runs it |
+| Crash/scale-in/maintenance mid-run | (no ack) | Pub/Sub redelivers → another worker runs it |
 | Malformed payload | nack | the one path still relying on Pub/Sub redelivery |
 | Capacity backpressure | not nacked | handled by backlog, not by burning delivery count |
 
 ## Use Cases
 
-### Use Case 1: Redelivery takes over a unit abandoned by a preempted worker
+### Use Case 1: Redelivery takes over a unit abandoned by a lost worker
 
-- **Goal.** Get a unit to a terminal result (`success`/`fail`) even though the spot instance that started it can die at any moment, with no explicit recovery step.
-- **Stakeholders.** The orchestrator waiting on the step to advance ([[plan-orchestration]]); the end user waiting on the job; platform ops paying for spot capacity.
+- **Goal.** Get a unit to a terminal result (`success`/`fail`) even though the instance that started it can die at any moment (scale-in, host maintenance, or a crash), with no explicit recovery step.
+- **Stakeholders.** The orchestrator waiting on the step to advance ([[plan-orchestration]]); the end user waiting on the job; platform ops paying for GPU capacity.
 - **Actors.** Worker instance A (dies mid-run); worker instance B (competing consumer on the same subscription, receives the redelivery); Pub/Sub (redelivers an unacked message); Firestore (holds the unit slot).
 - **Preconditions.** A unit's Firestore slot at `llmResults/{job}/steps/{unit}` does not yet hold a terminal status for the message's `attempt`. Worker A has received the message and is subscribed with `maxMessages=1`.
 - **Postconditions.** The slot reaches a terminal `status` (`success` or `fail`) written by exactly one worker's completion transaction; the message is acked; the orchestrator is notified via the `orchestrate` topic.
 - **Basic Course of Events.**
   1. Worker A receives the message and, inside one Firestore transaction, reads the slot and calls `shouldRun(slot, attempt)`.
   2. `shouldRun` returns `true` (no slot yet, or an older/no attempt already there) — the same transaction writes the slot to `status: "running"` for this `attempt` (`handleMessage`'s "receive claim" transaction in `worker/index.js`).
-  3. Worker A begins generation via `chatRound`/`chatWithTools`. The GCE spot instance is preempted before the run finishes; the process dies with the message never acked.
+  3. Worker A begins generation via `chatRound`/`chatWithTools`. The GCE instance is removed by scale-in or host maintenance before the run finishes; the process dies with the message never acked.
   4. Pub/Sub's lease on the unacked message expires and redelivers it to worker B (a competing consumer on the same subscription).
   5. Worker B runs the same "receive claim" transaction: the slot is `running` for this same `attempt`, and `shouldRun` still returns `true` — a `running` slot for the same attempt is not a skip, because the worker that set it may be dead.
   6. Worker B runs the generation, then writes completion inside `completionWrite`'s transaction: the slot is not yet terminal for this/any newer attempt, so the write lands — `status: "success"` (or `"fail"`), `response`, `outcome`, `updatedAt`, `completedAt`.
@@ -113,8 +113,8 @@ Unit slot: `llmResults/{job}/steps/{unit}` → `{ status, response, attempt, out
 
 ### Use Case 2: Orchestrator retries a unit that failed for real
 
-- **Goal.** Re-run a unit that genuinely failed (not one that was merely preempted), without the dispatch layer itself needing to track a failure count.
-- **Stakeholders.** The orchestrator, which owns the retry policy ([[plan-orchestration]]); the end user, whose job should not wedge on one bad unit; platform ops, who need failures to be distinguishable from healthy preemption in logs/metrics.
+- **Goal.** Re-run a unit that genuinely failed (not one that merely lost its instance to scale-in or maintenance), without the dispatch layer itself needing to track a failure count.
+- **Stakeholders.** The orchestrator, which owns the retry policy ([[plan-orchestration]]); the end user, whose job should not wedge on one bad unit; platform ops, who need failures to be distinguishable from healthy instance loss in logs/metrics.
 - **Actors.** A worker instance; the orchestrator (publishes the retry message with a bumped `attempt`); Firestore.
 - **Preconditions.** A prior attempt for the unit reached a genuine terminal `fail` (e.g. a real generation error, a stall/timeout, a terminal tool failure) — recorded via the "fail status" completion transaction in `handleMessage`'s `catch` block, with `attempt` equal to the failed attempt's number.
 - **Postconditions.** Either the unit reaches `status: "success"` on the new attempt, or it reaches `status: "fail"` again on the new attempt (still eligible for a further orchestrator-driven retry, subject to whatever retry policy the orchestrator enforces — that policy is out of scope for this doc).
@@ -161,7 +161,7 @@ Unit slot: `llmResults/{job}/steps/{unit}` → `{ status, response, attempt, out
   5. The MIG autoscaler observes backlog depth and adds worker instances; newly-started instances subscribe and begin pulling from the same backlog.
   6. As units complete (Use Case 1's terminal-write flow), the backlog drains; the autoscaler can then scale instances back down.
 - **Alternate Flows.** Nobody sets an explicit "max N concurrent units" for the fleet — total concurrency is just however many instances are alive multiplied by each instance's `maxMessages`/`genGate` limit, an emergent property rather than an enforced one.
-- **Exceptions.** If a worker instance is terminated (preemption or scale-down) while holding leased-but-unacked messages, nothing is stranded: Pub/Sub redelivers those messages to the remaining fleet exactly as in Use Case 1 — there is no separate capacity-accounting state to reconcile on instance loss.
+- **Exceptions.** If a worker instance is terminated (scale-in, host maintenance, or crash) while holding leased-but-unacked messages, nothing is stranded: Pub/Sub redelivers those messages to the remaining fleet exactly as in Use Case 1 — there is no separate capacity-accounting state to reconcile on instance loss.
 
 ## Tests
 
@@ -186,11 +186,11 @@ See the `receive(message)` pseudocode in Architecture above — that state machi
 
 ## Explicitly accepted tradeoff
 
-Duplicate **concurrent** runs of one unit are possible when a redelivery overlaps a still-running attempt. This is not prevented — preventing it is the lease-holder trap that fails on spot. It's made harmless (idempotent CAS) and *reduced* in frequency by per-instance `maxMessages=1`.
+Duplicate **concurrent** runs of one unit are possible when a redelivery overlaps a still-running attempt. This is not prevented — preventing it is the lease-holder trap that fails on instance loss. It's made harmless (idempotent CAS) and *reduced* in frequency by per-instance `maxMessages=1`.
 
 ## Progress condition
 
-A unit makes progress iff it can finish within one instance's lifetime (spot mean-time-to-preemption). If generation time can exceed that, the unit will be killed and re-run forever — mitigate by chunking units smaller, or checkpoint+resume (a reclaimer continuing from streamed partial output). The dispatch layer cannot fix work that outlives its worker.
+A unit makes progress iff it can finish within one instance's lifetime (mean-time-to-termination before scale-in/maintenance). If generation time can exceed that, the unit will be killed and re-run forever — mitigate by chunking units smaller, or checkpoint+resume (a reclaimer continuing from streamed partial output). The dispatch layer cannot fix work that outlives its worker.
 
 ## Dev / emulator note
 

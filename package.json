@@ -10,6 +10,7 @@
     "setup": "node scripts/setup.js",
     "setup:firestore": "node scripts/setup-firestore-ttl.js",
     "dev": "cross-env NODE_ENV=dev node scripts/dev.js",
+    "dev:quick": "cross-env NODE_ENV=dev DEV_QUICK=1 node scripts/dev.js",
     "kill:emulators": "node scripts/kill-emulators.js",
     "test": "node --test \"worker/**/*.test.js\"",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-exclude=\"**/*.test.js\" --test-coverage-lines=90 --test-coverage-functions=80 --test-coverage-branches=60 \"worker/**/*.test.js\"",
@@ -28,6 +29,7 @@
     "duck-duck-scrape": "^2.2.7",
     "ejs": "^3.1.8",
     "firebase-admin": "^13.10.0",
-    "mongodb": "^6.0.0"
+    "mongodb": "^6.0.0",
+    "yaml": "^2.9.0"
   }
 }

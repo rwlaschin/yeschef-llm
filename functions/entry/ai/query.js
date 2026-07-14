@@ -39,7 +39,6 @@ export async function post(req, reply) {
     Array.isArray(history) && history.length ? `Earlier questions: ${history.slice(-5).join(" | ")}.` : "",
   ].filter(Boolean).join(" ");
   const effectiveQuery = preamble ? `${preamble}\n\n${query}` : query;
-
   const effectiveType = type || QUERY_TYPE;
 
   const db = getFirestore();

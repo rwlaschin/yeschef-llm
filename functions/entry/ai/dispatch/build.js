@@ -7,15 +7,8 @@
 //
 // `message` (last arg) is the full Pub/Sub message object.
 import { getFirestore } from "firebase-admin/firestore";
-import { parse } from "yaml";
+import { parseYamlBlock } from "../../../config/yaml.js";
 import { dispatchStep } from "./dispatch.js";
-
-// The planner is told to emit raw YAML, but models often wrap it in a ```yaml fence —
-// take the fenced block if present, else the whole text.
-function unfence(text) {
-  const m = String(text).match(/```(?:yaml)?\s*([\s\S]*?)```/i);
-  return (m ? m[1] : text).trim();
-}
 
 // Parse the planner's YAML → store plan[] on the job → dispatch step 0. Shared by `handle`
 // (the live action:build path) and /ai/rebuild (replay from EXISTING output, no planner re-run).
@@ -31,9 +24,8 @@ export async function buildPlanAndDispatch(jobRef, raw) {
   if (jobSnap.exists && Array.isArray(jobSnap.data().plan) && jobSnap.data().plan.length) {
     plan = jobSnap.data().plan;
   } else {
-    const cleaned = unfence(raw || "");
     try {
-      plan = parse(cleaned);
+      plan = parseYamlBlock(raw);
     } catch (e) {
       return { ok: false, error: `plan parse failed: ${e.message}` };
     }

@@ -7,11 +7,11 @@ import { PubSub } from "@google-cloud/pubsub";
 import { MODELS, subscriptionOf, deadLetterOf, FAKE_TOPIC, FAKE_SUBSCRIPTION, FAKE_DEAD_LETTER } from "../config/models.js";
 
 const DEFAULT_SUB_CONFIG = {
-  // Base redelivery window. PROD stays short (40s) so a preempted SPOT VM's in-flight
-  // unit redelivers fast. DEV ONLY → 300s: the Pub/Sub emulator ignores the client's
-  // lease extension (maxExtensionMinutes), so it redelivers at exactly this deadline;
-  // 40s there double-runs slow (1–5 min) units. Real Pub/Sub honors the extension, so
-  // prod is unaffected by this value beyond the spot-death case.
+  // Base redelivery window. PROD stays short (40s) so an in-flight unit on a VM lost to
+  // scale-in, host maintenance, or a crash redelivers fast. DEV ONLY → 300s: the Pub/Sub
+  // emulator ignores the client's lease extension (maxExtensionMinutes), so it redelivers at
+  // exactly this deadline; 40s there double-runs slow (1–5 min) units. Real Pub/Sub honors the
+  // extension, so prod is unaffected by this value beyond the instance-loss case.
   ackDeadlineSeconds: process.env.NODE_ENV === "dev" ? 300 : 40,
   minRetryDelay: { seconds: 10 },
   maxRetryDelay: { seconds: 30 },
@@ -23,8 +23,9 @@ const DEFAULT_SUB_CONFIG = {
 // Dead-letter is a TRANSPORT backstop only — the natural terminal sink for messages that can never
 // reach a clean terminal write (unparseable payload, repeated crash before any Firestore write). It
 // is NOT the give-up authority: that is semantic, owned by the orchestrator (attempts[step] → MAX_GEN
-// → passthrough). Pub/Sub counts EVERY delivery, including healthy redeliveries from spot preemption,
-// so this is set high — a long unit preempted a few times must not dead-letter while still healthy.
+// → passthrough). Pub/Sub counts EVERY delivery, including healthy redeliveries from instance loss
+// (scale-in / host maintenance / crash), so this is set high — a long unit redelivered a few times
+// must not dead-letter while still healthy.
 // See docs/design/worker-dispatch.md.
 const MAX_DELIVERY_ATTEMPTS = 50;
 

@@ -15,6 +15,7 @@ import { processDay } from "./lib/inventory.js";
 // Single source of truth (config/models.js, copied into the image + mounted in dev) — the
 // planner's subtype list and default tools live here, NOT hardcoded in the worker.
 import { SUBTYPES, DEFAULT_TOOLS, MODELS, unitDocId, defaultSampler, temperatureForStyle, DEFAULT_STYLE, STYLE_TEMPS, FAKE_SUBSCRIPTION } from "../config/models.js";
+import { parseYamlBlock } from "../config/yaml.js";
 import { cannedResponse } from "./cannedResponses.js";
 // Step builders live under steps/ — one file per step kind (see docs/plans/worker-refactor/plan.md).
 // Pure / dependency-injected modules, unit-tested in steps/*.test.js.
@@ -22,6 +23,7 @@ import { buildMessages, buildStepMessages, sizeNumCtx, TerminalError } from "./s
 import { buildPlannerMessages } from "./steps/planner.js";
 import { buildComplianceMessages } from "./steps/compliance.js";
 import { visibleResponse, splitOutcome } from "./steps/outcome.js";
+import { buildStandardMessages, formatRecipeYaml } from "./lib/query.js";
 // Leaseless, idempotent dispatch decisions (docs/design/worker-dispatch.md). Pure + unit-tested
 // in admission.test.js. shouldRun gates the receive; completionWrite is the first-writer-wins CAS.
 import { shouldRun, completionWrite } from "./admission.js";
@@ -32,13 +34,15 @@ import { createSemaphore } from "./semaphore.js";
 // Free-tier web_search provider pool (Ollama/Brave/Tavily/DDG) — replaces Ollama's metered hosted
 // search. Weighted-random pick, Firestore-tracked rolling-30-day quota. See search-pool.js.
 import { searchPool, fetchPage } from "./tools/search-pool.js";
+// Idle self-shutdown — turns the VM off within IDLE_SHUTDOWN_MS of going idle (see idle-shutdown.js).
+import { makeIdleShutdown, selfDeleteFromMig } from "./idle-shutdown.js";
 
 // ---- Worker version stamp ----------------------------------
 // Printed the instant the worker starts, so you can SEE which code is running. The version is
 // part of the SOURCE: stale/baked code prints its OLD value (or no line at all, if it predates
 // this); current code prints this. Bump it by hand on meaningful worker changes — the string
 // travels with the code, so it identifies the code regardless of file timestamps.
-const WORKER_VERSION = "2026-06-09 run-doc + steps/ model";
+const WORKER_VERSION = "2026-07-13 idle self-shutdown";
 console.log(`[worker] VERSION ${WORKER_VERSION} | pid ${process.pid}`);
 
 // ---- Config ------------------------------------------------
@@ -400,10 +404,7 @@ function toolLine(t) {
 // (planner builder → steps/planner.js)
 
 // standard (query and any other domain type): system prompt for the type + the raw query.
-async function buildStandardMessages(payload, context) {
-  const system = await systemPromptFor(payload.type || "query");
-  return buildMessages(system, payload.query, context);
-}
+// buildStandardMessages is now imported from ./lib/query.js
 
 // (step builder → steps/step.js; compliance subtype builder → steps/compliance.js)
 
@@ -420,7 +421,7 @@ const MESSAGE_BUILDERS = {
   planner: (payload, context) => buildPlannerMessages(payload, context, stepDeps),
   step:    (payload, context) => buildStepMessages(payload, context, stepDeps),
 };
-const builderFor = (type) => MESSAGE_BUILDERS[type] || buildStandardMessages;
+const builderFor = (type) => MESSAGE_BUILDERS[type] || ((p, c) => buildStandardMessages(p, c, { systemPromptFor, buildMessages }));
 
 // ---- Ollama web tools (web_search / web_fetch) -------------
 // On the raw (non-gateway) path the MODEL calls these; the WORKER executes them
@@ -898,11 +899,21 @@ async function handleMessage(message) {
       }
       const releaseGen = await genGate.acquire();
       try {
+        // Heartbeat wrapper: the console is otherwise silent from "Inference:" until END OUTPUT —
+        // time-to-first-token marks the end of prompt eval, then a throttled progress line.
+        const t0 = Date.now();
+        let lastBeat = 0;
+        const push = (piece, full) => {
+          const now = Date.now();
+          if (!lastBeat) { lastBeat = now; console.log(`[worker]   ${jobId} first token after ${((now - t0) / 1000).toFixed(1)}s`); }
+          else if (now - lastBeat > 2000) { lastBeat = now; console.log(`[worker]   ${jobId} generating… ${full.length} chars`); }
+          return flusher.push(piece, full);
+        };
         fullResponse = useGateway
-          ? await chatViaOpenClaw(messages, flusher.push.bind(flusher))
+          ? await chatViaOpenClaw(messages, push)
           : allowTools
-            ? await chatWithTools(messages, flusher.push.bind(flusher), numCtx, assignedTools, genStyle)
-            : await chatNoTools(messages, flusher.push.bind(flusher), numCtx, genStyle);
+            ? await chatWithTools(messages, push, numCtx, assignedTools, genStyle)
+            : await chatNoTools(messages, push, numCtx, genStyle);
         await flusher.flush();
       } finally {
         releaseGen();
@@ -917,8 +928,14 @@ async function handleMessage(message) {
     // FAIL → fail. The FAIL reason goes in `outcome` (success has no reason → null). The orchestrator
     // gets the status + outcome in the report below so it can decide success → advance / fail → stop.
     const { status: blockStatus, reason, clean } = splitOutcome(fullResponse);
-    const runStatus = blockStatus === "FAIL" ? "fail" : "success"; // PASS or no block → success
-    const outcome = runStatus === "fail" ? reason : null;          // outcome carries the failure reason only
+    let runStatus = blockStatus === "FAIL" ? "fail" : "success"; // PASS or no block → success
+    let outcome = runStatus === "fail" ? reason : null;          // outcome carries the failure reason only
+
+    const formatted = formatRecipeYaml(runStatus, payload, clean, parseYamlBlock, outcome);
+    runStatus = formatted.runStatus;
+    let finalResponse = formatted.finalResponse;
+    outcome = formatted.outcome;
+
     payload.runStatus = runStatus;                                 // carried into the orchestrate report
     payload.outcome = outcome;
     console.log(`[worker]   ${jobId} → ${runStatus}${outcome ? ` (${outcome})` : ""}`);
@@ -928,10 +945,11 @@ async function handleMessage(message) {
     // owned by a newer attempt — so a duplicate concurrent run, or a stale older-attempt completion,
     // never clobbers the winner. Results live in Firestore only (clients react via onSnapshot;
     // Mongo is RAG-only). `updatedAt` is bumped so runtime = updatedAt − createdAt is end-to-end.
+
     let wrote = false;
     await fsWrite("result", () => db.runTransaction(async (tx) => {
       const slot = (await tx.get(jobRef)).data();
-      const w = completionWrite(slot, { attempt, status: runStatus, response: clean, outcome });
+      const w = completionWrite(slot, { attempt, status: runStatus, response: finalResponse, outcome });
       wrote = !!w;
       if (!w) return;
       tx.set(jobRef, {
@@ -1009,13 +1027,34 @@ async function main() {
   // steps get canned responses without a dedicated worker. (Prod never sets fake:true.)
   if (!IS_PROD && !subscriptionNames.includes(FAKE_SUBSCRIPTION)) subscriptionNames.push(FAKE_SUBSCRIPTION);
 
+  // Idle self-shutdown: in prod the worker deletes its own MIG instance after IDLE_SHUTDOWN_MS with
+  // no in-flight jobs (default 60s), so an idle GPU box stops billing without waiting on the
+  // autoscaler's laggy (3–5 min) backlog metric. Disabled in dev — there's no MIG/metadata to
+  // delete, and the waker owns the local container lifecycle.
+  const idleMs = parseInt(process.env.IDLE_SHUTDOWN_MS, 10) || 60000;
+  const idle = IS_PROD
+    ? makeIdleShutdown({ idleMs, onIdle: () => selfDeleteFromMig(console) })
+    : { onStart: () => Date.now(), onFinish: () => {}, armInitial: () => {} };
+  console.log(`  Idle shutdown: ${IS_PROD ? `${idleMs}ms` : "disabled (dev)"}`);
+
   for (const subName of subscriptionNames) {
     const subscription = pubsub.subscription(subName, {
       flowControl: { maxMessages, maxExtensionMinutes: 60 },
     });
     // A Pub/Sub Subscription emits: message | error | close | debug — there is NO "success"
     // event (a received `message` IS the success path; handleMessage logs "[worker] ← job …").
-    subscription.on("message", handleMessage);
+    // The wrapper brackets every delivery with the idle-shutdown timer: onStart clears it (work
+    // arrived), and onFinish in `finally` re-arms it on EVERY exit path (ack, nack, or a thrown
+    // handler) so a failed job can never leave the worker alive-but-idle forever.
+    subscription.on("message", (m) => {
+      let jobId = m.id;
+      try { jobId = JSON.parse(m.data.toString())?.jobId ?? m.id; } catch { /* keep m.id */ }
+      const startedAt = idle.onStart(jobId);
+      Promise.resolve()
+        .then(() => handleMessage(m))
+        .catch((e) => console.error(`[worker] handler threw (kept alive): ${e?.stack || e?.message || e}`))
+        .finally(() => idle.onFinish(jobId, startedAt));
+    });
     subscription.on("error", (err) => console.error(`[worker] subscription ERROR (${subName}):`, err?.message || err));
     // close: the subscriber stopped receiving (stream torn down / fatal error). Without this it
     // goes silent and just looks like "no jobs arriving" with no clue why.
@@ -1025,6 +1064,7 @@ async function main() {
     console.log(`  Listening: ${subName}`);
   }
 
+  idle.armInitial(); // a worker that boots and never receives a job still shuts down after idleMs
   console.log(`Model: ${OLLAMA_MODEL} @ ${OLLAMA_HOST}\n`);
 }
 
@@ -1036,6 +1076,19 @@ async function main() {
 process.on("unhandledRejection", (reason) => {
   console.error("[worker] ✗ UNHANDLED REJECTION (kept alive):", reason?.stack || reason?.message || reason);
 });
+
+// ---- Lifecycle instrumentation (debug why the worker stops) ----------------
+// Log every way this process can end, with pid + timestamp, so a mid-run stop is never a mystery.
+// Which line prints tells us the cause: a signal (who killed us), beforeExit (event loop drained —
+// nothing kept us alive), or exit (final code). Temporary diagnostic.
+for (const sig of ["SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"]) {
+  process.on(sig, () => {
+    console.error(`[worker] ⚠ received ${sig} at ${new Date().toISOString()} (pid ${process.pid}) — stack:\n${new Error().stack}`);
+    process.exit(0);
+  });
+}
+process.on("beforeExit", (code) => console.error(`[worker] ⚠ beforeExit code=${code} at ${new Date().toISOString()} (event loop DRAINED — nothing kept the process alive) pid=${process.pid}`));
+process.on("exit", (code) => console.error(`[worker] ⚠ exit code=${code} at ${new Date().toISOString()} pid=${process.pid}`));
 
 main().catch((err) => {
   console.error("Worker failed to start:", err.message);

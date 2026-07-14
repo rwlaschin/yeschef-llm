@@ -2,7 +2,7 @@
 // Dev - local emulation of the PROD execution model, for the dev-capable models.
 //
 //   Pub/Sub emulator  +  a "waker" that docker-starts each model's pre-baked image.
-//   Prod equivalent: GCE MIG autoscalers waking spot GPU VMs from baked images.
+//   Prod equivalent: GCE MIG autoscalers waking GPU VMs from baked images.
 //
 // Worker + Ollama + model run INSIDE each Docker image (model baked at build time
 // → no runtime pull), matching prod. No native Ollama here.
@@ -52,11 +52,25 @@ for (const [k, v] of Object.entries({ MONGO_URI, MONGO_DB, MONGO_COLLECTION })) 
   if (!v) throw new Error(`${k} env var is required — check .env or .env.dev`);
 }
 
+// `npm run dev:quick` (DEV_QUICK=1) → run ONLY the single smallest dev model + the fake worker,
+// for a fast, low-resource boot when you're just exercising the pipeline. "Smallest" = the raw
+// (non-gateway) dev model with the least baker/disk footprint, i.e. llama3.1:8b. The fake worker
+// is unaffected — it always starts below.
+const QUICK = process.env.DEV_QUICK === "1" || process.env.DEV_QUICK === "true";
+function selectedModels() {
+  const dev = devModels();
+  if (!QUICK) return dev;
+  const smallest = dev
+    .filter((m) => !m.gateway)
+    .sort((a, b) => a.diskGb - b.diskGb)[0] ?? dev[0];
+  return [smallest];
+}
+
 // Dev-capable models, derived from config/models.js (large/70B excluded via dev:false).
 // Sorted so llama3.1:8b builds first (smallest/fastest) — the build loop below is sequential
 // and blocking, so this ordering only affects HOW SOON the 8b images finish within that wait,
 // not whether anything starts early; the Waker still waits for the whole loop either way.
-const DEV_MODELS = devModels()
+const DEV_MODELS = selectedModels()
   .map((m) => ({
     name: imageOf(m),
     model: m.model,
@@ -106,10 +120,13 @@ function start(name, cmd, args, env = {}) {
   stampLines(proc.stdout, process.stdout);
   stampLines(proc.stderr, process.stderr);
   proc.on("exit", (code) => {
-    // Ignore exits caused by our own shutdown (SIGTERM/SIGKILL → null/non-zero).
+    // A child dying is NOT grounds to tear down the whole stack. In dev there is no watchdog:
+    // one helper (waker/fake worker/a model container) exiting must NEVER kill the emulators or
+    // interrupt a job in flight. Just LOG it — the surviving processes keep running, and the user
+    // decides when to stop (Ctrl-C → shutdown). Our own shutdown SIGTERMs children (code null),
+    // which is expected and silent.
     if (!shuttingDown && code !== 0) {
-      console.error(`${name} exited with code ${code}`);
-      shutdown();
+      console.error(`${name} exited with code ${code} — left the rest of the stack running (not shutting down).`);
     }
   });
   processes.push({ name, proc });
@@ -126,11 +143,11 @@ function killGroup(proc, signal) {
   catch { try { proc.kill(signal); } catch { /* already gone */ } }
 }
 
-async function shutdown() {
+async function shutdown(reason = "unknown") {
   if (shuttingDown) return;
   shuttingDown = true;
   process.stdout.write("\n"); // line feed so ^C isn't left mid-line
-  console.log("Shutting down...");
+  console.log(`Shutting down... (trigger: ${reason}) at ${new Date().toISOString()}`);
 
   // SIGTERM every child group, then WAIT for each to actually exit before we go
   // (SIGKILL fallback after 4s). Waiting is what restores the terminal cleanly.
@@ -162,14 +179,18 @@ function removeWorkerContainers() {
     const ids = execSync("docker ps -aq --filter name=yeschef-worker-", { stdio: "pipe" })
       .toString().trim().split("\n").filter(Boolean);
     if (ids.length) {
-      execSync(`docker rm -f ${ids.join(" ")}`, { stdio: "ignore" });
-      console.log(`Removed ${ids.length} worker container(s).`);
+      // GRACEFUL, never `-f`: `docker stop` sends the worker SIGTERM and lets it exit cleanly
+      // (finish the in-flight round) before we remove it. Force-removing (`rm -f` = SIGKILL) is
+      // what killed running queries mid-inference — never do that to a worker container.
+      execSync(`docker stop ${ids.join(" ")}`, { stdio: "ignore" });
+      execSync(`docker rm ${ids.join(" ")}`, { stdio: "ignore" });
+      console.log(`Stopped + removed ${ids.length} worker container(s).`);
     }
   } catch { /* docker not running, or nothing to remove */ }
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => shutdown("SIGINT to dev.js"));
+process.on("SIGTERM", () => shutdown("SIGTERM to dev.js"));
 
 function sh(cmd) {
   return execSync(cmd, { stdio: "pipe" }).toString().trim();
@@ -201,14 +222,24 @@ function buildDockerfileVars(m) {
   };
 }
 
-// The image's "recipe" = a short hash of its rendered Dockerfile PLUS package.json. Stamped on the
-// image as a label at build time, then compared on startup: if a model's recipe changed in
-// config/models.js (or the Dockerfile changed), the hash differs and we rebuild automatically.
-// package.json is included because the Dockerfile only COPYs it (the text never changes) — without
-// hashing its CONTENTS, adding/bumping a dep wouldn't flip the image to stale and `npm install`
-// would never re-run.
-const recipeHash = (m) =>
-  crypto.createHash("sha256").update(renderDockerfile(buildDockerfileVars(m))).update(fs.readFileSync("package.json")).digest("hex").slice(0, 12);
+// The image's "recipe" = a short hash of its rendered Dockerfile PLUS the package.json fields the
+// image actually installs (dependencies + devDependencies). Stamped on the image as a label at
+// build time, then compared on startup: if a model's recipe changed in config/models.js, the
+// Dockerfile changed, or a dep changed, the hash differs and we rebuild automatically.
+// We hash ONLY the dep maps — NOT the whole file — because the Dockerfile just COPYs package.json
+// and runs `npm install`, so scripts/version/engines/etc. don't affect the built image. Hashing
+// them would force a multi-GB model re-bake on every unrelated edit (e.g. adding an npm script).
+// The engine (Node version) is baked by the Dockerfile's setup_NN.x line, which is already hashed
+// via renderDockerfile — package.json `engines` is only an assertion, so excluding it is safe.
+const recipeHash = (m) => {
+  const pkg = JSON.parse(fs.readFileSync("package.json"));
+  return crypto
+    .createHash("sha256")
+    .update(renderDockerfile(buildDockerfileVars(m)))
+    .update(JSON.stringify({ dependencies: pkg.dependencies, devDependencies: pkg.devDependencies }))
+    .digest("hex")
+    .slice(0, 12);
+};
 function imageRecipeHash(tag) {
   try { return sh(`docker inspect --format '{{ index .Config.Labels "yeschef.recipe" }}' ${tag}`); }
   catch { return ""; }
@@ -280,7 +311,7 @@ async function main() {
   //    Dev provisions ONLY dev-capable models (the gpu:1 tiers: slim + the two
   //    OpenClaw tiers) — not the 70B (gpu:2) tiers, which need 2× L4.
   process.env.PUBSUB_EMULATOR_HOST = PUBSUB_EMULATOR_HOST;
-  await setupPubSub(GCP_PROJECT_ID, devModels());
+  await setupPubSub(GCP_PROJECT_ID, selectedModels());
 
   if (DEV_MODELS.length === 0) throw new Error("No dev models configured — nothing for the waker to watch.");
 
@@ -369,5 +400,5 @@ async function main() {
 
 main().catch((err) => {
   console.error("Dev startup failed:", err.message);
-  shutdown();
+  shutdown(`main() threw: ${err.message}`);
 });

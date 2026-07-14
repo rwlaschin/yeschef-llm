@@ -56,62 +56,80 @@ function cannedMenuPlan(payload) {
   ].filter(Boolean).join("\n");
 }
 
-// Single-recipe DETAIL. Matches the `recipe:` YAML output template in prompt_library
-// (id/name/category/diet tags/batch/prep/service/holding/elevation). Diet- and protein-aware:
-// pulls a dish off the SAME RECIPE_POOLS the recipes grid uses, so the detail lines up with the
-// backbone. Deterministic — picks by diet, no randomness.
+// Canonical recipe shape — the ONE permanent shape for ALL recipes, everywhere:
+// { proteinType, name, summary, components[{ingredient,category,quantity,unit,prep}],
+//   method[{text,phase,order}], nutrition{...} }. See buildCanonicalRecipe below.
+// Three request styles arrive under subtype `recipe`, distinguished by the query text:
+//   1. Suggestion batch (protein grid): numbered target lines → JSON array, one per target.
+//   2. Directions (dish name + component lines): single recipe carrying the full method.
+//   3. Plan-pipeline recipe step (anything else): single recipe from the diet pool.
+// Always strict JSON — JSON is valid YAML, so formatRecipeYaml's parse→stringify is a no-op.
 function cannedRecipe(payload = {}) {
+  const query = String(payload.query || "");
+
+  // Style 1 — suggestion batch: "N. <proteinType> — cut: <cut>, diet: <diet>, mealtime: <mealtime>"
+  // (buildPreviewPrompt; proteinType may be multi-word and must be ECHOED verbatim — the client
+  // keeps only items whose proteinType matches the slot's).
+  const targets = [...query.matchAll(/^\s*\d+\.\s+(.+?)\s+—\s+cut:\s*(.*?),\s*diet:\s*(.*?),\s*mealtime:\s*(.*?)\s*$/gmu)]
+    .map((m) => ({ protein: m[1].trim(), cut: m[2].trim(), mealtime: m[4].trim() }));
   const pool = recipePoolForDiet(payload.item);
-  const [dish, protein, starch, veg] = pool[0];
-  const p = String(protein || "Chicken").toLowerCase();
+  if (targets.length) {
+    return JSON.stringify(targets.map((t) => buildCanonicalRecipe(pool, t)));
+  }
+
+  // Style 2 — directions: dish name line, then one "<prep> <ingredient>" line per component
+  // (buildDirectionsPrompt). Return the full canonical recipe for that dish; the client reads
+  // its `method`.
+  const lines = query.split("\n").map((s) => s.trim()).filter(Boolean);
+  if (lines.length > 1) {
+    const items = lines.slice(1);
+    const protein = items[0] || "protein";
+    const recipe = buildCanonicalRecipe(pool, { protein, cut: "", mealtime: "" });
+    return JSON.stringify({ ...recipe, name: lines[0], method: methodFor(protein.toLowerCase(), items.slice(1).map((s) => s.toLowerCase())) });
+  }
+
+  // Style 3 — plan-pipeline recipe step: one canonical recipe off the diet pool.
+  return JSON.stringify(buildCanonicalRecipe(pool, { protein: pool[0][1], cut: "", mealtime: "lunch" }));
+}
+
+// One canonical recipe from a diet pool row. Mealtime shapes the plate: breakfast is
+// protein + starch + fruit — NO savoury vegetable, so yogurt never lands next to spinach;
+// lunch/dinner add the vegetable. No pool match → a "<protein> plate".
+function buildCanonicalRecipe(pool, { protein, cut, mealtime }) {
+  const matched = poolRowForProtein(pool, protein);
+  const row = matched || pool[0];
+  const [, , starch, veg, fruit] = row;
+  const breakfast = /break/i.test(mealtime);
+  const components = [
+    { ingredient: protein, category: "protein", quantity: 4, unit: "oz", prep: cut || "portioned" },
+    { ingredient: starch, category: "starch", quantity: 0.5, unit: "cup", prep: "cooked" },
+    ...(breakfast ? [] : [{ ingredient: veg, category: "vegetable", quantity: 0.5, unit: "cup", prep: "steamed soft" }]),
+    { ingredient: fruit, category: "fruit", quantity: 1, unit: "serving", prep: "fresh" },
+  ];
+  const partner = breakfast ? fruit : veg;
+  const sides = components.slice(1).map((c) => String(c.ingredient).toLowerCase());
+  return {
+    proteinType: protein,
+    name: matched ? row[0] : `${protein} plate`,
+    summary: `A balanced ${(mealtime || "meal").toLowerCase()} featuring ${protein} with ${String(starch).toLowerCase()} and ${String(partner).toLowerCase()}.`,
+    components,
+    method: methodFor(String(protein).toLowerCase(), sides),
+    nutrition: { kcal: 520, proteinG: 32, fatG: 18, carbG: 54, sodiumMg: 480, potassiumMg: 720, phosphorusMg: 310, fluidMl: 0 },
+  };
+}
+
+// Method steps derived from the recipe's own components — no step for a dropped ingredient
+// (e.g. a breakfast plate with no vegetable never gets a "blanch the spinach" step).
+// make_ahead = prep/sear steps, on_line = plate/service steps.
+function methodFor(protein, sides) {
+  const sidesText = sides.length ? sides.join(" and ") : "the sides";
   return [
-    "recipe:",
-    "  id: 00000000-0000-4000-8000-000000000001",
-    `  name: ${dish}`,
-    "  category: lunch",
-    `  diet tags: ${payload.item || "standard"}`,
-    "  batch:",
-    "    yield portions: 100",
-    "    portion weight: 6 oz",
-    '    pan size: 2" Full Hotel Pan',
-    "    pans per batch: 4",
-    "  prep:",
-    "    equipment: Tilt Skillet, Batch Mixer",
-    "    ingredients:",
-    `      - item: ${protein}`,
-    "        quantity: 15",
-    "        unit: kg",
-    '        prep note: 1" dice, trimmed',
-    `      - item: ${starch}`,
-    "        quantity: 8",
-    "        unit: kg",
-    "        prep note: rinsed",
-    `      - item: ${veg}`,
-    "        quantity: 6",
-    "        unit: kg",
-    "        prep note: blanched",
-    "    steps:",
-    `      - step: 1`,
-    `        action: Season and sear the ${p}`,
-    "        temp: 350°F",
-    "        time: 20 minutes",
-    "        critical temp: 165°F poultry",
-    "  service:",
-    "    equipment: Steam Table",
-    "    steps:",
-    "      - step: 1",
-    "        action: Portion and plate with starch and vegetable",
-    "        temp: ~",
-    "        time: ~",
-    "        critical temp: ~",
-    "  holding:",
-    '    hot hold temp: "140°F / 60°C"',
-    '    cold hold temp: "41°F / 5°C"',
-    '    max hold time: "4 hours"',
-    "  elevation notes:",
-    "    high: Increase liquid 5% above 3500ft",
-    "    low: ~",
-  ].join("\n");
+    { text: `Trim and prep the ${protein}; season and hold chilled.`, phase: "make_ahead" },
+    { text: `Cook the ${protein} through, then hold for service.`, phase: "make_ahead" },
+    { text: `Prepare ${sidesText} ahead.`, phase: "make_ahead" },
+    { text: `Bring the ${protein} to a safe serving temperature on the line.`, phase: "on_line" },
+    { text: `Portion and plate with ${sidesText}.`, phase: "on_line" },
+  ].map((s, i) => ({ ...s, order: i }));
 }
 
 // Diet-appropriate protein pools — canned data must NEVER put meat on a vegan grid, etc.
@@ -202,19 +220,61 @@ function recipePoolForDiet(diet) {
   return RECIPE_POOLS.omnivore; // standard/low-fat/gluten-free/lactose-free
 }
 
+// Normalize a diet key so the grid ("diet 1") and the recipe fanout item (values.diets, may be
+// spaced/cased differently or empty) match. Used to look up a slot's grid protein.
+function normDiet(s) { return String(s || "").replace(/\s+/g, "").toLowerCase(); }
+
+// Pool row whose protein matches `type` (case-insensitive, either contains the other) — so the
+// grid's protein drives the dish + sides. Null when nothing matches.
+function poolRowForProtein(pool, type) {
+  const t = String(type || "").toLowerCase();
+  if (!t) return null;
+  return pool.find(([, protein]) => {
+    const p = String(protein || "").toLowerCase();
+    return p && (t.includes(p) || p.includes(t));
+  }) || null;
+}
+
+// This unit's per-slot proteins from the grid (payload.ctx.proteins: normDiet → day → mealtime →
+// {type,cut}). When the unit's diet isn't found but the grid has exactly one diet (the common
+// single-diet case, incl. an empty values.diets fanout with item=null), fall back to that one.
+function slotProteinsFor(ctx, diet) {
+  const all = ctx.proteins || {};
+  const keys = Object.keys(all);
+  if (!keys.length) return null;
+  const direct = all[normDiet(diet)];
+  if (direct) return direct;
+  return keys.length === 1 ? all[keys[0]] : null;
+}
+
 // One diet's reduced-recipe slice (this fanout unit) — the dish layer on the protein backbone.
 // Emits `Day | Mealtime | Dish | Protein | Starch | Vegetable | Fruit` rows honouring THIS unit's
-// diet, mealtimes, and day count (payload.item / payload.ctx). Dishes rotate for realistic reuse.
+// diet, mealtimes, and day count (payload.item / payload.ctx). Each slot's recipe is seeded FROM
+// the proteins grid's assigned protein for that day·mealtime (payload.ctx.proteins) so recipes
+// MIRROR the grid; the grid protein drives the dish + sides (matched pool row, else the rotation).
+// No grid protein for a slot → the diet-pool rotation (legacy behavior, e.g. real-model builds).
 function cannedRecipes(payload = {}) {
   const ctx = payload.ctx || {};
   const meals = Array.isArray(ctx.meals) && ctx.meals.length ? ctx.meals : ["breakfast", "lunch", "dinner"];
   const days = Math.max(1, Number(ctx.days) || 7);
   const pool = recipePoolForDiet(payload.item);
+  const gridProteins = slotProteinsFor(ctx, payload.item);
   const lines = ["Day | Mealtime | Dish | Protein | Starch | Vegetable | Fruit"];
   for (let d = 1; d <= days; d++) {
     for (let m = 0; m < meals.length; m++) {
-      const [dish, protein, starch, veg, fruit] = pool[(d * meals.length + m) % pool.length];
-      lines.push(`Day ${d} | ${meals[m]} | ${dish} | ${protein} | ${starch} | ${veg} | ${fruit}`);
+      const meal = meals[m];
+      const fallback = pool[(d * meals.length + m) % pool.length];
+      const gridSlot = gridProteins && gridProteins[d] && gridProteins[d][meal];
+      let dish, protein, starch, veg, fruit;
+      if (gridSlot && gridSlot.type) {
+        protein = gridSlot.type;
+        const match = poolRowForProtein(pool, protein);
+        if (match) { dish = match[0]; starch = match[2]; veg = match[3]; fruit = match[4]; }
+        else { dish = `${protein} plate`; starch = fallback[2]; veg = fallback[3]; fruit = fallback[4]; }
+      } else {
+        [dish, protein, starch, veg, fruit] = fallback;
+      }
+      lines.push(`Day ${d} | ${meal} | ${dish} | ${protein} | ${starch} | ${veg} | ${fruit}`);
     }
   }
   return lines.join("\n");
@@ -259,30 +319,6 @@ function cannedNutrients(payload = {}) {
   return lines.join("\n");
 }
 
-// Recipe-preview batch (protein grid → recipe suggestions). Emits the strict JSON array the
-// client's parsePreviewResponse expects — plain array, no fences, no wrapping object — where
-// each item has name, components[{ingredient, category, quantity, unit, prep}] and nutrition.
-// Diet-aware via the SAME RECIPE_POOLS as cannedRecipe; deterministic — picks by diet.
-// proteinType must ECHO the protein requested in the prompt (buildPreviewPrompt lines look like
-// "1. <proteinType> — cut: <cut>, diet: <diet>, mealtime: <mealtime>"; proteinType may be
-// multi-word) — the client keeps only items whose proteinType matches the slot's, exactly as it
-// does with a real model's response.
-function cannedRecipeSuggestion(payload = {}) {
-  const requested = [...String(payload.query || "").matchAll(/^\s*\d+\.\s+(.+?)\s+—\s+cut:/gmu)].map((m) => m[1]);
-  const pool = recipePoolForDiet(payload.item);
-  const recipes = pool.slice(0, 2).map(([dish, protein, starch, veg], i) => ({
-    proteinType: requested[i] ?? requested[0] ?? protein,
-    name: dish, summary: "A delicious and balanced meal featuring " + protein + " and " + veg + ", served hot.",
-    components: [
-      { ingredient: protein, category: "protein", quantity: 4, unit: "oz", prep: '1" dice, trimmed' },
-      { ingredient: starch, category: "starch", quantity: 0.5, unit: "cup", prep: "cooked" },
-      { ingredient: veg, category: "vegetable", quantity: 0.5, unit: "cup", prep: "steamed soft" },
-    ],
-    nutrition: { kcal: 520, proteinG: 32, fatG: 18, carbG: 54, sodiumMg: 480, potassiumMg: 720, phosphorusMg: 310, fluidMl: 0 },
-  }));
-  return JSON.stringify(recipes);
-}
-
 const BY_SUBTYPE = {
   planner:      cannedPlanner,
   compliance:   cannedCompliance,
@@ -291,7 +327,6 @@ const BY_SUBTYPE = {
   protein_grid: cannedProteinGrid,
   recipes:      cannedRecipes,
   nutrients:    cannedNutrients,
-  recipe_suggestion: cannedRecipeSuggestion,
 };
 
 export function cannedResponse(subtype, payload = {}) {

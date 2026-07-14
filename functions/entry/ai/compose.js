@@ -49,6 +49,29 @@ hb.registerHelper("zip", (...args) => {
   return Array.from({ length: n }, (_, i) => lists.map((l) => l[i]));
 });
 
+// {{proteinBackbone proteins diet}} → the grid's assigned protein for each slot of THIS diet, as
+// `Day N | mealtime | Type (cut)` rows the recipe prompt builds dishes on — so a REAL (LLM) build
+// mirrors the proteins grid. The fake path reads ctx.proteins directly (cannedRecipes); the model
+// only ever sees what the prompt renders, so without this the LLM ignores the grid and free-styles.
+// Diet key is space-stripped/lower-cased to match proteinSeedFromGrid; a single-diet grid falls back
+// to its sole slice when the unit's diet doesn't match. Empty → "" (falsy, so {{#if}} skips the block).
+hb.registerHelper("proteinBackbone", (proteins, diet) => {
+  const all = proteins && typeof proteins === "object" ? proteins : {};
+  const keys = Object.keys(all);
+  if (!keys.length) return "";
+  const nd = String(diet || "").replace(/\s+/g, "").toLowerCase();
+  const slice = all[nd] || (keys.length === 1 ? all[keys[0]] : null);
+  if (!slice) return "";
+  const lines = [];
+  for (const day of Object.keys(slice).sort((a, b) => Number(a) - Number(b))) {
+    for (const meal of Object.keys(slice[day] || {})) {
+      const p = slice[day][meal];
+      if (p && p.type) lines.push(`Day ${day} | ${meal} | ${p.type}${p.cut ? ` ${p.cut}` : ""}`);
+    }
+  }
+  return lines.length ? new Handlebars.SafeString(lines.join("\n")) : "";
+});
+
 // ---- Seasons & per-unit dates (hemisphere-aware) ----------------------------------------------
 // Need a Location → the context carries {{hemisphere}} (North/South), {{date}} (today), {{startDate}} and
 // {{businessDaysOnly}}. Without a location these are empty and the helpers return "".
@@ -239,6 +262,7 @@ function baseContext(form) {
     costTier: form.costTier || "",
     flags: form.flags || {},
     dietWeights: form.dietWeights || {}, // { <diet>: relative weight } → consumed by the {{allocate}} helper
+    proteins: form.proteins || {}, // per-slot grid proteins (normDiet → day → mealtime → {type,cut}); rides ctx → fake dispatch → cannedRecipes so recipes mirror the grid
 
     // Runtime ids — unknown at compose (the job/run don't exist yet). Pass through as literal {{tokens}}
     // so the worker substitutes the real values at execution (it has jobId/step/unit). batchIndex = this
@@ -327,9 +351,14 @@ export function composeFromDefs(stepDefs, form, opts = {}) {
       const itemVars = itemVarsByName[def.name];
       const fanned = (def.kind === "fanout" || def.kind === "chain") && items.length > 1;
 
+      // The fake dispatch reads days/meals/proteins off step.renderCtx to build the worker's ctx
+      // (dispatch.js). Carry it on EVERY step — a non-fanned step (e.g. a single-diet recipes build
+      // where `diets` is empty → one unit) otherwise loses that ctx and the proteins seed never
+      // reaches cannedRecipes. Harmless for the real path (renderCtx is dropped from the dry-run view).
+      step.renderCtx = stepCtx;
+
       if (fanned) {
         step.template = { instruction: def.instruction || "", pass: def.pass || "", fail: def.fail || "" };
-        step.renderCtx = stepCtx;                          // base context renderUnit renders each unit against
         step.items = items;                                // orchestrator launches one unit per entry
         if (itemVars.length) step.itemVars = itemVars;     // bound to items[unit] in renderUnit
         step.instructions = renderUnit(step, 0);           // a fully-rendered sample (unit 1) for display
