@@ -482,13 +482,24 @@ async function deployFake() {
   if (legacyVm) run(`gcloud compute instances delete ${name} --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID} --quiet`);
 
   // CPU instance template — cos-stable, no GPU; boot pulls + runs the fake image.
-  run(
-    `gcloud compute instance-templates create ${template} --project=${GCP_PROJECT_ID} ` +
-      `--machine-type=e2-micro --image-family=cos-stable --image-project=cos-cloud ` +
-      `--boot-disk-size=20GB --network=${GCP_NETWORK} ` +
-      `--scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
-      `--metadata=startup-script='${esc(startup)}',serial-port-logging-enable=true`
-  );
+  // The template name is content-hash keyed (stable), so an unchanged redeploy would hit
+  // ALREADY_EXISTS on create — skip it when it's already there (same hash = identical template).
+  let tmplExists = false;
+  try {
+    execSync(`gcloud compute instance-templates describe ${template} --project=${GCP_PROJECT_ID} --format="value(name)"`, { stdio: "pipe" });
+    tmplExists = true;
+  } catch { /* doesn't exist yet */ }
+  if (!tmplExists) {
+    run(
+      `gcloud compute instance-templates create ${template} --project=${GCP_PROJECT_ID} ` +
+        `--machine-type=e2-micro --image-family=cos-stable --image-project=cos-cloud ` +
+        `--boot-disk-size=20GB --network=${GCP_NETWORK} ` +
+        `--scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
+        `--metadata=startup-script='${esc(startup)}',serial-port-logging-enable=true`
+    );
+  } else {
+    console.log(`  ✓ Template ${template} already exists — skipping create.`);
+  }
 
   // MIG + autoscaler on the fake subscription backlog (0 → 1). Same mechanism as the GPU tiers, so
   // an idle fake worker scales to zero within the 60s cooldown instead of billing around the clock.
@@ -500,7 +511,8 @@ async function deployFake() {
 
   if (migExists) {
     run(`gcloud compute instance-groups managed set-instance-template ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --template=${template}`);
-    run(`gcloud compute instance-groups managed rolling-action start-update ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --version=template=${template} --max-surge=1 --max-unavailable=0`);
+    // Regional MIG spans 3 zones — fixed max-surge must be 0 or ≥ zone count, so 3 (one per zone).
+    run(`gcloud compute instance-groups managed rolling-action start-update ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --version=template=${template} --max-surge=3 --max-unavailable=0`);
   } else {
     run(`gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --template=${template} --size=0 --zones=${GCP_REGION}-a,${GCP_REGION}-b,${GCP_REGION}-c`);
   }
@@ -592,12 +604,17 @@ async function deploy() {
       // A 44 GB model (70B) needs a bigger Cloud Build disk than the 100 GB default to hold the
       // built image; small models use the default. No CPU/machine bump — the ollama.com model
       // download is the cost, and a bigger builder doesn't speed an external download.
-      const buildOpts = img.diskGb >= 200 ? `options:\n  diskSizeGb: 300\n` : "";
+      // Large models (70B ≈ 44 GB) need a bigger builder disk AND a longer timeout: the ollama.com
+      // download + image push doesn't finish inside the 1 h default (it timed out mid-push). 2 h
+      // covers it; small models keep the 1 h default.
+      const isLarge = img.diskGb >= 200;
+      const buildOpts = isLarge ? `options:\n  diskSizeGb: 300\n` : "";
+      const buildTimeout = isLarge ? 7200 : 3600;
       fs.writeFileSync(
         cbName,
         `steps:\n- name: 'gcr.io/cloud-builders/docker'\n` +
           `  args: ['build', '-f', '${dfName}', '-t', '${tagHash}', '.']\n` +
-          `  timeout: 3600s\n${buildOpts}images:\n- '${tagHash}'\ntimeout: 3600s\n`
+          `  timeout: ${buildTimeout}s\n${buildOpts}images:\n- '${tagHash}'\ntimeout: ${buildTimeout}s\n`
       );
       const promise = runAsync(
         `gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=${cbName}`
@@ -688,15 +705,22 @@ async function deploy() {
           `--project=${GCP_PROJECT_ID} --region=${GCP_REGION} --template=${template}`
       );
       run(
+        // These MIGs are scale-to-zero (size 0), so a PERCENT max-surge is rejected — GCP only
+        // allows percent surge on regional MIGs with size ≥ 10. Fixed surge must be 0 or ≥ the
+        // zone count (3), so 3 is the only valid non-zero surge: one fresh instance per zone,
+        // brought up before any old one is drained (max-unavailable=0).
         `gcloud compute instance-groups managed rolling-action start-update ${mig} ` +
           `--project=${GCP_PROJECT_ID} --region=${GCP_REGION} --version=template=${template} ` +
-          `--max-surge=1 --max-unavailable=0`
+          `--max-surge=3 --max-unavailable=0`
       );
     } else {
       run(
+        // 3 explicit zones so a fixed max-surge of 3 stays legal (surge must be 0 or ≥ zone count),
+        // with target-distribution-shape=ANY so the MIG places wherever L4 capacity exists among
+        // those zones instead of forcing an even spread — dodges single-zone stockouts.
         `gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} ` +
           `--region=${GCP_REGION} --template=${template} --size=0 ` +
-          `--zones=${GCP_REGION}-a,${GCP_REGION}-b,${GCP_REGION}-c`
+          `--zones=${GCP_REGION}-a,${GCP_REGION}-b,${GCP_REGION}-c --target-distribution-shape=ANY`
       );
     }
     cleanupOldTemplates(img.name);
