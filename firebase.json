@@ -17,7 +17,7 @@
       "source": "functions",
       "codebase": "orchestrator",
       "runtime": "nodejs22",
-      "ignore": ["node_modules", ".git", "**/*.log"],
+      "ignore": ["node_modules", ".git", "**/*.log", "**/*.test.js"],
       "predeploy": ["cp .env.production functions/.env"],
       "postdeploy": ["rm -f functions/.env"]
     }

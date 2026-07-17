@@ -21,7 +21,7 @@
 import dotenvFlow from "dotenv-flow";
 import { execSync } from "child_process";
 import { MODELS, imageOf } from "../config/models.js";
-import { WORKER_REGIONS } from "../config/regions.js";
+import { getWorkerRegions } from "../functions/entry/ai/capacity/regions.js";
 
 dotenvFlow.config();
 
@@ -46,6 +46,10 @@ const ONLY = onlyArg ? onlyArg.split("=")[1] : "all"; // "run" | "mig" | "all"
 const FUNCTION_SERVICE = "ai";
 // One MIG per model tier — exactly the names deploy.js creates (`${imageOf(m)}-mig`).
 const MIGS = MODELS.map((m) => `${imageOf(m)}-mig`);
+
+// The live worker-MIG topology `[region, [zones]]`, resolved once at the start of rollback() from
+// the same DB/GCP source deploy.js uses (falls back to the seed off-GCE). rollbackMig() reads it.
+let WORKER_REGIONS = [];
 
 function run(cmd) {
   return execSync(cmd, { encoding: "utf8" }).trim();
@@ -104,7 +108,7 @@ function rollbackCloudRun(service) {
 
 // ---- GCE MIG (workers) ------------------------------------------------------
 // Instance templates are GLOBAL, so the newest→previous version lookup is done once per tier.
-// The MIGs themselves are REGIONAL and replicated across WORKER_REGIONS (see config/regions.js),
+// The MIGs themselves are REGIONAL and replicated across WORKER_REGIONS (resolved by getWorkerRegions),
 // so each region's MIG is repointed independently — mirroring how deploy.js provisions them.
 function rollbackMig(mig) {
   console.log(`\n==== MIG: ${mig} ====`);
@@ -161,6 +165,9 @@ function rollbackMig(mig) {
 
 async function rollback() {
   console.log(`\nRolling back: ${env.toUpperCase()}  (target: ${ONLY})\n`);
+
+  // Resolve the live topology from the DB/GCP before any MIG work (see WORKER_REGIONS above).
+  WORKER_REGIONS = await getWorkerRegions();
 
   if (ONLY === "all" || ONLY === "run") {
     rollbackCloudRun(FUNCTION_SERVICE);

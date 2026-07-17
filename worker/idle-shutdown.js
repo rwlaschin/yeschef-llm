@@ -17,6 +17,22 @@ async function meta(path) {
   return (await r.text()).trim();
 }
 
+// The GCE region this worker runs in ("us-central1"), from the instance's zone
+// (projects/<num>/zones/<region>-<z> → drop the trailing -<letter>). Cached — it never changes for
+// the life of the instance. Returns null off-GCE (metadata unreachable → dev/local), so callers can
+// skip region attribution rather than fabricate one. Never throws.
+let _region;
+export async function workerRegion() {
+  if (_region !== undefined) return _region;
+  try {
+    const zone = (await meta("instance/zone")).split("/").pop(); // us-central1-b
+    _region = zone.replace(/-[a-z]$/, "");
+  } catch {
+    _region = null;
+  }
+  return _region;
+}
+
 // Delete THIS instance from its MIG so the group's target size drops by one. Reads instance identity
 // from the metadata server. Throws off-GCE (metadata unreachable) or when the instance was not
 // created by a MIG (no `created-by`) — the caller decides whether to retry or give up.

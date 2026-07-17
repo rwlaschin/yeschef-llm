@@ -35,7 +35,7 @@ import { createSemaphore } from "./semaphore.js";
 // search. Weighted-random pick, Firestore-tracked rolling-30-day quota. See search-pool.js.
 import { searchPool, fetchPage } from "./tools/search-pool.js";
 // Idle self-shutdown — turns the VM off within IDLE_SHUTDOWN_MS of going idle (see idle-shutdown.js).
-import { makeIdleShutdown, selfDeleteFromMig } from "./idle-shutdown.js";
+import { makeIdleShutdown, selfDeleteFromMig, workerRegion } from "./idle-shutdown.js";
 
 // ---- Worker version stamp ----------------------------------
 // Printed the instant the worker starts, so you can SEE which code is running. The version is
@@ -117,9 +117,11 @@ async function reportToOrchestrator(payload) {
   // `action` = the orchestrate verb (build | step) — payload.report carries which. (Not to be
   // confused with a step's `kind` = fanout|chunks|aggregation.) `status` = the terminal run status
   // (success | fail) so the orchestrator can branch success → advance / fail → stop; `outcome` =
-  // the failure reason when fail (null on success).
+  // the failure reason when fail (null on success). `region` = where THIS worker ran (from instance
+  // metadata; null off-GCE) so the capacity scoreboard can attribute end-to-end success by region.
+  const region = await workerRegion();
   await _reportPubsub.topic(ORCHESTRATE_TOPIC).publishMessage({
-    json: { jobId: payload.jobId, action: payload.report, step: payload.step, runId: payload.runId, status: payload.runStatus ?? "success", outcome: payload.outcome ?? null },
+    json: { jobId: payload.jobId, action: payload.report, step: payload.step, runId: payload.runId, status: payload.runStatus ?? "success", outcome: payload.outcome ?? null, region },
   });
   console.log(`[worker] → reported to "${ORCHESTRATE_TOPIC}" action=${payload.report} status=${payload.runStatus ?? "success"}${payload.outcome ? ` outcome=${payload.outcome}` : ""} jobId=${payload.jobId}`);
 }

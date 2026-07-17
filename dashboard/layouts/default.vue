@@ -3,16 +3,56 @@
     <header class="sticky top-0 z-40 app-header backdrop-blur-md">
       <div class="max-w-full px-6 py-4 flex items-center justify-between">
         <!-- Main Navigation (Left) -->
-        <!-- Desktop nav — collapses to a hamburger menu below lg -->
+        <!-- Desktop nav — grouped dropdowns; collapses to a hamburger menu below lg -->
         <nav class="hidden lg:flex gap-8">
-          <NuxtLink
-            v-for="l in links"
-            :key="l.to"
-            :to="l.to"
-            :class="$route.path === l.to ? 'text-primary' : 'text-secondary'"
-            class="text-sm font-medium hover:text-primary transition-colors duration-200"
-          >{{ l.label }}</NuxtLink>
+          <div
+            v-for="g in groups"
+            :key="g.label"
+            class="flex items-center gap-1"
+          >
+            <!-- Active item name — navigates to the active page -->
+            <NuxtLink
+              :to="activeItem(g).to"
+              :class="isGroupActive(g) ? 'text-primary' : 'text-secondary'"
+              class="text-sm font-medium hover:text-primary transition-colors duration-200"
+            >{{ activeItem(g).label }}</NuxtLink>
+            <!-- Chevron — opens the portal submenu -->
+            <button
+              type="button"
+              :ref="el => setTriggerRef(g.label, el)"
+              class="grid place-items-center w-5 h-5 rounded text-secondary hover:text-primary transition-colors focus:outline-none"
+              :aria-expanded="openGroup === g.label"
+              :aria-label="`Open ${g.label} menu`"
+              @click="toggleGroup(g.label)"
+            >
+              <ChevronDownIcon class="w-3.5 h-3.5 transition-transform duration-200" :class="openGroup === g.label ? 'rotate-180' : ''" />
+            </button>
+          </div>
         </nav>
+
+        <!-- Portal submenu — teleported so it escapes the header stacking context -->
+        <Teleport to="body">
+          <div
+            v-if="openGroup"
+            class="fixed inset-0 z-[60]"
+            @click="openGroup = null"
+          >
+            <div
+              class="absolute surface-overlay rounded-lg py-1.5 shadow-xl min-w-44"
+              :style="menuStyle"
+              @click.stop
+            >
+              <NuxtLink
+                v-for="item in openGroupItems"
+                :key="item.to"
+                :to="item.to"
+                :class="$route.path === item.to ? 'text-primary' : 'text-secondary'"
+                class="block px-4 py-2 text-sm font-medium hover:text-primary hover:bg-amber-400/10 transition-colors"
+                @click="onSubmenuClick(openGroup, item)"
+              >{{ item.label }}</NuxtLink>
+            </div>
+          </div>
+        </Teleport>
 
         <!-- Mobile hamburger — shown on narrow screens -->
         <button
@@ -118,14 +158,17 @@
         leave-active-class="transition duration-100 ease-in" leave-from-class="opacity-100" leave-to-class="opacity-0"
       >
         <nav v-show="mobileOpen" class="lg:hidden absolute left-0 right-0 top-full bg-white/95 dark:bg-gray-950/85 backdrop-blur-md border-b border-divider shadow-xl px-6 py-3 flex flex-col gap-1">
-          <NuxtLink
-            v-for="l in links"
-            :key="l.to"
-            :to="l.to"
-            :class="$route.path === l.to ? 'text-primary' : 'text-secondary'"
-            class="text-sm font-medium py-2 px-2 rounded-lg hover:text-primary hover:bg-amber-400/10 transition-colors"
-            @click="mobileOpen = false"
-          >{{ l.label }}</NuxtLink>
+          <div v-for="g in groups" :key="g.label" class="py-1">
+            <div class="text-xs font-semibold uppercase tracking-wide text-gray-400 px-2 pb-1">{{ g.label }}</div>
+            <NuxtLink
+              v-for="item in g.items"
+              :key="item.to"
+              :to="item.to"
+              :class="$route.path === item.to ? 'text-primary' : 'text-secondary'"
+              class="text-sm font-medium py-2 px-2 rounded-lg hover:text-primary hover:bg-amber-400/10 transition-colors block"
+              @click="mobileOpen = false"
+            >{{ item.label }}</NuxtLink>
+          </div>
         </nav>
       </transition>
     </header>
@@ -140,24 +183,70 @@
 </template>
 
 <script setup>
-import { Bars3Icon, XMarkIcon } from '@heroicons/vue/24/outline'
+import { Bars3Icon, XMarkIcon, ChevronDownIcon } from '@heroicons/vue/24/outline'
 
 const { isDark, toggleTheme } = useTheme()
+const route = useRoute()
 
 const { user: authUser, logout } = useAuth()
 const onLogout = async () => { await logout(); navigateTo('/login') }
 
-// Nav links — single source, rendered both in the desktop bar and the mobile menu so they can't drift.
-const links = [
-  { to: '/', label: 'Requests' },
-  { to: '/menu', label: 'Menu Plans' },
-  { to: '/plan-library', label: 'Plans' },
-  { to: '/store', label: 'Store' },
-  { to: '/logs', label: 'Logs' },
-  { to: '/tools', label: 'Tools' },
-  { to: '/prompts', label: 'Prompts' },
-  { to: '/model-config', label: 'Sampling' },
+// Grouped nav — single source, rendered in the desktop dropdowns and the mobile menu so they can't drift.
+const groups = [
+  { label: 'Queries', items: [
+    { to: '/', label: 'Requests' },
+    { to: '/menu', label: 'Menu Plans' },
+  ] },
+  { label: 'Configs', items: [
+    { to: '/plan-library', label: 'Plans' },
+    { to: '/prompts', label: 'Prompts' },
+    { to: '/tools', label: 'Tools' },
+    { to: '/model-config', label: 'Sampling' },
+  ] },
+  { label: 'Tools', items: [
+    { to: '/store', label: 'Store' },
+    { to: '/capacity', label: 'Capacity' },
+    { to: '/logs', label: 'Logs' },
+  ] },
 ]
+
+// Per-group "last visited" submenu, keyed by group label; seeded to each group's first item.
+const lastActive = ref(Object.fromEntries(groups.map(g => [g.label, g.items[0].to])))
+
+const isGroupActive = (g) => g.items.some(i => i.to === route.path)
+// Active item = current route if it's in this group, else the last-visited one.
+const activeItem = (g) => {
+  const current = g.items.find(i => i.to === route.path)
+  if (current) return current
+  return g.items.find(i => i.to === lastActive.value[g.label]) || g.items[0]
+}
+// Remember the current route as the active item for whichever group owns it.
+watch(() => route.path, (p) => {
+  const g = groups.find(gr => gr.items.some(i => i.to === p))
+  if (g) lastActive.value[g.label] = p
+}, { immediate: true })
+
+// Portal submenu state — which group is open, its trigger button, and the resulting position.
+const openGroup = ref(null)
+const triggers = {}
+const setTriggerRef = (label, el) => { if (el) triggers[label] = el }
+const menuStyle = ref({})
+const openGroupItems = computed(() => groups.find(g => g.label === openGroup.value)?.items || [])
+
+const toggleGroup = (label) => {
+  if (openGroup.value === label) { openGroup.value = null; return }
+  const el = triggers[label]
+  if (el) {
+    const r = el.getBoundingClientRect()
+    menuStyle.value = { top: `${r.bottom + 8}px`, left: `${r.left}px` }
+  }
+  openGroup.value = label
+}
+const onSubmenuClick = (label, item) => {
+  lastActive.value[label] = item.to
+  openGroup.value = null
+}
+
 const mobileOpen = ref(false)
 
 // Single source of truth — see composables/useHealth.ts. One poll loop app-wide;

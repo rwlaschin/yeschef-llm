@@ -11,7 +11,7 @@
 import { getAuth } from "firebase-admin/auth";
 import { LRUCache } from "lru-cache";
 
-const PUBLIC = new Set(["/health", "/events", "/categorize"]);
+const PUBLIC = new Set(["/health", "/events", "/categorize", "/capacity-detect"]);
 const CACHE_MAX = 2000;
 const SKEW_MS = 60 * 1000;       // expire cache entries a minute before the token does
 const REVERIFY_RATE = 0.05;      // 5% of cache hits re-verify against Firebase

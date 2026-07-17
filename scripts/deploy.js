@@ -24,7 +24,7 @@ import crypto from "crypto";
 import { renderDockerfile } from "../docker/render.js";
 import { setup as setupPubSub } from "../pubsub/setup.js";
 import { MODELS, subscriptionOf, imageOf, FAKE_SUBSCRIPTION } from "../config/models.js";
-import { WORKER_REGIONS } from "../config/regions.js";
+import { getWorkerRegions } from "../functions/entry/ai/capacity/regions.js";
 
 dotenvFlow.config();
 
@@ -186,17 +186,19 @@ function esc(s) {
   return s.replace(/'/g, "'\\''");
 }
 
-// Autoscale a MIG on its Pub/Sub subscription backlog: 0 → maxReplicas, one instance per
-// undelivered message (single-instance-assignment=1), full scale-in after a 60s window. SHARED by
-// the GPU tiers AND the fake tier so their scaling policy can't drift — a copy-pasted variant is
-// exactly how the fake MIG silently got stuck at max-replicas=1 while the real tiers were 7.
-function setMigAutoscaling({ mig, region, subscription, maxReplicas }) {
+// Autoscale a MIG on its Pub/Sub subscription backlog: 0 → maxReplicas, full scale-in after a 60s
+// window. `singleInstanceAssignment` = how many undelivered messages one instance covers; set it to
+// the worker's concurrency (OLLAMA_NUM_PARALLEL) so the autoscaler provisions 1 box per N messages,
+// NOT 1 box per message (the old =1 over-provisioned by the concurrency factor). SHARED by the GPU
+// tiers AND the fake tier so their scaling policy can't drift.
+function setMigAutoscaling({ mig, region, subscription, maxReplicas, singleInstanceAssignment = 1 }) {
+  const assign = Math.max(1, parseInt(singleInstanceAssignment, 10) || 1);
   return run(
     `gcloud compute instance-groups managed set-autoscaling ${mig} --project=${GCP_PROJECT_ID} ` +
       `--region=${region} --min-num-replicas=0 --max-num-replicas=${maxReplicas} ` +
       `--update-stackdriver-metric=pubsub.googleapis.com/subscription/num_undelivered_messages ` +
       `--stackdriver-metric-filter='resource.type="pubsub_subscription" AND resource.label.subscription_id="${subscription}"' ` +
-      `--stackdriver-metric-single-instance-assignment=1 ` +
+      `--stackdriver-metric-single-instance-assignment=${assign} ` +
       `--scale-in-control=max-scaled-in-replicas-percent=100,time-window=60`
   );
 }
@@ -543,6 +545,16 @@ async function deploy() {
   console.log(`Version : ${VERSION}   Project: ${GCP_PROJECT_ID}   Zone: ${GCP_ZONE}`);
   console.log(`Registry: ${REGISTRY}\n`);
 
+  // Resolve the live worker-MIG topology from the DB/GCP (falls back to the seed off-GCE). Single
+  // source shared with rollback.js — the hardcoded list is only a bootstrap seed now.
+  const WORKER_REGIONS = await getWorkerRegions();
+  // Only this region autoscales; the rest are standby (see the provisioning loop). Default us-west1
+  // for now; override with PRIMARY_REGION to move the active tier elsewhere (manual failover during
+  // a stockout). Falls back to the first resolved region if us-west1 isn't in the L4 set.
+  const PRIMARY_REGION = process.env.PRIMARY_REGION
+    || (WORKER_REGIONS.some(([r]) => r === "us-west1") ? "us-west1" : WORKER_REGIONS[0]?.[0]);
+  console.log(`Worker regions: ${WORKER_REGIONS.map(([r]) => r).join(", ")} — PRIMARY: ${PRIMARY_REGION}\n`);
+
   // 1. Pub/Sub topics + subscriptions
   if (APPLY) await setupPubSub(GCP_PROJECT_ID);
   else console.log("[dry-run] setupPubSub(...)");
@@ -740,8 +752,20 @@ async function deploy() {
             `--zones=${zoneList} --target-distribution-shape=ANY`
         );
       }
-      setMigAutoscaling({ mig, region, subscription: img.subscription, maxReplicas: img.maxReplicas });
-      console.log(`  ✓ ${img.name} MIG ${mig} in ${region} (${zoneList}, 0→${img.maxReplicas})`);
+      // Only the PRIMARY region autoscales. Siblings keep a ready size-0 MIG but NO active
+      // autoscaler — otherwise every region races the SHARED subscription and one message spawns
+      // MIGs in every region ("all over the place"). Failover to a sibling is manual for now
+      // (set PRIMARY_REGION, or scripts/restore-workers.sh) until capacity steering is wired.
+      if (region === PRIMARY_REGION) {
+        setMigAutoscaling({ mig, region, subscription: img.subscription, maxReplicas: img.maxReplicas, singleInstanceAssignment: img.parallel });
+        console.log(`  ✓ ${img.name} MIG ${mig} in ${region} PRIMARY (0→${img.maxReplicas}, ${img.parallel} msg/box)`);
+      } else {
+        // Clear any autoscaler a prior deploy left on this sibling; leave it at size 0, standby.
+        try {
+          execSync(`gcloud compute instance-groups managed stop-autoscaling ${mig} --project=${GCP_PROJECT_ID} --region=${region}`, { stdio: "ignore" });
+        } catch { /* no autoscaler to stop — fine */ }
+        console.log(`  ✓ ${img.name} MIG ${mig} in ${region} standby (no autoscaler)`);
+      }
     }
 
     console.log(`\nPrepared: ${img.name} → ${tagHash} across ${WORKER_REGIONS.length} region(s) (${img.gpu}× L4, 0→${img.maxReplicas})`);

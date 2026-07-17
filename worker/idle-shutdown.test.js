@@ -97,3 +97,23 @@ test("a failed shutdown re-arms and retries next window", async () => {
     assert.equal(calls, 2, "retries after a transient shutdown failure");
   } finally { clock.restore(); }
 });
+
+// ---- workerRegion: instance zone → region, cached, null off-GCE -----------------------------
+test("workerRegion: parses region from the instance zone metadata", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, text: async () => "projects/38637528569/zones/us-central1-b\n" });
+  try {
+    const { workerRegion } = await import("./idle-shutdown.js?case=ok");
+    assert.equal(await workerRegion(), "us-central1");
+    assert.equal(await workerRegion(), "us-central1"); // cached, no second fetch needed
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test("workerRegion: metadata unreachable (off-GCE) → null, never throws", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("ENOTFOUND metadata.google.internal"); };
+  try {
+    const { workerRegion } = await import("./idle-shutdown.js?case=offgce");
+    assert.equal(await workerRegion(), null);
+  } finally { globalThis.fetch = realFetch; }
+});

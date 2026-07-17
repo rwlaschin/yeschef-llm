@@ -12,6 +12,7 @@
 // ============================================================
 
 import { onRequest } from "firebase-functions/v2/https";
+import { onMessagePublished } from "firebase-functions/v2/pubsub";
 import { initializeApp, getApps } from "firebase-admin/app";
 import Fastify from "fastify";
 import fastifyCors from "@fastify/cors";
@@ -100,6 +101,17 @@ ai.post("/resume/plan", { preHandler: validateBody(jobIdSchema) }, lazy(() => im
 ai.post("/resume/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js${bust()}`), "next")); // wipe >N, publish N's finish
 ai.post("/run/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js${bust()}`), "run"));     // DEBUG: run ONE step isolated (report:null, no cascade)
 ai.post("/events", lazy(() => import(`./entry/ai/events.js${bust()}`), "post")); // `orchestrate` topic push (Pub/Sub OIDC, body = Google envelope)
+// Capacity detect-message: per-model-topic detect subscriptions (auto-ensured at deploy) push here.
+// Decodes the Pub/Sub envelope → handleDetectMessage (dedup by messageId → onMessageDetected).
+ai.post("/capacity-detect", async (req, reply) => {
+  try {
+    const { handleDetectMessage } = await import(`./entry/ai/capacity/recorder.js${bust()}`);
+    await handleDetectMessage(req.body?.message ?? {});
+  } catch (e) {
+    console.error(`[ai/capacity-detect] ${e?.message}`);
+  }
+  return reply.code(204).send(); // always ack — detection must never redeliver-storm
+});
 ai.post("/categorize", lazy(() => import(`./entry/ai/categorize.js${bust()}`), "post")); // scraper: sync ingredient categorization via Ollama (no auth, no Firestore)
 ai.get("/health", () => ({ status: "ok" }));                            // liveness probe (dashboard health panel)
 
@@ -120,6 +132,18 @@ const _ai = onRequest(
 );
 export { _ai as ai };
 
+// Capacity recorder — event-triggered (NOT an HTTP endpoint), deployed with the orchestrator. The
+// Cloud Logging sink `capacity-create-sink` (see scripts/setup-capacity-sink.sh) routes completed
+// ollama worker `compute.instances.insert` operations to the `capacity_create_events` topic; this
+// function decodes each and records the ok/fail outcome. recordCreateOutcome stays hand-invocable.
+export const capacityRecorder = onMessagePublished(
+  { topic: "capacity_create_events", region: "us-central1", memory: "256MiB", retry: false },
+  async (event) => {
+    const { handleLogPubSub } = await import("./entry/ai/capacity/recorder.js");
+    await handleLogPubSub(event.data.message);
+  }
+);
+
 // Startup ENV dump → Cloud Logging. We keep hitting dev/prod config drift (NODE_ENV and the
 // values it gates); log the full env at boot with secret-looking values REDACTED to their length
 // so credentials never hit the logs.
@@ -136,6 +160,14 @@ export { _ai as ai };
 // Create the `orchestrate` topic + push subscription on startup (idempotent).
 if (process.env.K_SERVICE || process.env.FUNCTIONS_EMULATOR === "true") {
   import("./lib/pubsub.js")
-    .then(({ configurePubSub }) => configurePubSub())
+    .then(({ configurePubSub, configureCapacityDetect }) => Promise.all([configurePubSub(), configureCapacityDetect()]))
     .catch((e) => console.error("[orchestrator] pubsub setup failed:", e.message));
+}
+
+// Capacity recorder's log sink → topic → capacityRecorder. Provisioned on startup (idempotent), so
+// it's part of the endpoint coming up, not a manual step. Prod only (needs real Cloud Logging + ADC).
+if (process.env.K_SERVICE) {
+  import("./lib/capacity-sink.js")
+    .then(({ configureCapacitySink, configureCapacityMetric }) => Promise.all([configureCapacitySink(), configureCapacityMetric()]))
+    .catch((e) => console.error("[orchestrator] capacity sink setup failed:", e.message));
 }
