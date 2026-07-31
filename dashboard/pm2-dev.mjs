@@ -7,15 +7,37 @@
 // this file instead makes it find the package.json beside it.
 //
 // It does nothing else: spawn the real command, tee it into logd, forward the exit code.
-//   node pm2-dev.mjs "<shell command>" <component> <abs path to logship.mjs>
+//   node pm2-dev.mjs "<shell command>" <component>
+//
+// logship is resolved HERE rather than passed in: pm2 persists an app's args, so a path baked in
+// at `pm2 start` time outlives the checkout that produced it — delete that worktree and every
+// saved entry is poisoned for good. Resolving per spawn means every restart re-resolves.
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const [cmd, name, ship] = process.argv.slice(2)
-if (!cmd || !name || !ship) {
-  console.error('usage: pm2-dev.mjs "<command>" <component> <logship.mjs>')
+// logd lives in the yeschef repo, a sibling of this one — but this file can sit one level deeper
+// (dashboard/), so walk up until a sibling yeschef with logship in it appears.
+function findShip(from) {
+  for (let dir = from, i = 0; i < 6; i++, dir = path.dirname(dir)) {
+    const guess = path.join(path.dirname(dir), 'yeschef', 'tools', 'logd', 'logship.mjs')
+    if (existsSync(guess)) return guess
+  }
+  return null
+}
+const SHIP = findShip(path.dirname(fileURLToPath(import.meta.url)))
+
+const [cmd, name] = process.argv.slice(2)
+if (!cmd || !name) {
+  console.error('usage: pm2-dev.mjs "<command>" <component>')
   process.exit(2)
 }
 
-const child = spawn('bash', ['-c', `${cmd} 2>&1 | node ${JSON.stringify(ship)} ${name}`], { stdio: 'inherit' })
+// Losing the tee is not worth losing the process: run bare and say so.
+if (!SHIP) console.error(`pm2-dev: no sibling yeschef/tools/logd/logship.mjs — running ${name} untee'd`)
+const tee = SHIP ? ` 2>&1 | node ${JSON.stringify(SHIP)} ${name}` : ''
+
+const child = spawn('bash', ['-c', `${cmd}${tee}`], { stdio: 'inherit' })
 child.on('exit', (code, signal) => process.exit(signal ? 1 : code ?? 0))
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => child.kill(sig))
