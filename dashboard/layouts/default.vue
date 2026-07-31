@@ -152,20 +152,25 @@
         </div>
       </div>
 
+      <!-- Backdrop — closes the mobile menu on any click outside it -->
+      <Teleport to="body">
+        <div v-if="mobileOpen" class="lg:hidden fixed inset-0 z-30" @click="mobileOpen = false"></div>
+      </Teleport>
+
       <!-- Mobile menu — stacked links, shown below lg when the hamburger is open -->
       <transition
         enter-active-class="transition duration-150 ease-out" enter-from-class="opacity-0 -translate-y-1" enter-to-class="opacity-100 translate-y-0"
         leave-active-class="transition duration-100 ease-in" leave-from-class="opacity-100" leave-to-class="opacity-0"
       >
-        <nav v-show="mobileOpen" class="lg:hidden absolute left-0 right-0 top-full bg-white/95 dark:bg-gray-950/85 backdrop-blur-md border-b border-divider shadow-xl px-6 py-3 flex flex-col gap-1">
-          <div v-for="g in groups" :key="g.label" class="py-1">
-            <div class="text-xs font-semibold uppercase tracking-wide text-gray-400 px-2 pb-1">{{ g.label }}</div>
+        <nav v-show="mobileOpen" class="lg:hidden absolute left-0 right-0 top-full bg-white dark:bg-gray-950 border-b border-divider shadow-xl px-6 py-4 flex flex-col gap-5">
+          <div v-for="g in groups" :key="g.label">
+            <div class="text-[11px] font-semibold uppercase tracking-widest text-gray-500 px-2 pb-1.5">{{ g.label }}</div>
             <NuxtLink
               v-for="item in g.items"
               :key="item.to"
               :to="item.to"
-              :class="$route.path === item.to ? 'text-primary' : 'text-secondary'"
-              class="text-sm font-medium py-2 px-2 rounded-lg hover:text-primary hover:bg-amber-400/10 transition-colors block"
+              :class="$route.path === item.to ? 'text-primary bg-amber-400/10' : 'text-secondary'"
+              class="text-sm font-medium py-2 pl-6 pr-2 rounded-lg hover:text-primary hover:bg-amber-400/10 transition-colors block"
               @click="mobileOpen = false"
             >{{ item.label }}</NuxtLink>
           </div>

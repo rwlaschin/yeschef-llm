@@ -24,11 +24,6 @@ import { menuSchema, planSchema, querySchema, stepsWriteSchema, jobIdSchema } fr
 
 if (!getApps().length) initializeApp(); // ADC on Cloud Run
 
-// DEV ONLY: appended to each lazy-import specifier below so Node's ESM loader treats an
-// edited entry file as a distinct module and re-reads it from disk, instead of returning
-// the cached module from a prior request — see lib/lazy.js for the other half of this.
-const bust = () => (process.env.NODE_ENV === "dev" ? `?t=${Date.now()}` : "");
-
 const FASTIFY_OPTS = { maxRequestHeadersSize: 32768 };
 const MAX_CACHE_SECONDS = 60 * 60 * 24 * 30 * 12; // 12 months
 
@@ -36,7 +31,7 @@ const ai = Fastify(FASTIFY_OPTS);
 
 ai.register(fastifyCors, {
   origin: true,
-  methods: ["GET", "POST", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   credentials: true,
   maxAge: MAX_CACHE_SECONDS,
   cacheControl: `public, max-age=${MAX_CACHE_SECONDS}`,
@@ -89,30 +84,30 @@ ai.addHook("preHandler", requireAuth);
 // ---- Route table (lazy) ------------------------------------
 // requireAuth (global preHandler above) runs first on every route; validateBody is a
 // per-route preHandler that AJV-checks the JSON body. /events (Pub/Sub) + /health stay open.
-ai.post("/plan", { preHandler: validateBody(planSchema) }, lazy(() => import(`./entry/ai/plan.js${bust()}`), "post"));    // UI/YesChef launch a plan
-ai.post("/menu", { preHandler: validateBody(menuSchema) }, lazy(() => import(`./entry/ai/menu.js${bust()}`), "post"));    // UI: compose a Menu Plan (no planner) → run step 0
-ai.post("/query", { preHandler: validateBody(querySchema) }, lazy(() => import(`./entry/ai/query.js${bust()}`), "post"));  // UI chat copilot: single-shot query
-ai.get("/steps", lazy(() => import(`./entry/ai/steps.js${bust()}`), "list"));   // Step Library list (Mongo plan_library)
-ai.post("/steps", { preHandler: validateBody(stepsWriteSchema) }, lazy(() => import(`./entry/ai/steps.js${bust()}`), "post"));  // Step Library writes (Mongo plan_library)
+ai.post("/plan", { preHandler: validateBody(planSchema) }, lazy(() => import(`./entry/ai/plan.js`), "post"));    // UI/YesChef launch a plan
+ai.post("/menu", { preHandler: validateBody(menuSchema) }, lazy(() => import(`./entry/ai/menu.js`), "post"));    // UI: compose a Menu Plan (no planner) → run step 0
+ai.post("/query", { preHandler: validateBody(querySchema) }, lazy(() => import(`./entry/ai/query.js`), "post"));  // UI chat copilot: single-shot query
+ai.get("/steps", lazy(() => import(`./entry/ai/steps.js`), "list"));   // Step Library list (Mongo plan_library)
+ai.post("/steps", { preHandler: validateBody(stepsWriteSchema) }, lazy(() => import(`./entry/ai/steps.js`), "post"));  // Step Library writes (Mongo plan_library)
 // Re-run an EXISTING plan without re-running the planner (hard-deletes the right run range,
 // server-side). Static /resume/plan resolves before the :step param routes (Fastify precedence).
-ai.post("/rebuild", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js${bust()}`), "rebuild"));    // DEV: re-parse existing planner output → run step 0 (no planner re-run)
-ai.post("/resume/plan", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js${bust()}`), "plan"));  // wipe all step runs, run step 0
-ai.post("/resume/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js${bust()}`), "next")); // wipe >N, publish N's finish
-ai.post("/run/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js${bust()}`), "run"));     // DEBUG: run ONE step isolated (report:null, no cascade)
-ai.post("/events", lazy(() => import(`./entry/ai/events.js${bust()}`), "post")); // `orchestrate` topic push (Pub/Sub OIDC, body = Google envelope)
+ai.post("/rebuild", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js`), "rebuild"));    // DEV: re-parse existing planner output → run step 0 (no planner re-run)
+ai.post("/resume/plan", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js`), "plan"));  // wipe all step runs, run step 0
+ai.post("/resume/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js`), "next")); // wipe >N, publish N's finish
+ai.post("/run/:step", { preHandler: validateBody(jobIdSchema) }, lazy(() => import(`./entry/ai/resume.js`), "run"));     // DEBUG: run ONE step isolated (report:null, no cascade)
+ai.post("/events", lazy(() => import(`./entry/ai/events.js`), "post")); // `orchestrate` topic push (Pub/Sub OIDC, body = Google envelope)
 // Capacity detect-message: per-model-topic detect subscriptions (auto-ensured at deploy) push here.
 // Decodes the Pub/Sub envelope → handleDetectMessage (dedup by messageId → onMessageDetected).
 ai.post("/capacity-detect", async (req, reply) => {
   try {
-    const { handleDetectMessage } = await import(`./entry/ai/capacity/recorder.js${bust()}`);
+    const { handleDetectMessage } = await import(`./entry/ai/capacity/recorder.js`);
     await handleDetectMessage(req.body?.message ?? {});
   } catch (e) {
     console.error(`[ai/capacity-detect] ${e?.message}`);
   }
   return reply.code(204).send(); // always ack — detection must never redeliver-storm
 });
-ai.post("/categorize", lazy(() => import(`./entry/ai/categorize.js${bust()}`), "post")); // scraper: sync ingredient categorization via Ollama (no auth, no Firestore)
+ai.post("/categorize", lazy(() => import(`./entry/ai/categorize.js`), "post")); // scraper: sync ingredient categorization via Ollama (no auth, no Firestore)
 ai.get("/health", () => ({ status: "ok" }));                            // liveness probe (dashboard health panel)
 
 ai.setNotFoundHandler((_req, reply) => reply.code(404).send({ error: "Not found" }));
@@ -158,15 +153,14 @@ export const capacityRecorder = onMessagePublished(
 }
 
 // Create the `orchestrate` topic + push subscription on startup (idempotent).
-if (process.env.K_SERVICE || process.env.FUNCTIONS_EMULATOR === "true") {
-  import("./lib/pubsub.js")
-    .then(({ configurePubSub, configureCapacityDetect }) => Promise.all([configurePubSub(), configureCapacityDetect()]))
-    .catch((e) => console.error("[orchestrator] pubsub setup failed:", e.message));
-}
+import("./lib/pubsub.js")
+  .then(({ configurePubSub, configureCapacityDetect }) => Promise.all([configurePubSub(), configureCapacityDetect()]))
+  .catch((e) => console.error("[orchestrator] pubsub setup failed:", e.message));
 
 // Capacity recorder's log sink → topic → capacityRecorder. Provisioned on startup (idempotent), so
 // it's part of the endpoint coming up, not a manual step. Prod only (needs real Cloud Logging + ADC).
-if (process.env.K_SERVICE) {
+// Gate on NODE_ENV, NOT K_SERVICE — the emulator sets K_SERVICE too, so it can't tell prod from dev.
+if (/prod(uction)?/i.test(process.env.NODE_ENV || "")) {
   import("./lib/capacity-sink.js")
     .then(({ configureCapacitySink, configureCapacityMetric }) => Promise.all([configureCapacitySink(), configureCapacityMetric()]))
     .catch((e) => console.error("[orchestrator] capacity sink setup failed:", e.message));

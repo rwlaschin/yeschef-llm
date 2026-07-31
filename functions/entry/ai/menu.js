@@ -9,6 +9,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getCollection } from "../../lib/mongo.js";
 import { ORCHESTRATE_TOPIC } from "../../lib/topics.js";
 import { composeFromDefs, pruneOrphans } from "./compose.js";
+import { isProdLike } from "./capacity/actuate.js";
 import { hardDeleteRuns, isStepRun } from "./resume.js";
 import { MENU_ENTRIES } from "./menu-plan.js";
 import { resolveProteinSeed } from "../../lib/neo4j.js";
@@ -141,7 +142,8 @@ async function composeMenuPlan(form = {}) {
     console.log(`  ✗ drop  ${r.name} — needs earlier step(s) [${r.context.join(", ")}], none kept`);
   }
 
-  return { plan: composeFromDefs(kept, form) };
+  // Production runs each step's `modelProd` override (StepForm "Override"); dev/dry-runs use `model`.
+  return { plan: composeFromDefs(kept, form, { isProd: isProdLike() }) };
 }
 
 export async function post(req, reply) {

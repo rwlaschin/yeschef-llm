@@ -38,67 +38,125 @@ test("scoreRegionDaypart: sums rows before scoring (Σok/Σfail)", () => {
 // ---- select ----------------------------------------------------------------
 const NOW = 1_000_000;
 
-test("select: picks highest score among non-cooldown regions", () => {
+test("select: picks highest score among non-parked regions", () => {
   const r = select([
-    { region: "us-east1", score: 5, cooldownUntil: null },
-    { region: "us-central1", score: 9, cooldownUntil: null },
-    { region: "us-west1", score: 3, cooldownUntil: null },
-  ], NOW);
+    { region: "us-east1", score: 5, consecutiveStockouts: 0 },
+    { region: "us-central1", score: 9, consecutiveStockouts: 0 },
+    { region: "us-west1", score: 3, consecutiveStockouts: 0 },
+  ], NOW, {}, () => 0.99);
   assert.equal(r.region, "us-central1");
 });
 
-test("select: top score in cooldown → picks the highest non-cooldown", () => {
+test("select: top region parked (streak>=3) → excluded from the exploit top pick", () => {
   const r = select([
-    { region: "us-central1", score: 9, cooldownUntil: NOW + 5000 }, // in cooldown
-    { region: "us-east1", score: 5, cooldownUntil: null },
-    { region: "us-west1", score: 3, cooldownUntil: NOW - 5000 },    // expired cooldown
-  ], NOW);
+    { region: "us-central1", score: 9, consecutiveStockouts: 3 }, // parked
+    { region: "us-east1", score: 5, consecutiveStockouts: 0 },
+    { region: "us-west1", score: 3, consecutiveStockouts: 1 },
+  ], NOW, {}, () => 0.99); // never skip → top ACTIVE
   assert.equal(r.region, "us-east1");
 });
 
-test("select: expired cooldownUntil (<= now) counts as available", () => {
+test("select: streak below maxStockouts is NOT parked (still exploitable)", () => {
   const r = select([
-    { region: "us-central1", score: 9, cooldownUntil: NOW },        // exactly now → available
-    { region: "us-east1", score: 5, cooldownUntil: null },
-  ], NOW);
+    { region: "us-central1", score: 9, consecutiveStockouts: 2 }, // 2 < 3 → active
+    { region: "us-east1", score: 5, consecutiveStockouts: 0 },
+  ], NOW, {}, () => 0.99);
   assert.equal(r.region, "us-central1");
 });
 
-test("select: ALL in cooldown → drops veto, returns highest overall (least-bad)", () => {
+test("select: maxStockouts param is tunable (parks at 2)", () => {
   const r = select([
-    { region: "us-central1", score: 9, cooldownUntil: NOW + 1000 },
-    { region: "us-east1", score: 4, cooldownUntil: NOW + 1000 },
-    { region: "us-west1", score: 7, cooldownUntil: NOW + 1000 },
-  ], NOW);
+    { region: "us-central1", score: 9, consecutiveStockouts: 2 }, // parked at maxStockouts:2
+    { region: "us-east1", score: 5, consecutiveStockouts: 0 },
+  ], NOW, { maxStockouts: 2 }, () => 0.99);
+  assert.equal(r.region, "us-east1");
+});
+
+test("select: a parked region stays reachable by EXPLORATION (can't deadlock)", () => {
+  const pool = [
+    { region: "a", score: 30, consecutiveStockouts: 0 },
+    { region: "z", score: 100, consecutiveStockouts: 3 }, // top score but parked
+  ];
+  // Pure exploit (never skip) → the active region, never the parked one.
+  assert.equal(select(pool, NOW, {}, () => 0.99).region, "a");
+  // Full skip-cascade → lands on the reserved last slot = the parked region → it gets probed.
+  assert.equal(select(pool, NOW, {}, () => 0).region, "z");
+});
+
+test("select: ALL parked → drops veto, returns highest overall (least-bad)", () => {
+  const r = select([
+    { region: "us-central1", score: 9, consecutiveStockouts: 3 },
+    { region: "us-east1", score: 4, consecutiveStockouts: 5 },
+    { region: "us-west1", score: 7, consecutiveStockouts: 4 },
+  ], NOW, {}, () => 0.99);
   assert.equal(r.region, "us-central1");
 });
 
 test("select: all-negative scores still returns a region", () => {
   const r = select([
-    { region: "us-central1", score: -8, cooldownUntil: null },
-    { region: "us-east1", score: -2, cooldownUntil: null },
-    { region: "us-west1", score: -5, cooldownUntil: null },
-  ], NOW);
+    { region: "us-central1", score: -8, consecutiveStockouts: 0 },
+    { region: "us-east1", score: -2, consecutiveStockouts: 0 },
+    { region: "us-west1", score: -5, consecutiveStockouts: 0 },
+  ], NOW, {}, () => 0.99);
   assert.equal(r.region, "us-east1"); // least-negative
 });
 
 test("select: deterministic tie-break by region name asc", () => {
   const r = select([
-    { region: "us-west1", score: 5, cooldownUntil: null },
-    { region: "us-central1", score: 5, cooldownUntil: null },
-    { region: "us-east1", score: 5, cooldownUntil: null },
-  ], NOW);
+    { region: "us-west1", score: 5, consecutiveStockouts: 0 },
+    { region: "us-central1", score: 5, consecutiveStockouts: 0 },
+    { region: "us-east1", score: 5, consecutiveStockouts: 0 },
+  ], NOW, {}, () => 0.99);
   assert.equal(r.region, "us-central1");
 });
 
-test("select: absent cooldownUntil treated as available", () => {
+test("select: absent consecutiveStockouts treated as streak 0 (active)", () => {
   const r = select([
     { region: "us-east1", score: 6 },
     { region: "us-central1", score: 2 },
-  ], NOW);
+  ], NOW, {}, () => 0.99);
   assert.equal(r.region, "us-east1");
 });
 
 test("select: empty region list → null", () => {
   assert.equal(select([], NOW), null);
+});
+
+// ---- select: explore/exploit ----------------------------------------------
+const FOUR = [
+  { region: "a", score: 30, consecutiveStockouts: 0 },
+  { region: "b", score: 15, consecutiveStockouts: 0 },
+  { region: "c", score: 0, consecutiveStockouts: 0 },
+  { region: "d", score: 0, consecutiveStockouts: 0 },
+];
+
+test("select: rand never < skip → always the top (pure exploit)", () => {
+  assert.equal(select(FOUR, NOW, {}, () => 0.99).region, "a");
+});
+
+test("select: rand always skips → cascades to the LAST of the top-N", () => {
+  // c/d tie at 0 → name asc → c before d; skipping every non-last lands on d (last).
+  assert.equal(select(FOUR, NOW, {}, () => 0).region, "d");
+});
+
+test("select: skip once then take → the 2nd region", () => {
+  let n = 0;
+  const rand = () => (n++ === 0 ? 0 : 0.99); // skip a, take b
+  assert.equal(select(FOUR, NOW, {}, rand).region, "b");
+});
+
+test("select: exploration is bounded to the top-N (5th region never reachable)", () => {
+  const five = [...FOUR, { region: "e", score: -1, consecutiveStockouts: 0 }];
+  // even skipping every step, the walk stops at the 4th (d), never reaches e.
+  assert.equal(select(five, NOW, { topN: 4 }, () => 0).region, "d");
+});
+
+test("select: parked regions are excluded from the exploit pool", () => {
+  const pool = [
+    { region: "a", score: 30, consecutiveStockouts: 3 }, // parked → excluded from top pick
+    { region: "b", score: 15, consecutiveStockouts: 0 },
+    { region: "c", score: 0, consecutiveStockouts: 0 },
+  ];
+  // a is parked; never-skip → top active = b.
+  assert.equal(select(pool, NOW, {}, () => 0.99).region, "b");
 });

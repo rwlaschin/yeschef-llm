@@ -4,11 +4,11 @@
     <div class="relative flex-1 panel overflow-clip rounded-lg min-h-0">
       <!-- Top-left: search + filter -->
       <div class="absolute top-3 left-3 right-3 z-10 flex items-center gap-2">
-        <div class="flex items-center gap-2 bg-black/30 backdrop-blur rounded-lg px-3 min-h-[36px] flex-1 max-w-sm border border-white/10">
+        <div class="flex items-center gap-2 bg-black/30 backdrop-blur rounded-lg px-3 min-h-9 flex-1 max-w-sm border border-white/10">
           <span class="text-muted text-xs">⌕</span>
           <input v-model="search" placeholder="Search nodes…" class="flex-1 bg-transparent outline-none text-xs text-secondary" />
         </div>
-        <button @click="reload" :disabled="loading" class="px-3 min-h-[36px] text-xs btn-muted rounded-lg hover:text-primary disabled:opacity-50">
+        <button @click="reload" :disabled="loading" class="px-3 min-h-9 text-xs btn-muted rounded-lg hover:text-primary disabled:opacity-50">
           {{ loading ? '…' : 'Reload' }}
         </button>
       </div>

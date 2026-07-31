@@ -20,16 +20,35 @@
 import dotenvFlow from "dotenv-flow";
 import { execSync, exec } from "child_process";
 import fs from "fs";
+import os from "os";
+import path from "path";
+import util from "util";
 import crypto from "crypto";
+import { AsyncLocalStorage } from "async_hooks";
+import { fileURLToPath } from "url";
 import { renderDockerfile } from "../docker/render.js";
-import { setup as setupPubSub } from "../pubsub/setup.js";
+import { setup as setupPubSub } from "./setup-pubsub.js";
 import { MODELS, subscriptionOf, imageOf, FAKE_SUBSCRIPTION } from "../config/models.js";
 import { getWorkerRegions } from "../functions/entry/ai/capacity/regions.js";
 
 dotenvFlow.config();
 
+// Per-image async context — carries the running model's capture-log fd through the parallel GPU
+// pipeline so run()/runAsync()/console.log route THAT image's verbose gcloud output to its own temp
+// log file instead of interleaving on the terminal (the terminal shows only the status region). No
+// store elsewhere (fake worker, setup, dry-run) → output goes to the terminal exactly as before.
+const als = new AsyncLocalStorage();
+
 const _log = console.log.bind(console);
-console.log = (...args) => _log(`[${new Date().toLocaleTimeString()}]`, ...args);
+const _stamp = () => `[${new Date().toLocaleTimeString()}]`;
+console.log = (...args) => {
+  const store = als.getStore();
+  if (store && store.logFd != null) {
+    try { fs.writeSync(store.logFd, `${_stamp()} ${util.format(...args)}\n`); } catch { /* logging only */ }
+    return;
+  }
+  _log(_stamp(), ...args);
+};
 
 const {
   GCP_PROJECT_ID,
@@ -125,12 +144,12 @@ async function ensureBaseImage() {
         `  timeout: 1200s\nimages:\n- '${tag}'\ntimeout: 1200s\n`
     );
     try {
-      run(`gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=${cbName}`);
+      await run(`gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=${cbName}`);
     } finally {
       try { fs.unlinkSync(cbName); } catch {}
     }
   }
-  run(`gcloud artifacts docker tags add ${tag} ${tagLatest} --project=${GCP_PROJECT_ID}`);
+  await run(`gcloud artifacts docker tags add ${tag} ${tagLatest} --project=${GCP_PROJECT_ID}`);
   return tag;
 }
 
@@ -158,23 +177,29 @@ const IMAGES_ALL = MODELS.map((m) => ({
 // fake/canned worker) runs independently of this filter.
 const IMAGES = IMAGES_ALL.filter((img) => img.name !== "ollama-openclaw-llama3-3-70b-v1");
 
+// Async so the caller's `await` yields to the event loop while gcloud runs — that's what keeps the
+// progress table's 1s timer ticking during long mutations (a synchronous execSync would block the
+// loop and freeze the "elapsed" clock, making a live deploy look hung). Delegates to runAsync, which
+// already captures to the per-image log fd (or streams to the terminal). EVERY caller must await it.
 function run(cmd) {
-  if (!APPLY) {
-    console.log(`\n[dry-run] ${cmd}\n`);
-    return;
-  }
-  console.log(`\n> ${cmd}\n`);
-  execSync(cmd, { stdio: "inherit" });
+  return runAsync(cmd);
 }
 
-// Async variant for parallel Cloud Build submissions — streams stdout/stderr live.
+// Async variant for parallel Cloud Build submissions. Inside a per-image pipeline the child's
+// stdout/stderr are captured to that image's log fd; otherwise streamed live to the terminal.
 function runAsync(cmd) {
   if (!APPLY) { console.log(`\n[dry-run] ${cmd}\n`); return Promise.resolve(); }
   console.log(`\n> ${cmd}\n`);
+  const fd = als.getStore()?.logFd;
   return new Promise((resolve, reject) => {
     const child = exec(cmd, { maxBuffer: 50 * 1024 * 1024 });
-    child.stdout.pipe(process.stdout);
-    child.stderr.pipe(process.stderr);
+    if (fd != null) {
+      child.stdout.on("data", (d) => { try { fs.writeSync(fd, d); } catch { /* logging only */ } });
+      child.stderr.on("data", (d) => { try { fs.writeSync(fd, d); } catch { /* logging only */ } });
+    } else {
+      child.stdout.pipe(process.stdout);
+      child.stderr.pipe(process.stderr);
+    }
     child.on("close", (code) =>
       code === 0 ? resolve() : reject(new Error(`Exit ${code}: ${cmd.slice(0, 100)}`))
     );
@@ -184,6 +209,187 @@ function runAsync(cmd) {
 
 function esc(s) {
   return s.replace(/'/g, "'\\''");
+}
+
+// Every baker/worker VM lands in the same VPC with full cloud-platform scope under the deploy SA.
+const VM_NET_FLAGS = `--network=${GCP_NETWORK} --scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT}`;
+
+// startup-script + serial logging, shared by every VM create. `extra` appends more --metadata keys
+// (the baker adds enable-guest-attributes=TRUE for its bake/status signalling).
+const vmMetadataFlag = (script, extra = "") =>
+  `--metadata=startup-script='${esc(script)}',serial-port-logging-enable=true${extra}`;
+
+// ── Shared build / template / MIG primitives (used by BOTH deployFake and the GPU pipeline) ──────
+// Pure DRY: behaviour is identical to the inline logic they replaced. Each call site passes its own
+// differences (Dockerfile, machine type, region/zones, surge, create command) as args.
+
+// Build the image if its content-hash tag is absent — skip when it already exists (nothing changed).
+// Writes a temp cloudbuild config (and, when `dfName` is given, the rendered Dockerfile), submits
+// the build, and cleans the temp files up. Returns { tagHash, tagLatest, build } where `build` is a
+// Promise for the submission — already-resolved when skipped, in dry-run, or for a synchronous submit.
+function ensureImage({ name, hash, cbYaml, dfName = null, dockerfile = null, async: useAsync = false }) {
+  const tagHash = `${REGISTRY}/${name}:${hash}`;
+  const tagLatest = `${REGISTRY}/${name}:latest`;
+  if (APPLY && imageExistsInRegistry(tagHash)) {
+    console.log(`  ✓ Image unchanged (${hash}) — skipping build.`);
+    return { tagHash, tagLatest, build: Promise.resolve() };
+  }
+  const cbName = `cloudbuild.${name}.yaml`;
+  if (dfName) fs.writeFileSync(dfName, dockerfile);
+  fs.writeFileSync(cbName, cbYaml);
+  const submit = `gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=${cbName}`;
+  const cleanup = () => {
+    if (dfName) { try { fs.unlinkSync(dfName); } catch { /* best-effort */ } }
+    try { fs.unlinkSync(cbName); } catch { /* best-effort */ }
+  };
+  // Both paths return a build promise; the caller awaits `.build`. cleanup() runs via .finally so the
+  // temp cloudbuild yaml survives until `gcloud builds submit` is done reading it (awaiting run() and
+  // deleting synchronously would race the still-running submit).
+  return { tagHash, tagLatest, build: run(submit).finally(cleanup) };
+}
+
+// Create the (content-hash-keyed, stable-named) instance template if it doesn't already exist — an
+// unchanged redeploy would otherwise hit ALREADY_EXISTS on create. `hashNote` is appended to the
+// skip log (GPU tiers include the hash, the fake tier doesn't) so the message is unchanged.
+async function ensureTemplate({ template, createCmd, hashNote = "" }) {
+  let exists = false;
+  try {
+    execSync(`gcloud compute instance-templates describe ${template} --project=${GCP_PROJECT_ID} --format="value(name)"`, { stdio: "pipe" });
+    exists = true;
+  } catch { /* doesn't exist yet */ }
+  if (exists) {
+    console.log(`  ✓ Template ${template} already exists${hashNote} — skipping create.`);
+    return;
+  }
+  await run(createCmd);
+}
+
+// Point a MIG at `template`: create it (via the caller's create command) if absent, otherwise roll
+// it onto the template — but ONLY when it isn't already on it. set-instance-template alone changes
+// the recipe for FUTURE instances only, so rolling-action (max-unavailable=0: a new box comes up
+// before an old one is removed) is what actually replaces running instances; skipping both when the
+// MIG is already on this (hash-identical) template is what stops an unchanged redeploy from need-
+// lessly recreating every VM (cost + stockout risk).
+async function ensureMigOnTemplate({ mig, region, template, surge, createCmd, skipMsg }) {
+  let migExists = false;
+  try {
+    execSync(`gcloud compute instance-groups managed describe ${mig} --project=${GCP_PROJECT_ID} --region=${region} --format="value(name)"`, { stdio: "pipe" });
+    migExists = true;
+  } catch { /* doesn't exist yet */ }
+
+  if (!migExists) { await run(createCmd); return; }
+
+  let currentTmpl = "";
+  try {
+    currentTmpl = execSync(
+      `gcloud compute instance-groups managed describe ${mig} --project=${GCP_PROJECT_ID} --region=${region} --format="value(instanceTemplate)"`,
+      { stdio: "pipe" }
+    ).toString().trim().split("/").pop() || "";
+  } catch { /* fall through to roll */ }
+  if (currentTmpl === template) {
+    if (skipMsg) console.log(skipMsg);
+    return;
+  }
+  await run(`gcloud compute instance-groups managed set-instance-template ${mig} --project=${GCP_PROJECT_ID} --region=${region} --template=${template}`);
+  await run(`gcloud compute instance-groups managed rolling-action start-update ${mig} --project=${GCP_PROJECT_ID} --region=${region} --version=template=${template} --max-surge=${surge} --max-unavailable=0`);
+}
+
+// One re-rendered status region for the parallel worker pipeline. The per-image gcloud streams are
+// captured to temp log files (see run/runAsync), so the terminal shows ONLY this compact status: a
+// TTY redraws an in-place table (elapsed ticks ~1s); a non-TTY/CI stream emits one summary line
+// every ~10s plus per-image phase/done/fail milestones (never a 60s silent gap, never per-image
+// spam). On a failure the offending image's captured log is dumped so the error is visible. Fully
+// disabled (no fds, no timer, all methods no-ops) under dry-run, where run() prints the plan instead.
+export function createProgress(names, { enabled }) {
+  const tty = enabled && !!process.stdout.isTTY;
+  const t0 = Date.now();
+  const items = new Map();
+  for (const name of names) {
+    const logPath = enabled ? path.join(os.tmpdir(), `deploy-${name}-${process.pid}.log`) : null;
+    items.set(name, {
+      phase: "queued",
+      state: "run",                 // run | done | failed
+      startTs: Date.now(),
+      logPath,
+      logFd: logPath ? fs.openSync(logPath, "a") : null,
+    });
+  }
+  let timer = null, lastLines = 0, lastSummaryTs = 0;
+
+  const mmss = (ms) => {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  };
+  const label = (it) => (it.state === "done" ? "✓ done" : it.state === "failed" ? "✗ failed" : it.phase);
+
+  const renderTty = () => {
+    const now = Date.now();
+    const width = Math.max(6, ...[...items.keys()].map((n) => n.length));
+    const lines = [`Workers — ${mmss(now - t0)} elapsed`];
+    for (const [name, it] of items) {
+      lines.push(`  ${name.padEnd(width)}  ${label(it).padEnd(9)}  ${mmss(now - it.startTs)}`);
+    }
+    let out = lastLines ? `\x1b[${lastLines}A\x1b[0J` : "";  // move up + clear, then redraw in place
+    out += lines.join("\n") + "\n";
+    process.stdout.write(out);
+    lastLines = lines.length;
+  };
+
+  const summary = () => {
+    const c = {};
+    for (const it of items.values()) {
+      const k = it.state === "done" ? "done" : it.state === "failed" ? "failed" : it.phase;
+      c[k] = (c[k] || 0) + 1;
+    }
+    return Object.entries(c).map(([k, v]) => `${k} ${v}`).join(" · ");
+  };
+  const renderNonTty = (force) => {
+    const now = Date.now();
+    if (!force && now - lastSummaryTs < 10_000) return;
+    lastSummaryTs = now;
+    _log(`${_stamp()} … ${summary()} (${mmss(now - t0)} elapsed)`);
+  };
+
+  return {
+    logFd: (name) => items.get(name)?.logFd ?? null,
+    phase(name, phase) {
+      const it = items.get(name); if (!it) return;
+      it.phase = phase;
+      if (enabled && !tty) _log(`${_stamp()} ▶ ${name} → ${phase}`);
+    },
+    done(name) {
+      const it = items.get(name); if (!it) return;
+      it.state = "done";
+      if (enabled && !tty) _log(`${_stamp()} ✓ ${name} done (${mmss(Date.now() - it.startTs)})`);
+    },
+    fail(name) {
+      const it = items.get(name); if (!it) return;
+      it.state = "failed";
+      if (enabled && it.logFd != null) {
+        try {
+          const body = fs.readFileSync(it.logPath, "utf-8");
+          _log(`\n===== ${name} FAILED — captured log =====\n${body}\n===== end ${name} log =====\n`);
+          if (tty) lastLines = 0;   // the dump broke the in-place table; next render draws fresh below it
+        } catch { /* no log to dump */ }
+      }
+      if (enabled && !tty) _log(`${_stamp()} ✗ ${name} failed (${mmss(Date.now() - it.startTs)})`);
+    },
+    start() {
+      if (!enabled) return;
+      if (tty) { renderTty(); timer = setInterval(renderTty, 1000); }
+      else { renderNonTty(true); timer = setInterval(() => renderNonTty(false), 1000); }
+      if (timer.unref) timer.unref();
+    },
+    stop() {
+      if (timer) { clearInterval(timer); timer = null; }
+      if (!enabled) return;
+      if (tty) renderTty(); else renderNonTty(true);
+      for (const it of items.values()) {
+        if (it.logFd != null) { try { fs.closeSync(it.logFd); } catch { /* best-effort */ } }
+        if (it.logPath) { try { fs.unlinkSync(it.logPath); } catch { /* best-effort */ } }
+      }
+    },
+  };
 }
 
 // Autoscale a MIG on its Pub/Sub subscription backlog: 0 → maxReplicas, full scale-in after a 60s
@@ -296,7 +502,7 @@ function bakerStartupScript(tag, region) {
 // created a brand-new template and never cleaned up the old one — 8+ had piled up for a
 // single model going back over a week. Best-effort per-template: a template still actively
 // referenced elsewhere fails to delete without blocking cleanup of the others.
-function cleanupOldTemplates(modelName, keep = 3) {
+async function cleanupOldTemplates(modelName, keep = 3) {
   let names;
   try {
     names = execSync(
@@ -305,8 +511,9 @@ function cleanupOldTemplates(modelName, keep = 3) {
       { stdio: "pipe" }
     ).toString().trim().split("\n").filter(Boolean);
   } catch { return; }
+  // run() prints the plan under dry-run and no-ops; a still-referenced/already-gone delete just rejects.
   for (const name of names.slice(keep)) {
-    try { execSync(`gcloud compute instance-templates delete ${name} --project=${GCP_PROJECT_ID} --quiet`, { stdio: "pipe" }); }
+    try { await run(`gcloud compute instance-templates delete ${name} --project=${GCP_PROJECT_ID} --quiet`); }
     catch { /* still referenced, or already gone — skip */ }
   }
 }
@@ -344,20 +551,22 @@ async function bakeGCEImage(img, tag, hash, machineType) {
     "us-west1-a", "us-west1-b", "us-west1-c",
     "us-west2-a", "us-west2-b",
   ];
+  const bakerCreateCmd = (zone) =>
+    `gcloud compute instances create ${bakerName} --project=${GCP_PROJECT_ID} --zone=${zone} ` +
+    `--machine-type=e2-standard-4 --image-family=common-cu129-ubuntu-2204-nvidia-580 --image-project=deeplearning-platform-release ` +
+    `--boot-disk-size=${img.diskGb}GB --boot-disk-type=pd-ssd ` +
+    `${VM_NET_FLAGS} ` +
+    // enable-guest-attributes carries the baker's bake/status signal. Without serial logging a
+    // startup-script death is invisible until the bake deadline — serial-port-1 is the only trace.
+    vmMetadataFlag(bakerStartupScript(tag, GCP_REGION), ",enable-guest-attributes=TRUE");
   let bakerZone = null;
   for (const zone of BAKER_ZONES) {
+    // Dry-run: run() prints the create for the first zone (the APPLY-gated poll/snapshot below no-ops).
+    if (!APPLY) { await run(bakerCreateCmd(zone)); bakerZone = zone; break; }
     try {
       console.log(`  Trying baker zone: ${zone}...`);
-      execSync(
-        `gcloud compute instances create ${bakerName} --project=${GCP_PROJECT_ID} --zone=${zone} ` +
-        `--machine-type=e2-standard-4 --image-family=common-cu129-ubuntu-2204-nvidia-580 --image-project=deeplearning-platform-release ` +
-        `--boot-disk-size=${img.diskGb}GB --boot-disk-type=pd-ssd ` +
-        `--network=${GCP_NETWORK} --scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
-        // Without this, a startup-script death is invisible until the 20-min timeout —
-        // serial-port-1 output is the only trace of a baker VM that never signals bake-done.
-        `--metadata=startup-script='${esc(bakerStartupScript(tag, GCP_REGION))}',serial-port-logging-enable=true,enable-guest-attributes=TRUE`,
-        { stdio: "pipe" }  // pipe so we can catch error text; errors print below
-      );
+      // pipe (not run()) so stderr text is captured for the stockout classification that drives retry.
+      execSync(bakerCreateCmd(zone), { stdio: "pipe" });
       bakerZone = zone;
       console.log(`  ✓ Baker VM created in ${zone}`);
       break;
@@ -378,15 +587,17 @@ async function bakeGCEImage(img, tag, hash, machineType) {
   if (!bakerZone) throw new Error(`All zones (${BAKER_ZONES.join(", ")}) exhausted for baker VM — try again later`);
 
   if (APPLY) {
-    // Poll instance metadata until the baker signals it's done (up to 20 min)
-    console.log(`  Waiting for baker VM to pull image (this takes a few minutes)...`);
-    const deadline = Date.now() + 60 * 60 * 1000;
-    let bakeDone = false;
+    // Poll the baker's guest attribute bake/status until done. Deadline scales with image size:
+    // a 70B model (diskGb ≥ 200) pull + SHA256 verify routinely exceeds an hour, so a flat short
+    // timeout would abort a healthy large bake. Small models finish in minutes.
+    const bakeDeadlineMin = img.diskGb >= 200 ? 120 : 30;
+    console.log(`  Waiting for baker VM to pull image (up to ${bakeDeadlineMin} min for this ${img.diskGb}GB image)...`);
+    const deadline = Date.now() + bakeDeadlineMin * 60 * 1000;
+    let bakeDone = false, bakerGone = false;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 30_000));
       try {
-        // Read the baker's guest attribute bake/status ("true" = done, "failed" = startup died).
-        // Not-yet-set → get-guest-attributes errors → caught below → keep polling.
+        // bake/status: "true" = done, "failed" = startup died. Not-yet-set → this errors → catch.
         const meta = execSync(
           `gcloud compute instances get-guest-attributes ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --query-path=bake/status --format="value(value)"`,
           { stdio: "pipe" }
@@ -395,23 +606,35 @@ async function bakeGCEImage(img, tag, hash, machineType) {
         // The baker's ERR trap sets bake/status=failed the instant its startup script dies — stop
         // waiting NOW rather than polling out the full deadline for a bake that's already dead.
         if (meta === "failed") { console.log("  ✗ Baker signaled startup failure — aborting bake."); break; }
-      } catch { /* attribute not set yet — still booting/pulling */ }
+      } catch {
+        // get-guest-attributes failed for one of two reasons: the attribute isn't set yet (VM still
+        // booting/pulling → keep polling), or the VM NO LONGER EXISTS (its ERR trap self-deleted, or
+        // it was killed → the bake is already over and no signal can ever arrive). Distinguish them
+        // by a cheap existence check — a missing VM must break immediately, not wait out the deadline
+        // (that dead-wait is what hung a whole deploy for an hour).
+        try {
+          execSync(`gcloud compute instances describe ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --format="value(name)"`, { stdio: "pipe" });
+          /* VM still there → attribute just not set yet → keep polling */
+        } catch { bakerGone = true; console.log("  ✗ Baker VM is gone — bake already ended; not waiting."); break; }
+      }
     }
-    // A timed-out baker must fail loud, not get snapshotted anyway — a silent timeout here
-    // previously baked broken (Docker-less) images into every model's GCE image undetected.
+    // A timed-out/failed/vanished baker must fail loud, not get snapshotted anyway — a silent timeout
+    // here previously baked broken (Docker-less) images into every model's GCE image undetected.
     if (!bakeDone) {
-      // Best-effort cleanup — a failed bake must not leak a running (billed) VM the way a
-      // process-wide crash used to when this threw before reaching the stop/delete below.
-      try { execSync(`gcloud compute instances delete ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --quiet`, { stdio: "pipe" }); }
-      catch { /* best-effort — surface the real failure below regardless */ }
+      // Best-effort cleanup — a failed bake must not leak a running (billed) VM.
+      if (!bakerGone) {
+        try { execSync(`gcloud compute instances delete ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --quiet`, { stdio: "pipe" }); }
+        catch { /* best-effort — surface the real failure below regardless */ }
+      }
       throw new Error(
-        `Baker VM ${bakerName} never signaled bake-done within 60 min — its startup script likely failed (VM deleted). ` +
-        `Check serial logs from a fresh bake attempt if this recurs.`
+        bakerGone
+          ? `Baker VM ${bakerName} disappeared before signaling bake-done — its startup script died. Check serial logs from a fresh attempt.`
+          : `Baker VM ${bakerName} never signaled bake-done within ${bakeDeadlineMin} min — startup script likely stalled. Check serial logs.`
       );
     }
 
     // Stop baker VM so we can snapshot its disk
-    run(`gcloud compute instances stop ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID}`);
+    await run(`gcloud compute instances stop ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID}`);
 
     // Disk name matches instance name on COS
     const diskName = execSync(
@@ -420,14 +643,14 @@ async function bakeGCEImage(img, tag, hash, machineType) {
     ).toString().trim();
 
     // Create GCE custom image from the baker's disk (images are global — zone doesn't matter)
-    run(
+    await run(
       `gcloud compute images create ${imageName} --project=${GCP_PROJECT_ID} ` +
       `--source-disk=${diskName} --source-disk-zone=${bakerZone} ` +
       `--family=${img.name} --description="Pre-baked Docker image: ${tag}"`
     );
 
     // Delete baker VM + disk
-    run(`gcloud compute instances delete ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --quiet`);
+    await run(`gcloud compute instances delete ${bakerName} --zone=${bakerZone} --project=${GCP_PROJECT_ID} --quiet`);
   }
 
   return imageName;
@@ -451,23 +674,14 @@ async function deployFake() {
 
   console.log(`\n==== ${name} (CPU MIG, scale-to-zero) hash=${hash} ====`);
 
-  if (APPLY && imageExistsInRegistry(tagHash)) {
-    console.log(`  ✓ Image unchanged (${hash}) — skipping build.`);
-  } else {
-    const cbName = `cloudbuild.${name}.yaml`;
-    fs.writeFileSync(
-      cbName,
+  await ensureImage({
+    name, hash, async: false,
+    cbYaml:
       `steps:\n- name: 'gcr.io/cloud-builders/docker'\n` +
-        `  args: ['build', '-f', 'docker/Dockerfile.fake', '-t', '${tagHash}', '.']\n` +
-        `  timeout: 600s\nimages:\n- '${tagHash}'\ntimeout: 600s\n`
-    );
-    try {
-      run(`gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=${cbName}`);
-    } finally {
-      try { fs.unlinkSync(cbName); } catch {}
-    }
-  }
-  run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
+      `  args: ['build', '-f', 'docker/Dockerfile.fake', '-t', '${tagHash}', '.']\n` +
+      `  timeout: 600s\nimages:\n- '${tagHash}'\ntimeout: 600s\n`,
+  }).build;
+  await run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
 
   // Container-Optimized OS ships Docker, so boot = pull + run. --restart=always keeps the worker
   // up across container crashes; Mongo URI is single-quoted (esc) so its commas survive the shell.
@@ -497,46 +711,34 @@ async function deployFake() {
   try {
     legacyVm = execSync(`gcloud compute instances describe ${name} --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID} --format="value(name)"`, { stdio: "pipe" }).toString().trim();
   } catch { /* no legacy VM */ }
-  if (legacyVm) run(`gcloud compute instances delete ${name} --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID} --quiet`);
+  if (legacyVm) await run(`gcloud compute instances delete ${name} --zone=${GCP_ZONE} --project=${GCP_PROJECT_ID} --quiet`);
 
-  // CPU instance template — cos-stable, no GPU; boot pulls + runs the fake image.
-  // The template name is content-hash keyed (stable), so an unchanged redeploy would hit
-  // ALREADY_EXISTS on create — skip it when it's already there (same hash = identical template).
-  let tmplExists = false;
-  try {
-    execSync(`gcloud compute instance-templates describe ${template} --project=${GCP_PROJECT_ID} --format="value(name)"`, { stdio: "pipe" });
-    tmplExists = true;
-  } catch { /* doesn't exist yet */ }
-  if (!tmplExists) {
-    run(
+  // CPU instance template — cos-stable, no GPU; boot pulls + runs the fake image. The template name
+  // is content-hash keyed (stable), so an unchanged redeploy would hit ALREADY_EXISTS on create —
+  // ensureTemplate skips it when it's already there (same hash = identical template).
+  await ensureTemplate({
+    template,
+    createCmd:
       `gcloud compute instance-templates create ${template} --project=${GCP_PROJECT_ID} ` +
-        `--machine-type=e2-micro --image-family=cos-stable --image-project=cos-cloud ` +
-        `--boot-disk-size=20GB --network=${GCP_NETWORK} ` +
-        `--scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
-        `--metadata=startup-script='${esc(startup)}',serial-port-logging-enable=true`
-    );
-  } else {
-    console.log(`  ✓ Template ${template} already exists — skipping create.`);
-  }
+      `--machine-type=e2-micro --image-family=cos-stable --image-project=cos-cloud ` +
+      `--boot-disk-size=20GB ${VM_NET_FLAGS} ` +
+      vmMetadataFlag(startup),
+  });
 
   // MIG + autoscaler on the fake subscription backlog (0 → maxReplicas). Same mechanism as the GPU
   // tiers — including the same replica ceiling — so fake test runs can exercise multi-instance
   // scaling (a fanned-out step lands N messages → N fake workers), not just a single serial box. So
   // an idle fake worker scales to zero within the 60s cooldown instead of billing around the clock.
-  let migExists = false;
-  try {
-    execSync(`gcloud compute instance-groups managed describe ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --format="value(name)"`, { stdio: "pipe" });
-    migExists = true;
-  } catch { /* doesn't exist yet */ }
-
-  if (migExists) {
-    run(`gcloud compute instance-groups managed set-instance-template ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --template=${template}`);
-    // Regional MIG spans 3 zones — fixed max-surge must be 0 or ≥ zone count, so 3 (one per zone).
-    run(`gcloud compute instance-groups managed rolling-action start-update ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --version=template=${template} --max-surge=3 --max-unavailable=0`);
-  } else {
-    run(`gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --template=${template} --size=0 --zones=${GCP_REGION}-a,${GCP_REGION}-b,${GCP_REGION}-c`);
-  }
-  setMigAutoscaling({ mig, region: GCP_REGION, subscription: FAKE_SUBSCRIPTION, maxReplicas: DEFAULTS.maxReplicas });
+  // Regional MIG spans 3 zones — fixed max-surge must be 0 or ≥ zone count, so surge=3 (one per zone).
+  await ensureMigOnTemplate({
+    mig, region: GCP_REGION, template, surge: 3,
+    createCmd:
+      `gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} ` +
+      `--region=${GCP_REGION} --template=${template} --size=0 ` +
+      `--zones=${GCP_REGION}-a,${GCP_REGION}-b,${GCP_REGION}-c`,
+    skipMsg: `  ✓ ${mig} in ${GCP_REGION} already on ${template} — no roll.`,
+  });
+  await setMigAutoscaling({ mig, region: GCP_REGION, subscription: FAKE_SUBSCRIPTION, maxReplicas: DEFAULTS.maxReplicas });
   console.log(`  ✓ Fake worker → MIG ${mig} (e2-micro, 0→${DEFAULTS.maxReplicas}) draining ${FAKE_SUBSCRIPTION}`);
 }
 
@@ -569,12 +771,12 @@ async function deploy() {
     repoExists = true;
   } catch { /* doesn't exist yet */ }
   if (!repoExists) {
-    run(
+    await run(
       `gcloud artifacts repositories create ollama --repository-format=docker ` +
         `--location=${GCP_REGION} --project=${GCP_PROJECT_ID}`
     );
   }
-  run(`gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet`);
+  await run(`gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet`);
 
   // Fake/canned worker — part of the standard deploy (CPU, no GPU/baker). Deploys first so a later
   // model failure doesn't block it, and so it's up even when the GPU workers are disabled.
@@ -606,50 +808,39 @@ async function deploy() {
       tagHash:     `${REGISTRY}/${img.name}:${hash}`,
       tagLatest:   `${REGISTRY}/${img.name}:latest`,
       machineType: MACHINE_BY_GPU[img.gpu] || MACHINE_BY_GPU[1],
-      template:    `${img.name}-tmpl-${VERSION}`.slice(0, 61),
+      template:    `${img.name}-tmpl-${hash}`.slice(0, 61),
       mig:         `${img.name}-mig`,
     };
   });
 
   // ── Phase 1: All images — fire every Cloud Build job in parallel, await each in turn ──
+  // Progress region + per-image capture logs (APPLY only; a no-op under dry-run so the plan prints).
+  const progress = createProgress(plan.map((p) => p.img.name), { enabled: APPLY });
+  progress.start();
+
   const cloudBuildJobs = [];
   for (const p of plan) {
-    const { img, dockerfile, hash, tagHash, tagLatest } = p;
-    console.log(`\n==== ${img.name} (gpu=${img.gpu}, ${p.machineType}) hash=${hash} — queuing Cloud Build ====`);
-    if (!APPLY) {
-      run(`gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=cloudbuild.${img.name}.yaml`);
-      run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
-      cloudBuildJobs.push({ p, promise: Promise.resolve() });
-    } else if (!imageExistsInRegistry(tagHash)) {
-      const dfName = `Dockerfile.${img.name}.build`;
-      const cbName = `cloudbuild.${img.name}.yaml`;
-      fs.writeFileSync(dfName, dockerfile);
-      // A 44 GB model (70B) needs a bigger Cloud Build disk than the 100 GB default to hold the
-      // built image; small models use the default. No CPU/machine bump — the ollama.com model
-      // download is the cost, and a bigger builder doesn't speed an external download.
-      // Large models (70B ≈ 44 GB) need a bigger builder disk AND a longer timeout: the ollama.com
-      // download + image push doesn't finish inside the 1 h default (it timed out mid-push). 2 h
-      // covers it; small models keep the 1 h default.
-      const isLarge = img.diskGb >= 200;
-      const buildOpts = isLarge ? `options:\n  diskSizeGb: 300\n` : "";
-      const buildTimeout = isLarge ? 7200 : 3600;
-      fs.writeFileSync(
-        cbName,
-        `steps:\n- name: 'gcr.io/cloud-builders/docker'\n` +
-          `  args: ['build', '-f', '${dfName}', '-t', '${tagHash}', '.']\n` +
-          `  timeout: ${buildTimeout}s\n${buildOpts}images:\n- '${tagHash}'\ntimeout: ${buildTimeout}s\n`
-      );
-      const promise = runAsync(
-        `gcloud builds submit . --project=${GCP_PROJECT_ID} --region=${GCP_REGION} --config=${cbName}`
-      ).finally(() => {
-        try { fs.unlinkSync(dfName); } catch {}
-        try { fs.unlinkSync(cbName); } catch {}
-      });
-      cloudBuildJobs.push({ p, promise });
-    } else {
-      console.log(`  ✓ Image unchanged (${hash}) — skipping build.`);
-      cloudBuildJobs.push({ p, promise: Promise.resolve() });
-    }
+    const { img, dockerfile, hash, tagHash, tagLatest, machineType } = p;
+    const dfName = `Dockerfile.${img.name}.build`;
+    // Large models (70B ≈ 44 GB) need a bigger builder disk AND a longer timeout: the ollama.com
+    // model download + image push doesn't finish inside the 100 GB / 1 h default (it timed out
+    // mid-push). 300 GB / 2 h covers it. No CPU bump — the external download is the cost, and a
+    // bigger builder doesn't speed it. Small models keep the defaults.
+    const isLarge = img.diskGb >= 200;
+    const buildOpts = isLarge ? `options:\n  diskSizeGb: 300\n` : "";
+    const buildTimeout = isLarge ? 7200 : 3600;
+    const cbYaml =
+      `steps:\n- name: 'gcr.io/cloud-builders/docker'\n` +
+      `  args: ['build', '-f', '${dfName}', '-t', '${tagHash}', '.']\n` +
+      `  timeout: ${buildTimeout}s\n${buildOpts}images:\n- '${tagHash}'\ntimeout: ${buildTimeout}s\n`;
+    als.run({ name: img.name, logFd: progress.logFd(img.name) }, () => {
+      console.log(`\n==== ${img.name} (gpu=${img.gpu}, ${machineType}) hash=${hash} — queuing Cloud Build ====`);
+      progress.phase(img.name, "building");
+      const { build } = ensureImage({ name: img.name, hash, dfName, dockerfile, cbYaml, async: true });
+      cloudBuildJobs.push({ p, promise: build });
+      // Dry-run parity: the plan previews the tag-add here as well as after the (no-op) build below.
+      if (!APPLY) run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
+    });
   }
 
   // Pipeline: as each build finishes, immediately tag + bake + deploy that image.
@@ -657,120 +848,112 @@ async function deploy() {
   // allSettled, not all: one model's failure (e.g. a baker VM error) must not abort the
   // Node process mid-flight for the OTHER 6 — that's exactly what orphaned baker VMs
   // stuck running for hours after an earlier IOPS error killed the process outright.
-  const results = await Promise.allSettled(cloudBuildJobs.map(async ({ p, promise }) => {
+  const results = await Promise.allSettled(cloudBuildJobs.map(({ p, promise }) => {
     const { img, hash, tagHash, tagLatest, machineType, template, mig } = p;
-    console.log(`\nAwaiting Cloud Build: ${img.name}...`);
-    await timedPhase(img.name, "cloudbuild", () => promise);
-    run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
-    console.log(`  ✓ ${img.name} done.`);
+    // Run each image's pipeline inside its own capture context so its verbose gcloud output lands
+    // in that image's log file (terminal shows only the status region). On failure the log is dumped.
+    return als.run({ name: img.name, logFd: progress.logFd(img.name) }, async () => {
+     try {
+      console.log(`\nAwaiting Cloud Build: ${img.name}...`);
+      await timedPhase(img.name, "cloudbuild", () => promise);
+      await run(`gcloud artifacts docker tags add ${tagHash} ${tagLatest} --project=${GCP_PROJECT_ID}`);
+      console.log(`  ✓ ${img.name} done.`);
 
-    // Cleanup: remove old digest tags (keep current hash + latest only).
-    run(
-      `gcloud artifacts docker images list ${REGISTRY}/${img.name} ` +
-        `--include-tags --format="value(version,tags)" --project=${GCP_PROJECT_ID} | ` +
-        `grep -v "${hash}" | grep -v "latest" | awk '{print $1}' | ` +
-        `xargs -I{} gcloud artifacts docker images delete ` +
-        `${REGISTRY}/${img.name}@{} --project=${GCP_PROJECT_ID} --quiet 2>/dev/null || true`
-    );
+      // Cleanup: remove old digest tags (keep current hash + latest only).
+      await run(
+        `gcloud artifacts docker images list ${REGISTRY}/${img.name} ` +
+          `--include-tags --format="value(version,tags)" --project=${GCP_PROJECT_ID} | ` +
+          `grep -v "${hash}" | grep -v "latest" | awk '{print $1}' | ` +
+          `xargs -I{} gcloud artifacts docker images delete ` +
+          `${REGISTRY}/${img.name}@{} --project=${GCP_PROJECT_ID} --quiet 2>/dev/null || true`
+      );
 
-    // Bake GCE custom image — Docker layers pre-loaded, no boot-time pull.
-    const gceImage = await timedPhase(img.name, "bake", () => bakeGCEImage(img, tagHash, hash, machineType));
+      // Bake GCE custom image — Docker layers pre-loaded, no boot-time pull.
+      progress.phase(img.name, "baking");
+      const gceImage = await timedPhase(img.name, "bake", () => bakeGCEImage(img, tagHash, hash, machineType));
 
-    // Instance template — GPU VM on baked custom image.
-    // Boot disk is Hyperdisk Balanced with provisioned throughput: model load into VRAM is
-    // disk-throughput-bound, and pd-ssd/pd-standard throughput scales with size (a 60GB
-    // pd-ssd caps at ~30MB/s → minutes to load). 400MB/s loads a 5GB model in ~13s and
-    // costs ~$0.02/hr of VM runtime.
-    run(
-      `gcloud compute instance-templates create ${template} --project=${GCP_PROJECT_ID} ` +
-        `--machine-type=${machineType} ` +
-        `--image=${gceImage} --image-project=${GCP_PROJECT_ID} ` +
-        `--boot-disk-size=${img.diskGb}GB --boot-disk-type=hyperdisk-balanced ` +
-        `--boot-disk-provisioned-iops=10000 --boot-disk-provisioned-throughput=400 ` +
-        `--accelerator=type=nvidia-l4,count=${img.gpu} --maintenance-policy=TERMINATE ` +
-        `--network=${GCP_NETWORK} --scopes=cloud-platform --service-account=${GCP_SERVICE_ACCOUNT} ` +
-        `--metadata=startup-script='${esc(vmStartupScript(img, tagHash))}',serial-port-logging-enable=true`
-    );
+      // Instance template — GPU VM on the baked custom image. Boot disk is Hyperdisk Balanced with
+      // provisioned throughput: model load into VRAM is disk-throughput-bound (a 60GB pd-ssd caps at
+      // ~30MB/s → minutes; 400MB/s loads a 5GB model in ~13s at ~$0.02/hr). Hash-keyed name → skip
+      // create when unchanged (byte-identical template) so an unchanged redeploy doesn't roll the VMs.
+      progress.phase(img.name, "deploying");
+      await ensureTemplate({
+        template, hashNote: ` (${hash})`,
+        createCmd:
+          `gcloud compute instance-templates create ${template} --project=${GCP_PROJECT_ID} ` +
+          `--machine-type=${machineType} ` +
+          `--image=${gceImage} --image-project=${GCP_PROJECT_ID} ` +
+          `--boot-disk-size=${img.diskGb}GB --boot-disk-type=hyperdisk-balanced ` +
+          `--boot-disk-provisioned-iops=10000 --boot-disk-provisioned-throughput=400 ` +
+          `--accelerator=type=nvidia-l4,count=${img.gpu} --maintenance-policy=TERMINATE ` +
+          `${VM_NET_FLAGS} ` +
+          vmMetadataFlag(vmStartupScript(img, tagHash)),
+      });
 
-    // Clean up legacy Zonal MIG if it exists to avoid conflicts.
-    // Errors are expected if it's already deleted or never existed.
-    if (APPLY) {
-      try {
-        execSync(
-          `gcloud compute instance-groups managed delete ${mig} ` +
-            `--project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} --quiet 2>/dev/null`,
-          { stdio: "ignore" }
-        );
-        console.log(`\nDeleted legacy Zonal MIG ${mig}`);
-      } catch {}
-    }
+      // Clean up legacy Zonal MIG if it exists to avoid conflicts.
+      // Errors are expected if it's already deleted or never existed.
+      if (APPLY) {
+        try {
+          execSync(
+            `gcloud compute instance-groups managed delete ${mig} ` +
+              `--project=${GCP_PROJECT_ID} --zone=${GCP_ZONE} --quiet 2>/dev/null`,
+            { stdio: "ignore" }
+          );
+          console.log(`\nDeleted legacy Zonal MIG ${mig}`);
+        } catch { /* already deleted or never existed */ }
+      }
 
-    cleanupOldTemplates(img.name);
+      await cleanupOldTemplates(img.name);
 
-    // MIG + autoscaler on Pub/Sub backlog (scale 0 → maxReplicas), one per L4 region so a
-    // region-wide stockout in any single region can't stall the whole model. All regions'
-    // autoscalers watch the SAME subscription (see WORKER_REGIONS note re: burst over-provisioning).
-    for (const [region, zones] of WORKER_REGIONS) {
-      // Fixed max-surge must be 0 or ≥ the region's zone count (percent surge is rejected on
-      // scale-to-zero MIGs), so surge = zones.length: one fresh instance per zone.
-      const surge = zones.length;
-      const zoneList = zones.map((z) => `${region}-${z}`).join(",");
+      // MIG + autoscaler on Pub/Sub backlog (scale 0 → maxReplicas), one per L4 region so a
+      // region-wide stockout in any single region can't stall the whole model. All regions'
+      // autoscalers watch the SAME subscription (see WORKER_REGIONS note re: burst over-provisioning).
+      for (const [region, zones] of WORKER_REGIONS) {
+        // Fixed max-surge must be 0 or ≥ the region's zone count (percent surge is rejected on
+        // scale-to-zero MIGs), so surge = zones.length: one fresh instance per zone.
+        const surge = zones.length;
+        const zoneList = zones.map((z) => `${region}-${z}`).join(",");
 
-      let migExists = false;
-      try {
-        execSync(
-          `gcloud compute instance-groups managed describe ${mig} ` +
-            `--project=${GCP_PROJECT_ID} --region=${region} --format="value(name)"`,
-          { stdio: "pipe" }
-        );
-        migExists = true;
-      } catch { /* doesn't exist yet */ }
-
-      if (migExists) {
-        // set-instance-template only changes the recipe for instances created AFTER this call —
-        // it does NOT touch already-running ones. A broken instance from a bad deploy would sit
-        // there serving (or failing to serve) traffic indefinitely, undetected, through every
-        // later "successful" deploy. rolling-action actually replaces existing instances: brings
-        // up a new one on the new template BEFORE removing an old one (max-unavailable=0), so a
-        // broken new template surfaces as a stuck rollout instead of silently orphaning nothing.
-        run(
-          `gcloud compute instance-groups managed set-instance-template ${mig} ` +
-            `--project=${GCP_PROJECT_ID} --region=${region} --template=${template}`
-        );
-        run(
-          `gcloud compute instance-groups managed rolling-action start-update ${mig} ` +
-            `--project=${GCP_PROJECT_ID} --region=${region} --version=template=${template} ` +
-            `--max-surge=${surge} --max-unavailable=0`
-        );
-      } else {
-        run(
+        await ensureMigOnTemplate({
+          mig, region, template, surge,
           // Explicit L4 zones so a fixed max-surge stays legal (surge must be 0 or ≥ zone count),
           // with target-distribution-shape=ANY so the MIG places wherever L4 capacity exists among
           // those zones instead of forcing an even spread — dodges single-zone stockouts.
-          `gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} ` +
+          createCmd:
+            `gcloud compute instance-groups managed create ${mig} --project=${GCP_PROJECT_ID} ` +
             `--region=${region} --template=${template} --size=0 ` +
-            `--zones=${zoneList} --target-distribution-shape=ANY`
-        );
-      }
-      // Only the PRIMARY region autoscales. Siblings keep a ready size-0 MIG but NO active
-      // autoscaler — otherwise every region races the SHARED subscription and one message spawns
-      // MIGs in every region ("all over the place"). Failover to a sibling is manual for now
-      // (set PRIMARY_REGION, or scripts/restore-workers.sh) until capacity steering is wired.
-      if (region === PRIMARY_REGION) {
-        setMigAutoscaling({ mig, region, subscription: img.subscription, maxReplicas: img.maxReplicas, singleInstanceAssignment: img.parallel });
-        console.log(`  ✓ ${img.name} MIG ${mig} in ${region} PRIMARY (0→${img.maxReplicas}, ${img.parallel} msg/box)`);
-      } else {
-        // Clear any autoscaler a prior deploy left on this sibling; leave it at size 0, standby.
-        try {
-          execSync(`gcloud compute instance-groups managed stop-autoscaling ${mig} --project=${GCP_PROJECT_ID} --region=${region}`, { stdio: "ignore" });
-        } catch { /* no autoscaler to stop — fine */ }
-        console.log(`  ✓ ${img.name} MIG ${mig} in ${region} standby (no autoscaler)`);
-      }
-    }
+            `--zones=${zoneList} --target-distribution-shape=ANY`,
+          skipMsg: `  ✓ ${mig} in ${region} already on ${template} — no roll.`,
+        });
 
-    console.log(`\nPrepared: ${img.name} → ${tagHash} across ${WORKER_REGIONS.length} region(s) (${img.gpu}× L4, 0→${img.maxReplicas})`);
-    return img.name;
+        // Only the PRIMARY region autoscales. Siblings keep a ready size-0 MIG but NO active
+        // autoscaler — otherwise every region races the SHARED subscription and one message spawns
+        // MIGs in every region ("all over the place"). Failover to a sibling is manual for now
+        // (set PRIMARY_REGION, or scripts/restore-workers.sh) until capacity steering is wired.
+        if (region === PRIMARY_REGION) {
+          await setMigAutoscaling({ mig, region, subscription: img.subscription, maxReplicas: img.maxReplicas, singleInstanceAssignment: img.parallel });
+          console.log(`  ✓ ${img.name} MIG ${mig} in ${region} PRIMARY (0→${img.maxReplicas}, ${img.parallel} msg/box)`);
+        } else {
+          // Clear any autoscaler a prior deploy left on this sibling; leave it at size 0, standby.
+          // run() prints the plan under dry-run and no-ops; a missing autoscaler just rejects → ignore.
+          try {
+            await run(`gcloud compute instance-groups managed stop-autoscaling ${mig} --project=${GCP_PROJECT_ID} --region=${region}`);
+          } catch { /* no autoscaler to stop — fine */ }
+          console.log(`  ✓ ${img.name} MIG ${mig} in ${region} standby (no autoscaler)`);
+        }
+      }
+
+      console.log(`\nPrepared: ${img.name} → ${tagHash} across ${WORKER_REGIONS.length} region(s) (${img.gpu}× L4, 0→${img.maxReplicas})`);
+      progress.done(img.name);
+      return img.name;
+     } catch (err) {
+      progress.fail(img.name);   // dumps this image's captured log so the error is visible
+      throw err;
+     }
+    });
   }));
+
+  progress.stop();
 
   const failed = results
     .map((r, i) => ({ r, name: plan[i].img.name }))
@@ -790,7 +973,19 @@ async function deploy() {
   if (failed.length) throw new Error(`${failed.length}/${results.length} model(s) failed to deploy — see above.`);
 }
 
-deploy().catch((err) => {
-  console.error("Deploy failed:", err.message);
-  process.exit(1);
-});
+// Run only when invoked directly (`node scripts/deploy.js`, as npm run deploy:workers does) — NOT
+// when imported (e.g. a test importing createProgress), which would otherwise trigger a real deploy.
+const invokedDirectly =
+  process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+
+// Force exit on success too: setupPubSub / the Mongo read leave open gRPC + socket handles, so Node's
+// event loop never drains and the process hangs after "Deploy complete" (all real work is already
+// done by the time deploy() resolves). Without this, every deploy leaks a stuck process.
+if (invokedDirectly) {
+  deploy()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error("Deploy failed:", err.message);
+      process.exit(1);
+    });
+}

@@ -1,114 +1,165 @@
-// Capacity-steering controller — PHASE 1, OBSERVE-ONLY (docs/plans/capacity-steering/plan.md).
+// Capacity-steering controller — PHASE 2, the DIRECT-INVENTORY control loop
+// (docs/plans/capacity-steering/phase2-control-loop.md).
 //
-// It reacts to enqueue / stockout / success events, keeps the durable Mongo stats + state, and
-// RECORDS the decision it *would* make (wouldOpen / wouldPark). It issues NO Compute `--mode` calls
-// this phase — actuation lands in Phase 2 with the same selection output, no model change.
+// It reacts to detect / enqueue / stockout / success events, keeps the durable Mongo stats + state,
+// RECORDS the decision (wouldOpen / wouldPark), and now ACTUATES it by setting the model's regional MIG
+// size itself (start +1 / shrink −1 / release a finished box) via ./actuate.js.
 //
-// Every hook is wrapped so a capacity failure can NEVER break the job path: Mongo/GCP unavailable →
-// swallow + log, never throw into publish/completion. GCE-gated exactly like worker/idle-shutdown.js
-// (IS_PROD / K_SERVICE): dev (waker + emulator) records nothing and touches no GCP.
+// RECORDING + DECIDING run EVERYWHERE — dev (emulator/waker) AND prod — so the dashboard always
+// reflects reality. The ONLY prod-gated thing is the GCE call itself, and that gate lives INSIDE
+// actuate.js (off-prod → structured would-log, zero GCP). Every hook is wrapped so a capacity failure
+// can NEVER break the job path: Mongo/GCP unavailable → swallow + log, never throw into publish/
+// completion.
 import { discoverL4Regions } from "./regions.js";
 import { scoreRegionDaypart, select } from "./score.js";
-import { daypartOf, windowRows, getState, setState, incOk, incFail, setCooldown, recordMessageDetected } from "./store.js";
+import { daypartOf, windowRows, getState, setState, incOk, incFail, bumpStockoutStreak, recordMessageDetected } from "./store.js";
+import { startBox, shrinkBox, releaseBox, topicOfInstance } from "./actuate.js";
 
-// After a region stockout, veto it from selection for this long (see select() in score.js — the
-// cooldown is a soft veto: if EVERY region is cooling down it's dropped and the highest wins).
-const COOLDOWN_MS = 15 * 60 * 1000;
+// A region is PARKED once it stocks out this many times IN A ROW (see select() in score.js). A fixed
+// timer was wrong — a region that keeps failing is exhausted, and one that recovers is re-probed by
+// exploration and reset by its next success. Tunable via CAPACITY_MAX_STOCKOUTS (default 3).
+const MAX_STOCKOUTS = parseInt(process.env.CAPACITY_MAX_STOCKOUTS, 10) || 3;
 
 // The real modules, injectable so the controller unit-tests with no Mongo/GCP (see controller.test.js).
-const defaultDeps = { discoverL4Regions, windowRows, getState, setState, incOk, incFail, setCooldown, recordMessageDetected };
-
-// Prod-like = the orchestrator running on Cloud Run (K_SERVICE) or with NODE_ENV=production. Dev
-// (emulator / waker) is neither, so onEnqueue no-ops there and records nothing. Mirrors worker's
-// IS_PROD gate; kept a function (not a const) so tests can flip the env per-case.
-function isProdLike() {
-  return /prod(uction)?/i.test(process.env.NODE_ENV || "") || !!process.env.K_SERVICE;
-}
+// Phase 2 adds the actuators (start/shrink/release) — they self-gate on prod INSIDE actuate.js, so the
+// RECORDING here runs everywhere (dev + prod) and only the GCE call is prod-gated.
+const defaultDeps = { discoverL4Regions, windowRows, getState, setState, incOk, incFail, bumpStockoutStreak, recordMessageDetected, startBox, shrinkBox, releaseBox };
 
 // The observe-only decision. Discover the L4 candidate regions, score each for the CURRENT daypart
-// over its in-window rows, pair each with its cooldown from state, then select() the winner. Records
-// { wouldOpen, wouldPark } on the winner's state doc and returns it. Issues NO Compute calls.
-export async function decide(nowMs, deps = defaultDeps) {
+// over its in-window rows, pair each with its consecutive-stockout streak from state, then select() the
+// winner. Records { wouldOpen, wouldPark } on the winner's state doc and returns it. Issues NO Compute
+// calls. `rand` injectable (like `deps`) so the shadow decision is deterministic under test.
+export async function decide(nowMs, deps = defaultDeps, rand = Math.random) {
   const daypart = daypartOf(nowMs);
   const regions = await deps.discoverL4Regions();
   if (!regions || regions.length === 0) return { wouldOpen: null, wouldPark: [] };
 
   const states = await deps.getState();
-  const cooldownByRegion = new Map((states || []).map((s) => [s.region, s.cooldownUntil]));
+  const streakByRegion = new Map((states || []).map((s) => [s.region, s.consecutiveStockouts]));
 
   const scored = [];
   for (const region of regions) {
     const rows = await deps.windowRows(region, daypart, nowMs);
-    scored.push({ region, score: scoreRegionDaypart(rows), cooldownUntil: cooldownByRegion.get(region) ?? null });
+    scored.push({ region, score: scoreRegionDaypart(rows), consecutiveStockouts: streakByRegion.get(region) ?? 0 });
   }
 
-  const winner = select(scored, nowMs);
+  const winner = select(scored, nowMs, { maxStockouts: MAX_STOCKOUTS }, rand);
   const wouldOpen = winner ? winner.region : null;
   const wouldPark = regions.filter((r) => r !== wouldOpen);
 
   if (wouldOpen) {
     await deps.setState(wouldOpen, { wouldOpen, wouldPark, decidedAt: nowMs, decidedDaypart: daypart });
   }
+  // Structured "I know what to do" signal — the decision the controller WOULD actuate this cycle
+  // (Phase 2 turns this into real --mode toggles). Emitted on EVERY decide() so a log-based metric can
+  // track it; onStockout/onOutcome re-decide through here, so their would-decision is logged too.
+  console.log(JSON.stringify({ message: `[capacity] WOULD open ${wouldOpen} · park ${wouldPark.join(",")}`, capacityEvent: "decide", wouldOpen, wouldPark }));
   return { wouldOpen, wouldPark };
 }
 
 // Message-detected hook — fired event-driven by the detect subscriptions (one per model topic →
 // /ai/capacity-detect → handleDetectMessage), so EVERY enqueue is caught regardless of publisher.
-// Observe phase: records the detection + runs decide() to record what it WOULD open. Phase 2 will
-// actuate (enable the chosen region) here. Prod-gated; never throws.
-export async function onMessageDetected(topic, nowMs = Date.now(), deps = defaultDeps) {
-  if (!isProdLike()) return { skipped: "not-prod" };
+// Records the detection + runs decide(), then ACTUATES: startBox(topic, winner) boots a box in the
+// chosen region (resize +1). Recording + deciding run EVERYWHERE (dev + prod); startBox self-gates on
+// prod inside actuate.js (dev → would-log, no GCE call). Never throws into the detect path.
+export async function onMessageDetected(topic, nowMs = Date.now(), deps = defaultDeps, rand = Math.random) {
   try {
     await deps.recordMessageDetected(topic, nowMs);
-    return { detected: topic, ...(await decide(nowMs, deps)) };
+    const decision = await decide(nowMs, deps, rand);
+    await deps.startBox(topic, decision.wouldOpen);
+    return { detected: topic, ...decision };
   } catch (e) {
     console.error(`[capacity] onMessageDetected(${topic}) swallowed: ${e?.message}`);
     return { error: e?.message };
   }
 }
 
-// Enqueue hook — called fire-and-forget from the dispatch publish path. Prod-gated: no-op in dev
-// (records nothing, touches no GCP). Any failure is swallowed + logged so it can never propagate
-// into the publish path.
-export async function onEnqueue(nowMs, deps = defaultDeps) {
-  if (!isProdLike()) return { skipped: "not-prod" };
+// Enqueue hook — called fire-and-forget from the dispatch publish path. Runs decide() everywhere (dev
+// + prod) so the stored wouldOpen stays fresh; it does not actuate (onMessageDetected owns the +1).
+// Any failure is swallowed + logged so it can never propagate into the publish path.
+export async function onEnqueue(nowMs, deps = defaultDeps, rand = Math.random) {
   try {
-    return await decide(nowMs, deps);
+    return await decide(nowMs, deps, rand);
   } catch (e) {
     console.error(`[capacity] onEnqueue swallowed: ${e?.message}`);
     return { error: e?.message };
   }
 }
 
-// Stockout hook — invoked by the deploy-time Cloud Logging sink handler (below) on a
-// ZONE_RESOURCE_POOL_EXHAUSTED for `region`. $inc fail on the region's current daypart, veto it via
-// cooldown, stamp lastStockoutTs, then re-decide. Wrapped so it never throws into its caller.
-export async function onStockout(region, nowMs, deps = defaultDeps) {
+// Stockout hook — invoked (via recorder / the log-sink handler below) on a ZONE_RESOURCE_POOL_EXHAUSTED
+// for `region` while trying to boot `model`'s MIG there. Recording runs everywhere: $inc fail on the
+// region's current daypart, bump the consecutive-stockout streak (also stamps lastStockoutTs), then
+// re-decide. The streak — NOT a timer — parks the region once it hits MAX_STOCKOUTS in select(), so the
+// post-bump decide() already excludes a just-parked region and names the NEXT best as wouldOpen.
+// ACTUATION only at the 3rd consecutive stockout (streak >= MAX_STOCKOUTS): shrinkBox(model, region)
+// abandons the exhausted region (resize −1), then startBox(model, next) boots a box in the cascaded-to
+// region. Under 3 in a row we touch NO inventory — the MIG retries its own boot. `model` may be null
+// (unresolved topic) → recording still happens, actuation is skipped. Wrapped so it never throws.
+export async function onStockout(region, nowMs, model = null, deps = defaultDeps, rand = Math.random) {
   try {
     await deps.incFail(region, nowMs);
-    await deps.setCooldown(region, nowMs + COOLDOWN_MS);
-    await deps.setState(region, { lastStockoutTs: nowMs });
-    return await decide(nowMs, deps);
+    await deps.bumpStockoutStreak(region, nowMs);
+    const decision = await decide(nowMs, deps, rand);
+    if (model) {
+      const states = await deps.getState();
+      const streak = states.find((s) => s.region === region)?.consecutiveStockouts || 0;
+      if (streak >= MAX_STOCKOUTS) {
+        await deps.shrinkBox(model, region);
+        // decision.wouldOpen is the fresh post-bump winner, which now EXCLUDES the just-parked region
+        // (select() vetoes streak>=MAX). Cascade the +1 there; skip if there's nowhere else to go.
+        if (decision.wouldOpen && decision.wouldOpen !== region) {
+          await deps.startBox(model, decision.wouldOpen);
+        }
+      }
+    }
+    return decision;
   } catch (e) {
     console.error(`[capacity] onStockout(${region}) swallowed: ${e?.message}`);
     return { error: e?.message };
   }
 }
 
-// Success hook — $inc ok on the region's current daypart + stamp lastSuccessTs. Wrapped so it never
-// throws into its caller.
-//
-// NOT WIRED YET: the completion point (dispatch/step.js `advance` on a successful step) does not know
-// which REGION the worker ran in — the orchestrator publishes to a model topic, not a region, and a
-// step's run docs carry no region. Wiring this needs the worker to stamp its region (from the
-// instance metadata server) onto the run doc / step report first. Exported + left for that follow-up.
-export async function onSuccess(region, nowMs, deps = defaultDeps) {
+// Outcome hook — the wired job-DONE signal. The worker publishes an `outcome` event (action:"outcome")
+// to the orchestrate topic on EVERY job's completion (queries included), carrying the region it ran in
+// (from instance metadata) and the terminal run status. This is the ONE place `ok` is now recorded (the
+// worker no longer writes it directly). Recording model:
+//   success → $inc ok on the region's current daypart, stamp lastSuccessTs AND reset the
+//             consecutive-stockout streak to 0 (any success un-parks the region), then re-decide (a fresh
+//             success can flip the winner, so the stored wouldOpen stays current for the dashboard).
+//   fail    → a ran-but-failed job is NOT a capacity signal (the box existed; the model failed) → LOG
+//             only, no store.
+// Recording + the success log + decide() run EVERYWHERE (dev + prod). After the re-decide it ACTUATES:
+// releaseBox(model, region, instance) targeted-deletes the specific finished box (resize-safe). Only the
+// GCE call inside releaseBox is prod-gated (dev → would-log). `model`/`instance` ride the worker's
+// outcome event; if instance is absent releaseBox falls back to a logged size−1 (see actuate.js).
+// Wrapped so a capacity failure can never propagate into the job path — fired fire-and-forget off the
+// orchestrate push.
+export async function onOutcome(region, status, nowMs = Date.now(), model = null, instance = null, deps = defaultDeps, rand = Math.random) {
   try {
+    if (!region) { console.warn("[capacity] onOutcome: no region on the outcome event — skipping"); return { skipped: "no-region" }; }
+    if (status !== "success") {
+      console.log(JSON.stringify({ message: `[capacity] job FAIL ${region} — not stored`, capacityEvent: "job_fail", region, status }));
+      return { skipped: "job-fail" };
+    }
     await deps.incOk(region, nowMs);
-    await deps.setState(region, { lastSuccessTs: nowMs });
+    await deps.setState(region, { lastSuccessTs: nowMs, consecutiveStockouts: 0 });
+    // Every success registers a structured log, matching detect / stockout / job_fail.
+    console.log(JSON.stringify({ message: `[capacity] job DONE → ok ${region}`, capacityEvent: "ok", region, model: model ?? null }));
+    const decision = await decide(nowMs, deps, rand);
+    await deps.releaseBox(model, region, instance);
+    return decision;
   } catch (e) {
-    console.error(`[capacity] onSuccess(${region}) swallowed: ${e?.message}`);
+    console.error(`[capacity] onOutcome(${region}) swallowed: ${e?.message}`);
+    return { error: e?.message };
   }
+}
+
+// events.js adapter — routed from the `orchestrate` topic push by action:"outcome". events.js has
+// already decoded the Pub/Sub envelope into `payload`; pull region + status + the model (topic) and the
+// finished instance (self-link) the worker now carries, and hand them to onOutcome so releaseBox can
+// target THAT box. Never throws (onOutcome swallows).
+export async function handleOutcomeEvent(payload) {
+  return onOutcome(payload?.region, payload?.status, Date.now(), payload?.model ?? null, payload?.instance ?? null);
 }
 
 // Cloud Logging sink → this handler. The Eventarc trigger / log sink that matches
@@ -121,7 +172,10 @@ export async function handleStockoutLog(entry, nowMs = Date.now()) {
       console.warn("[capacity] stockout log had no resolvable region — ignoring");
       return { skipped: "no-region" };
     }
-    return await onStockout(region, nowMs);
+    // The failed instance name (…/instances/<name>) carries the model — recover its topic so shrink/
+    // start actuate the right MIG. Null (unrecognized name) → recording still runs, actuation skipped.
+    const name = (entry?.protoPayload?.resourceName || "").split("/instances/")[1] || "";
+    return await onStockout(region, nowMs, topicOfInstance(name));
   } catch (e) {
     console.error(`[capacity] handleStockoutLog swallowed: ${e?.message}`);
     return { error: e?.message };

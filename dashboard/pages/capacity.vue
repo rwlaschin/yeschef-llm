@@ -4,10 +4,55 @@
       <div class="min-w-0">
         <h1 class="text-2xl font-serif text-primary whitespace-nowrap">Capacity Scoreboard</h1>
         <p class="text-sm text-muted mt-1 max-w-2xl">
-          30-day sliding-window success score per region × hour for
-          <span class="text-secondary">{{ dowLabel }}</span>. The controller opens one region
-          (<code>mode=on</code>) and parks the rest. Score = <code>ow·Σok − fw·Σfail</code>.
+          30-day sliding-window success score per region × hour
+          <template v-if="view === 'dow'">for <span class="text-secondary">{{ dowLabel }}</span>.</template>
+          <template v-else>over the last <span class="text-secondary">{{ windowDays }} days</span> (continuous, local time).</template>
+          The controller opens one region (<code>mode=on</code>) and parks the rest. Score =
+          <code>ow·Σok − fw·Σfail</code>.
         </p>
+
+        <!-- View switcher (+ timeline-only window / x-ray controls). Left panel, per spec. -->
+        <div class="flex flex-wrap items-center gap-3 mt-3 text-xs">
+          <div class="flex rounded-lg overflow-hidden border border-white/10">
+            <button
+              v-for="opt in VIEW_OPTIONS"
+              :key="opt.id"
+              type="button"
+              @click="view = opt.id"
+              :class="view === opt.id ? 'bg-amber-500/20 text-amber-400' : 'text-secondary hover:text-primary'"
+              class="px-2.5 py-1 transition inline-flex items-center gap-1.5"
+            >
+              <CalendarDaysIcon v-if="opt.id === 'dow'" class="w-3.5 h-3.5" />
+              <Square2StackIcon v-else class="w-3.5 h-3.5" />
+              {{ opt.label }}
+            </button>
+          </div>
+
+          <template v-if="view === 'timeline'">
+            <div class="flex items-center gap-1">
+              <span class="text-muted mr-1">Window</span>
+              <div class="flex rounded-lg overflow-hidden border border-white/10">
+                <button
+                  v-for="w in WINDOW_OPTIONS"
+                  :key="w"
+                  type="button"
+                  @click="windowDays = w"
+                  :class="windowDays === w ? 'bg-amber-500/20 text-amber-400' : 'text-secondary hover:text-primary'"
+                  class="px-2 py-1 transition"
+                >{{ w }}d</button>
+              </div>
+            </div>
+            <button
+              type="button"
+              @click="xray = !xray"
+              :class="xray ? 'bg-amber-500/20 text-amber-400 border-amber-500/40' : 'text-secondary hover:text-primary border-white/10'"
+              class="px-2.5 py-1 rounded-lg border transition inline-flex items-center gap-1.5"
+              title="Overlay the prior-day same-hour value as a ghosted underlay behind each cell"
+            >
+              <Square2StackIcon class="w-3.5 h-3.5" /> x-ray
+            </button>
+          </template>
+        </div>
       </div>
       <div class="flex items-center gap-3">
         <!-- Auto-refresh interval (persisted to localStorage). Off = manual only. -->
@@ -63,16 +108,17 @@
       <!-- Active region + params -->
       <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div class="flex items-center gap-3">
-          <span class="text-[13px] text-secondary">Active region</span>
+          <span class="text-[13px] text-secondary">Active regions</span>
           <span
-            v-if="data.activeRegion"
+            v-for="ar in (data.activeRegions || [])"
+            :key="ar"
             class="text-[11px] px-2.5 py-0.5 rounded-full border inline-flex items-center gap-1.5"
             style="background: rgba(12,163,12,0.16); color:#5fd25f; border-color: rgba(12,163,12,0.45)"
           >
-            <CheckCircleIcon class="w-3 h-3" /> {{ data.activeRegion }} · mode=on
+            <CheckCircleIcon class="w-3 h-3" /> {{ ar }}<span v-if="(data.boxesByRegion || {})[ar] > 1"> · {{ data.boxesByRegion[ar] }} boxes</span>
           </span>
           <span
-            v-else
+            v-if="!(data.activeRegions || []).length"
             class="text-[11px] px-2.5 py-0.5 rounded-full border inline-flex items-center gap-1.5 tag-muted"
           >
             <PauseCircleIcon class="w-3 h-3" /> none active
@@ -82,12 +128,12 @@
         <div class="text-[11px] text-muted flex flex-wrap items-center gap-2 font-mono">
           <span>ow {{ data.params.ow }} · fw {{ data.params.fw }}</span>
           <span>·</span><span>window {{ data.params.windowDays }}d</span>
-          <span>·</span><span>cooldown {{ data.params.cooldownMin }}m</span>
+          <span>·</span><span>park at {{ data.params.maxStockouts }} stockouts</span>
         </div>
       </div>
 
       <!-- Heatmap: region × 24 hours. Fixed min-height so an empty scoreboard keeps its shape. -->
-      <div class="overflow-x-auto relative" style="min-height: 170px">
+      <div v-if="view === 'dow'" class="overflow-x-auto relative" style="min-height: 170px">
         <table class="border-separate" style="border-spacing: 2px">
           <thead>
             <tr>
@@ -107,11 +153,11 @@
             <tr v-for="r in data.regions" :key="r.region">
               <td
                 class="text-right pr-2 whitespace-nowrap"
-                :class="r.region === data.activeRegion ? '' : 'text-secondary'"
-                :style="r.region === data.activeRegion ? 'color:#5fd25f' : ''"
+                :class="isActive(r.region) ? '' : 'text-secondary'"
+                :style="isActive(r.region) ? 'color:#5fd25f' : ''"
                 style="font-size: 11px"
               >
-                {{ r.region }}<span v-if="r.region === data.activeRegion"> ●</span>
+                {{ r.region }}<span v-if="isActive(r.region)"> ●</span>
               </td>
               <td v-for="(cell, h) in r.hours" :key="`${r.region}-${h}`" style="padding: 0">
                 <div
@@ -136,8 +182,8 @@
         </div>
       </div>
 
-      <!-- Hover detail -->
-      <div class="h-5 mt-2 text-[11px] font-mono text-secondary">
+      <!-- Hover detail (day-of-week) -->
+      <div v-if="view === 'dow'" class="h-5 mt-2 text-[11px] font-mono text-secondary">
         <template v-if="hover">
           <span class="text-strong">{{ hover.r.region }}</span>
           · {{ dowLabel }} {{ hh(hover.h) }}:00 {{ data.tz }} ·
@@ -146,6 +192,90 @@
             · ok {{ hover.cell.ok }} · fail {{ hover.cell.fail }} · n {{ hover.cell.n }}
           </template>
           <template v-else>no data</template>
+        </template>
+      </div>
+
+      <!-- Rolling N-day timeline: region × continuous (date, hour) strip. Horizontally scrollable;
+           ~168 cells/row at 7d. Reuses .heatcell + the diverging scale. x-ray overlays the prior-day
+           same-hour value as a faint underlay behind each cell. -->
+      <div v-if="view === 'timeline' && data.timeline" class="overflow-x-auto relative" style="min-height: 170px">
+        <table class="border-separate" style="border-spacing: 2px">
+          <thead>
+            <tr>
+              <td></td>
+              <td
+                v-for="d in data.timeline.dates"
+                :key="d"
+                :colspan="24"
+                class="text-left align-bottom text-muted tl-col-daystart"
+                :class="d === tlToday ? 'text-strong font-semibold' : ''"
+                style="font-size: 9px; padding: 0 0 2px 5px"
+              >
+                {{ tlDayLabel(d) }}
+              </td>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="rt in data.timeline.regions" :key="rt.region">
+              <td
+                class="text-right pr-2 whitespace-nowrap"
+                :class="isActive(rt.region) ? '' : 'text-secondary'"
+                :style="isActive(rt.region) ? 'color:#5fd25f' : ''"
+                style="font-size: 11px"
+              >
+                {{ rt.region }}<span v-if="isActive(rt.region)"> ●</span>
+              </td>
+              <td
+                v-for="(cell, i) in rt.cells"
+                :key="i"
+                class="tl-td"
+                :class="{ 'tl-col-daystart': cell.hour === 0 }"
+              >
+                <div
+                  :class="tlCellClass(cell)"
+                  :title="tlTitle(rt.region, cell)"
+                  @mouseenter="tlHover = { region: rt.region, cell }"
+                  @mouseleave="tlHover = null"
+                >
+                  <span
+                    v-if="xray && cell.prevScore !== null"
+                    class="tl-ghost"
+                    :style="{ background: bg(cell.prevScore) }"
+                  ></span>
+                  <span
+                    v-if="cell.n > 0"
+                    class="tl-cur"
+                    :class="{ inset: xray && cell.prevScore !== null }"
+                    :style="{ background: bg(cell.score) }"
+                  >
+                    <span v-if="isNowSlot(cell)" class="tl-num">{{ cell.score }}</span>
+                  </span>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div
+          v-if="!data.timeline.regions.length"
+          class="absolute inset-0 flex items-center justify-center text-xs text-muted pointer-events-none"
+        >
+          No regions yet — the scoreboard fills in as jobs run.
+        </div>
+      </div>
+
+      <!-- Hover detail (timeline) -->
+      <div v-if="view === 'timeline'" class="h-5 mt-2 text-[11px] font-mono text-secondary">
+        <template v-if="tlHover">
+          <span class="text-strong">{{ tlHover.region }}</span>
+          · {{ tlHover.cell.ts }} {{ data.tz }} ·
+          <template v-if="tlHover.cell.n > 0">
+            score <span class="text-strong">{{ tlHover.cell.score }}</span>
+            · ok {{ tlHover.cell.ok }} · fail {{ tlHover.cell.fail }} · n {{ tlHover.cell.n }}
+          </template>
+          <template v-else>no data</template>
+          <template v-if="xray && tlHover.cell.prevScore !== null">
+            · <span class="text-muted">prev-day {{ tlHover.cell.prevScore }} (ok {{ tlHover.cell.prevOk }} · fail {{ tlHover.cell.prevFail }})</span>
+          </template>
         </template>
       </div>
 
@@ -170,6 +300,12 @@
           <span class="rounded inline-block align-middle focal" style="width:14px;height:14px;background:var(--pole-pos)"></span> recommended
         </span>
         <span>dim = low sample count</span>
+        <span v-if="view === 'timeline' && xray" class="inline-flex items-center gap-1.5">
+          <span class="rounded inline-block align-middle" style="width:14px;height:14px;position:relative;background:var(--pole-pos);opacity:0.3">
+            <span style="position:absolute;inset:3px;border-radius:2px;background:var(--pole-neg);opacity:1"></span>
+          </span>
+          x-ray · faint = prior day
+        </span>
       </div>
 
       <!-- State cards -->
@@ -212,12 +348,12 @@
               <span v-if="i === 0">● </span>{{ r.region }} · {{ r.currentScore }}
             </span>
           </div>
-          <p class="note">Cooldown veto dropped; highest score wins. Never returns "nowhere".</p>
+          <p class="note">Park veto dropped; highest score wins. Never returns "nowhere".</p>
         </div>
 
         <!-- Collecting: no region actively steered yet → running on seed / last-known-good. Shows
              through the whole collecting phase, not just when the window is literally empty. -->
-        <div v-if="!data.activeRegion" class="statecard" style="--accent:#a3a3a0">
+        <div v-if="!(data.activeRegions || []).length" class="statecard" style="--accent:#a3a3a0">
           <span class="accent"></span>
           <span class="tag"><ClockIcon class="w-3 h-3" /> collecting</span>
           <p class="herolabel">Running on seed / last-known-good</p>
@@ -272,19 +408,33 @@ import {
   EyeIcon,
   ClockIcon,
   ServerStackIcon,
+  CalendarDaysIcon,
+  Square2StackIcon,
 } from '@heroicons/vue/24/outline'
 
 const DOW_LABELS = { sun: 'Sunday', mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday' }
 
 const { env } = useEnvironment()
 
+// View + rolling-timeline controls. `windowDays` is part of the fetch query, so switching
+// windows re-fetches (Nitro route serves the matching timeline). view/xray are client-only.
+const VIEW_OPTIONS = [
+  { id: 'dow', label: 'Day-of-week' },
+  { id: 'timeline', label: 'Timeline' },
+]
+const WINDOW_OPTIONS = [7, 14, 30]
+const view = ref('dow')
+const windowDays = ref(7)
+const xray = ref(false)
+
 // Same data-fetching convention as the rest of the dashboard (Nitro route + useFetch),
-// re-fetching whenever the dev/prod toggle flips.
+// re-fetching whenever the dev/prod toggle flips or the timeline window changes.
 const { data, pending, refresh } = await useFetch('/api/capacity/scoreboard', {
-  query: { env },
+  query: { env, days: windowDays },
 })
 
 const hover = ref(null)
+const tlHover = ref(null)
 
 // Auto-refresh interval, persisted to localStorage. Off = manual refresh only.
 const REFRESH_OPTIONS = [
@@ -335,7 +485,8 @@ const bg = (s) => {
   return `color-mix(in oklab, ${pole} ${Math.round(t * 100)}%, var(--mid))`
 }
 
-const isFocal = (r, h) => r.region === data.value?.activeRegion && h === data.value?.now
+const isActive = (region) => (data.value?.activeRegions || []).includes(region)
+const isFocal = (r, h) => isActive(r.region) && h === data.value?.now
 const isLowSample = (cell) => cell && cell.n < (data.value?.params?.lowSample ?? 5)
 
 const cellClass = (r, cell, h) => {
@@ -358,6 +509,35 @@ const cellTitle = (r, cell, h) =>
 
 // Only the current-hour column (and the focal cell) shows its number, per the mockup.
 const showNum = (r, h) => h === data.value?.now || isFocal(r, h)
+
+// --- Timeline view helpers --------------------------------------------------
+const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+// "2026-07-17" → "Fri 17" (parse as UTC to avoid a local-tz off-by-one on the date math).
+const tlDayLabel = (d) => {
+  const [y, m, day] = d.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, day))
+  return `${WEEKDAY[dt.getUTCDay()]} ${String(day).padStart(2, '0')}`
+}
+// The newest local day in the window is "today"; its now-hour cell is the live one.
+const tlToday = computed(() => {
+  const dates = data.value?.timeline?.dates
+  return dates?.length ? dates[dates.length - 1] : null
+})
+const isNowSlot = (cell) => cell.date === tlToday.value && cell.hour === data.value?.now
+const tlEmpty = (cell) => cell.n === 0 && !(xray.value && cell.prevScore !== null)
+const tlCellClass = (cell) => {
+  const c = ['heatcell', 'tl']
+  if (tlEmpty(cell)) c.push('nodata')
+  if (cell.hour === 0) c.push('tl-daystart')
+  if (isNowSlot(cell)) c.push('nowband')
+  return c
+}
+const tlTitle = (region, cell) => {
+  const base = `${region} ${cell.ts} ${data.value?.tz || ''}`
+  const cur = cell.n > 0 ? `score ${cell.score} · ok ${cell.ok} · fail ${cell.fail} · n ${cell.n}` : 'no data'
+  const prev = xray.value && cell.prevScore !== null ? ` · prev-day ${cell.prevScore} (ok ${cell.prevOk} · fail ${cell.prevFail})` : ''
+  return `${base} — ${cur}${prev}`
+}
 
 const rel = (iso) => {
   const ms = Date.now() - new Date(iso).getTime()
@@ -393,9 +573,10 @@ const rel = (iso) => {
   text-shadow: 0 1px 1px rgba(0, 0, 0, 0.55);
 }
 .heatcell.nodata {
-  background: transparent !important;
-  background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.14) 0 2px, transparent 2px 5px) !important;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  /* Dark recessed fill so populated cells pop by contrast (even low-sample dim ones). */
+  background: rgba(0, 0, 0, 0.4) !important;
+  background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.09) 0 2px, transparent 2px 5px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 .heatcell.nowband {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
@@ -409,8 +590,9 @@ const rel = (iso) => {
 .nodata-swatch {
   width: 14px;
   height: 14px;
-  background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.14) 0 2px, transparent 2px 5px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.4);
+  background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.09) 0 2px, transparent 2px 5px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 .nowband {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
@@ -418,6 +600,54 @@ const rel = (iso) => {
 .focal {
   outline: 2px solid var(--pole-pos);
   outline-offset: 1px;
+}
+
+/* Timeline cells: same .heatcell footprint, but layered so the x-ray underlay (prior day)
+   can sit BEHIND the current value. Current block paints on top at full strength. */
+.heatcell.tl {
+  position: relative;
+  background: transparent;
+}
+.tl-ghost {
+  position: absolute;
+  inset: 0;
+  border-radius: 4px;
+  opacity: 0.3; /* clearly secondary — never competes with the current cell */
+  pointer-events: none;
+}
+.tl-cur {
+  position: absolute;
+  inset: 0;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* When a ghost is present, inset the current block so the prior layer peeks around it (x-ray). */
+.tl-cur.inset {
+  inset: 3px;
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+.tl-num {
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink, #f4f4f2);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
+}
+/* Current-hour ring (offset outline draws outside, so the layered spans don't cover it). */
+.heatcell.tl.nowband {
+  outline: 2px solid rgba(255, 255, 255, 0.6);
+  outline-offset: 1px;
+  box-shadow: none;
+}
+.tl-td {
+  padding: 0;
+}
+/* Light day boundary so the continuous strip stays readable. */
+.tl-col-daystart {
+  border-left: 1px solid rgba(255, 255, 255, 0.16);
+  padding-left: 4px;
 }
 
 /* State cards — accent bar + hero + chips, per the mockup. */

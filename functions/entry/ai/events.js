@@ -17,6 +17,7 @@ const HANDLERS = {
   build: lazy(() => import("./dispatch/build.js"), "handle"), // planner finished → build the step plan
   step: lazy(() => import("./dispatch/step.js"), "handle"),   // a step agent finished → process/advance
   finalize: lazy(() => import("./dispatch/finalize.js"), "handle"), // debug run finished → roll job status up (no advance)
+  outcome: lazy(() => import("./capacity/controller.js"), "handleOutcomeEvent"), // worker job DONE → capacity record (ok) + re-decide
 };
 
 export async function post(req, reply) {

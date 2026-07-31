@@ -21,11 +21,27 @@ import { setTimeout as sleep } from "timers/promises";
 import crypto from "node:crypto";
 import fs from "fs";
 import { renderDockerfile } from "../docker/render.js";
-import { setup as setupPubSub } from "../pubsub/setup.js";
+import { setup as setupPubSub } from "./setup-pubsub.js";
 import { killEmulators } from "./kill-emulators.js";
 import { devModels, subscriptionOf, imageOf, containerOf, FAKE_SUBSCRIPTION } from "../config/models.js";
 
 dotenvFlow.config();
+
+// Which part to run. Default "all" leaves `npm run dev` exactly as it was.
+//   --only=ai       the /ai orchestrator + Pub/Sub emulator. No Docker.
+//   --only=fake     ONLY the canned worker — the test-data generator. No Docker, no Ollama, no
+//                   image builds. This is what E2E and UI work should run against.
+//   --only=workers  the waker + real model containers + image builds. Needs Docker.
+//                   Pair with DEV_QUICK=1 to limit it to the smallest model (llama3.1:8b).
+// Split so a process manager can restart one without dropping the others: rebuilding a model image
+// shouldn't take the orchestrator down, and restarting /ai shouldn't kill warm containers.
+// Validated FIRST, before any env requirement, so a typo'd flag reports the typo.
+const ONLY = (process.argv.find((a) => a.startsWith("--only=")) || "").split("=")[1] || "all";
+if (!["all", "ai", "workers", "fake"].includes(ONLY)) {
+  throw new Error(`--only must be ai|fake|workers|all, got "${ONLY}"`);
+}
+const RUN_AI = ONLY === "all" || ONLY === "ai";
+const RUN_WORKERS = ONLY === "all" || ONLY === "workers";
 
 const { MONGO_URI, MONGO_DB, MONGO_COLLECTION, OLLAMA_API_KEY } = process.env;
 const OPENCLAW_GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "openclaw-dev-token";
@@ -257,31 +273,84 @@ function buildImage(m) {
   );
 }
 
-async function main() {
-  console.log("\n=== Starting Dev Environment (Docker) ===\n");
+// The Pub/Sub emulator is EPHEMERAL: its subscriptions are recreated on every /ai start, and the
+// worker's subscriber stream does not retry after "Subscription does not exist" — it closes for
+// good and then sits there deaf, silently swallowing every fake job while callers wait forever.
+// So block until the subscription is actually there before spawning the worker.
+async function waitForFakeSubscription(timeoutMs = 90_000) {
+  const { PubSub } = await import("@google-cloud/pubsub");
+  process.env.PUBSUB_EMULATOR_HOST = PUBSUB_EMULATOR_HOST;
+  const ps = new PubSub({ projectId: GCP_PROJECT_ID });
+  const deadline = Date.now() + timeoutMs;
+  let announced = false;
+  while (Date.now() < deadline) {
+    try {
+      const [exists] = await ps.subscription(FAKE_SUBSCRIPTION).exists();
+      if (exists) return true;
+    } catch { /* emulator not up yet */ }
+    if (!announced) { console.log(`Waiting for ${FAKE_SUBSCRIPTION} (provisioned by the /ai half)...`); announced = true; }
+    await sleep(1000);
+  }
+  return false;
+}
 
-  try {
-    sh("docker info");
-  } catch {
-    throw new Error("Docker is not running. Start Docker Desktop and retry.");
+async function startFakeWorker() {
+  if (!(await waitForFakeSubscription())) {
+    throw new Error(`${FAKE_SUBSCRIPTION} never appeared — is the /ai half running? (npm run dev:ai)`);
+  }
+  start("Fake worker", "node", ["worker/index.js"], {
+    PUBSUB_EMULATOR_HOST,
+    GCP_PROJECT_ID,
+    FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID,
+    SUBSCRIPTION_NAME: FAKE_SUBSCRIPTION,
+    MONGO_URI,
+    MONGO_DB,
+    MONGO_COLLECTION,
+    OLLAMA_MODEL: "canned",            // log-only on the fake path; the model is never called
+    OLLAMA_HOST: "http://127.0.0.1:0", // unused on the fake path
+  });
+}
+
+async function main() {
+  console.log(`\n=== Starting Dev Environment (${ONLY === "all" ? "Docker" : ONLY}) ===\n`);
+
+  // The canned worker is CPU-only — no Docker, no Ollama, no model images (fake-canned-mode.md).
+  // Running it alone is what makes E2E and UI work fast, so it must not be gated behind any of that.
+  if (ONLY === "fake") {
+    await startFakeWorker();
+    console.log("\n=== Fake/canned worker ready ===");
+    console.log(`  Draining : ${FAKE_SUBSCRIPTION}`);
+    console.log("  Fake jobs return deterministic canned output — no inference.\n");
+    return;
   }
 
-  // 0. Clean slate — remove any worker containers left over from a prior run
-  //    (e.g. a hard kill that skipped shutdown). A stale one bound to an old
-  //    subscription would otherwise block the waker from starting a fresh worker.
-  removeWorkerContainers();
+  // Only the worker half touches Docker, so --only=ai must not require Docker Desktop.
+  if (RUN_WORKERS) {
+    try {
+      sh("docker info");
+    } catch {
+      throw new Error("Docker is not running. Start Docker Desktop and retry.");
+    }
+
+    // 0. Clean slate — remove any worker containers left over from a prior run
+    //    (e.g. a hard kill that skipped shutdown). A stale one bound to an old
+    //    subscription would otherwise block the waker from starting a fresh worker.
+    removeWorkerContainers();
+  }
 
   // 0a. Free any emulator ports a prior run orphaned. A crash, a hard Ctrl-C, or a
   //     Docker-down exit can leave the firebase emulator (and its detached `java`
   //     child) bound to its port with no clean handle — which makes the NEXT
   //     `npm run dev` die with "port taken". Clearing them here makes startup
   //     self-healing, the same way removeWorkerContainers() handles stale workers.
-  const freed = killEmulators();
+  //     Only the /ai half owns those ports, so --only=workers must NOT clear them — it would kill
+  //     a perfectly healthy orchestrator running as its own process.
+  const freed = RUN_AI ? killEmulators() : 0;
   if (freed) console.log("Freed orphaned emulator port holder(s) from a prior run.");
 
   // 0b. The orchestrator (/ai) runs in the functions emulator alongside Pub/Sub.
   //     Install its deps on first run (the emulator needs functions/node_modules).
-  if (!fs.existsSync("functions/node_modules")) {
+  if (RUN_AI && !fs.existsSync("functions/node_modules")) {
     console.log("Installing orchestrator (functions) deps...");
     execSync("npm install", { cwd: "functions", stdio: "inherit" });
   }
@@ -290,28 +359,41 @@ async function main() {
   //    The orchestrator's startup creates the `orchestrate` topic + a push sub to
   //    its own /ai/events. Firestore stays PROD (no Firestore emulator) — the
   //    function writes there via the inherited GOOGLE_APPLICATION_CREDENTIALS, same as the workers.
-  start("Emulators (Pub/Sub + /ai orchestrator)", "firebase", [
-    "emulators:start",
-    "--only=pubsub,functions",
-    `--project=${GCP_PROJECT_ID}`,
-  ], {
-    GCP_PROJECT_ID,
-    FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID,
-    AI_BASE_URL, // point the orchestrate push sub at the local /ai/events
-    MONGO_URI, // the /ai function reads/writes the Step Library (plan_library) in Mongo
-    MONGO_DB,
-    // /ai/categorize uses the HOST's native Ollama (small model, always up).
-    CATEGORIZE_OLLAMA_HOST: process.env.CATEGORIZE_OLLAMA_HOST || "http://localhost:11434",
-    CATEGORIZE_OLLAMA_MODEL: process.env.CATEGORIZE_OLLAMA_MODEL || "llama3.2:3b",
-  });
-  console.log("Waiting for emulators (Pub/Sub + functions)...");
-  await sleep(8000);
+  if (RUN_AI) {
+    start("Emulators (Pub/Sub + /ai orchestrator)", "firebase", [
+      "emulators:start",
+      "--only=pubsub,functions",
+      `--project=${GCP_PROJECT_ID}`,
+    ], {
+      GCP_PROJECT_ID,
+      FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID,
+      AI_BASE_URL, // point the orchestrate push sub at the local /ai/events
+      MONGO_URI, // the /ai function reads/writes the Step Library (plan_library) in Mongo
+      MONGO_DB,
+      // /ai/categorize uses the HOST's native Ollama (small model, always up).
+      CATEGORIZE_OLLAMA_HOST: process.env.CATEGORIZE_OLLAMA_HOST || "http://localhost:11434",
+      CATEGORIZE_OLLAMA_MODEL: process.env.CATEGORIZE_OLLAMA_MODEL || "llama3.2:3b",
+    });
+    console.log("Waiting for emulators (Pub/Sub + functions)...");
+    await sleep(8000);
+  }
 
   // 2. Topics + subscriptions (emulator is ephemeral — every start).
   //    Dev provisions ONLY dev-capable models (the gpu:1 tiers: slim + the two
   //    OpenClaw tiers) — not the 70B (gpu:2) tiers, which need 2× L4.
+  //    Both halves need the emulator host, but only the /ai half PROVISIONS — with --only=workers
+  //    the topics already exist, and re-running setup would race the live orchestrator.
   process.env.PUBSUB_EMULATOR_HOST = PUBSUB_EMULATOR_HOST;
-  await setupPubSub(GCP_PROJECT_ID, selectedModels());
+  if (RUN_AI) await setupPubSub(GCP_PROJECT_ID, selectedModels());
+
+  if (!RUN_WORKERS) {
+    console.log("\n=== /ai orchestrator ready ===");
+    console.log(`  Pub/Sub Emulator : ${PUBSUB_EMULATOR_HOST}`);
+    console.log(`  Orchestrator /ai : ${AI_BASE_URL}`);
+    console.log(`  Firestore        : PROD (${process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID})`);
+    console.log("  (workers run separately — `npm run dev:workers`)\n");
+    return;
+  }
 
   if (DEV_MODELS.length === 0) throw new Error("No dev models configured — nothing for the waker to watch.");
 
@@ -341,21 +423,9 @@ async function main() {
     OPENCLAW_GATEWAY_TOKEN, // shared token for the OpenClaw gateway (gateway tiers)
   });
 
-  // 4b. Fake/canned worker — a bare node worker (no Docker, no Ollama) that drains the shared
-  //     fake subscription and returns canned responses. Fake jobs (fake:true) must NOT wake a
-  //     heavy model container, so they get their own lightweight runner that's always up. Boots
-  //     on Mongo + Pub/Sub only; Ollama is never touched on the canned path (see worker/index.js).
-  start("Fake worker", "node", ["worker/index.js"], {
-    PUBSUB_EMULATOR_HOST,
-    GCP_PROJECT_ID,
-    FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID,
-    SUBSCRIPTION_NAME: FAKE_SUBSCRIPTION,
-    MONGO_URI,
-    MONGO_DB,
-    MONGO_COLLECTION,
-    OLLAMA_MODEL: "canned",            // log-only on the fake path; the model is never called
-    OLLAMA_HOST: "http://127.0.0.1:0", // unused on the fake path
-  });
+  // 4b. Fake/canned worker — see startFakeWorker(). Runs here too so plain `npm run dev` is
+  //     unchanged; `--only=fake` runs it alone, with no Docker and no model builds.
+  await startFakeWorker();
 
   // 4. Build each dev model image if MISSING or STALE, sequentially (one `docker build` at a time —
   //    concurrent builds contend for the same disk/CPU). Stale = its baked recipe (model tag / gateway

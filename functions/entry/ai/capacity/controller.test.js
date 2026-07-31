@@ -1,13 +1,14 @@
 process.env.CAPACITY_TZ = "UTC"; // pin dayparts to UTC so the fixed expectations below hold
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decide, onStockout, onEnqueue, onSuccess, onMessageDetected, regionFromLogEntry } from "./controller.js";
+import { decide, onStockout, onEnqueue, onOutcome, handleOutcomeEvent, onMessageDetected, regionFromLogEntry } from "./controller.js";
 
-// A fully in-memory stand-in for store.js + regions.js — no Mongo, no GCP. Records every call so the
-// tests can assert what the controller wrote and prove it issues no Compute calls (there are none to
-// stub: the controller imports nothing from Compute this phase).
+// A fully in-memory stand-in for store.js + regions.js + actuate.js — no Mongo, no GCP. Records every
+// call so the tests can assert what the controller wrote AND which boxes it actuated. The actuators are
+// injected as fakes here: their OWN prod-gating is proved in actuate.test.js; these tests only assert
+// the controller CALLS them (recording + deciding run everywhere, dev included).
 function fakeDeps({ regions = ["us-central1", "us-west1"], rows = {}, states = [], throwOn = null } = {}) {
-  const calls = { setState: [], incOk: [], incFail: [], setCooldown: [], windowRows: [], recordMessageDetected: [] };
+  const calls = { setState: [], incOk: [], incFail: [], bumpStockoutStreak: [], windowRows: [], recordMessageDetected: [], startBox: [], shrinkBox: [], releaseBox: [] };
   const state = new Map(states.map((s) => [s.region, { ...s }]));
   const deps = {
     async discoverL4Regions() { if (throwOn === "discover") throw new Error("boom"); return regions; },
@@ -23,11 +24,15 @@ function fakeDeps({ regions = ["us-central1", "us-west1"], rows = {}, states = [
     },
     async incOk(region, nowMs) { calls.incOk.push({ region, nowMs }); },
     async incFail(region, nowMs) { calls.incFail.push({ region, nowMs }); },
-    async setCooldown(region, untilMs) {
-      calls.setCooldown.push({ region, untilMs });
-      state.set(region, { ...(state.get(region) || { region }), cooldownUntil: untilMs });
+    async bumpStockoutStreak(region, whenMs) {
+      calls.bumpStockoutStreak.push({ region, whenMs });
+      const cur = state.get(region) || { region };
+      state.set(region, { ...cur, consecutiveStockouts: (cur.consecutiveStockouts || 0) + 1, lastStockoutTs: whenMs });
     },
     async recordMessageDetected(topic, ts) { calls.recordMessageDetected.push({ topic, ts }); },
+    async startBox(model, region) { calls.startBox.push({ model, region }); },
+    async shrinkBox(model, region) { calls.shrinkBox.push({ model, region }); },
+    async releaseBox(model, region, instance) { calls.releaseBox.push({ model, region, instance }); },
   };
   return { deps, calls, state };
 }
@@ -42,7 +47,7 @@ test("decide records wouldOpen/wouldPark on the winner and issues no Compute cal
       "us-west1": [{ ok: 4, fail: 0 }],
     },
   });
-  const out = await decide(NOW, deps);
+  const out = await decide(NOW, deps, () => 0.99); // never-skip → deterministic top pick
   assert.equal(out.wouldOpen, "us-west1");
   assert.deepEqual(out.wouldPark, ["us-central1"]);
 
@@ -69,64 +74,150 @@ test("decide with no regions returns empty and writes nothing", async () => {
   assert.equal(calls.setState.length, 0);
 });
 
-test("onStockout increments fail, sets cooldown, and re-decides", async () => {
+// ---- onStockout: records everywhere; ACTUATES (shrink + cascade-start) only at the 3rd in a row ----
+test("onStockout increments fail, bumps the streak, re-decides; under 3 in a row → NO inventory change", async () => {
   const { deps, calls } = fakeDeps({
     rows: { "us-central1": [{ ok: 3, fail: 0 }], "us-west1": [{ ok: 3, fail: 0 }] },
   });
-  const out = await onStockout("us-central1", NOW, deps);
+  const out = await onStockout("us-central1", NOW, "llama3_1_8b_v1", deps, () => 0.99); // streak 1 < 3
 
   assert.equal(calls.incFail.length, 1);
   assert.equal(calls.incFail[0].region, "us-central1");
+  assert.equal(calls.bumpStockoutStreak.length, 1);
+  assert.equal(calls.bumpStockoutStreak[0].whenMs, NOW);
 
-  assert.equal(calls.setCooldown.length, 1);
-  assert.equal(calls.setCooldown[0].region, "us-central1");
-  assert.ok(calls.setCooldown[0].untilMs > NOW, "cooldown is in the future");
+  // A single stockout (streak 1 < 3) does NOT park central1 → equal scores, name-asc tie-break wins.
+  assert.equal(out.wouldOpen, "us-central1");
+  // Under 3 in a row → the MIG retries its own boot; we touch NO inventory.
+  assert.equal(calls.shrinkBox.length, 0);
+  assert.equal(calls.startBox.length, 0);
+});
 
-  // Re-decided: central1 is now vetoed by its fresh cooldown → the sibling is the winner.
-  assert.equal(out.wouldOpen, "us-west1");
+test("onStockout at the 3rd in a row → shrinkBox(model, region) + cascade startBox(model, next)", async () => {
+  const { deps, calls } = fakeDeps({
+    // Both regions net-neutral so only the streak decides. central1 starts at streak 2 → 3 → parked.
+    states: [{ region: "us-central1", consecutiveStockouts: 2 }],
+    rows: { "us-central1": [{ ok: 0, fail: 0 }], "us-west1": [{ ok: 0, fail: 0 }] },
+  });
+  const out = await onStockout("us-central1", NOW, "llama3_1_8b_v1", deps, () => 0.99); // never-skip
+  assert.equal(out.wouldOpen, "us-west1"); // central1 now parked → the sibling wins
   assert.deepEqual(out.wouldPark, ["us-central1"]);
+
+  // Abandon central1 (resize −1), then boot a box in the cascaded-to region.
+  assert.deepEqual(calls.shrinkBox, [{ model: "llama3_1_8b_v1", region: "us-central1" }]);
+  assert.deepEqual(calls.startBox, [{ model: "llama3_1_8b_v1", region: "us-west1" }]);
+});
+
+test("onStockout at the 3rd in a row with NO other region → shrink but no cascade-start (nowhere to go)", async () => {
+  const { deps, calls } = fakeDeps({
+    regions: ["us-central1"], // the only region
+    states: [{ region: "us-central1", consecutiveStockouts: 2 }],
+    rows: { "us-central1": [{ ok: 0, fail: 0 }] },
+  });
+  await onStockout("us-central1", NOW, "llama3_1_8b_v1", deps, () => 0.99);
+  assert.equal(calls.shrinkBox.length, 1);
+  assert.equal(calls.startBox.length, 0); // decide names central1 (all-parked veto-drop) — don't restart it
+});
+
+test("onStockout with no model → records + decides, but NO actuation (topic unresolved)", async () => {
+  const { deps, calls } = fakeDeps({
+    states: [{ region: "us-central1", consecutiveStockouts: 2 }],
+    rows: { "us-central1": [{ ok: 0, fail: 0 }], "us-west1": [{ ok: 0, fail: 0 }] },
+  });
+  await onStockout("us-central1", NOW, null, deps, () => 0.99); // model null → streak hits 3 but no MIG to touch
+  assert.equal(calls.bumpStockoutStreak.length, 1);
+  assert.equal(calls.shrinkBox.length, 0);
+  assert.equal(calls.startBox.length, 0);
 });
 
 test("onStockout swallows a thrown store error (never rethrows)", async () => {
   const { deps } = fakeDeps({ throwOn: "windowRows" });
-  const out = await onStockout("us-central1", NOW, deps); // incFail/setCooldown ok, decide throws
+  const out = await onStockout("us-central1", NOW, null, deps); // incFail/bump ok, decide throws
   assert.ok(out.error, "returned an error marker instead of throwing");
 });
 
-test("onSuccess increments ok and stamps lastSuccessTs", async () => {
-  const { deps, calls } = fakeDeps();
-  await onSuccess("us-west1", NOW, deps);
+// ---- onOutcome: records + logs + re-decides EVERYWHERE; releaseBox actuates (prod-gated inside) ----
+test("onOutcome success: incOk + stamps lastSuccessTs + re-decides + releaseBox(model, region, instance)", async () => {
+  // west1 net success, central1 net fail → the re-decide should name west1.
+  const { deps, calls } = fakeDeps({
+    rows: { "us-central1": [{ ok: 0, fail: 5 }], "us-west1": [{ ok: 4, fail: 0 }] },
+  });
+  const out = await onOutcome("us-west1", "success", NOW, "llama3_1_8b_v1", "inst-1", deps, () => 0.99);
   assert.deepEqual(calls.incOk[0], { region: "us-west1", nowMs: NOW });
-  const rec = calls.setState.find((c) => c.region === "us-west1");
+  const rec = calls.setState.find((c) => c.region === "us-west1" && c.patch.lastSuccessTs != null);
   assert.equal(rec.patch.lastSuccessTs, NOW);
+  assert.equal(rec.patch.consecutiveStockouts, 0, "success resets the stockout streak");
+  assert.equal(out.wouldOpen, "us-west1"); // re-decided after the ok landed
+  assert.deepEqual(calls.releaseBox, [{ model: "llama3_1_8b_v1", region: "us-west1", instance: "inst-1" }]);
 });
 
-test("onEnqueue no-ops off-prod (no store access) and never throws", async () => {
-  const prev = { NODE_ENV: process.env.NODE_ENV, K_SERVICE: process.env.K_SERVICE };
-  delete process.env.NODE_ENV;
-  delete process.env.K_SERVICE;
+test("onOutcome success un-parks a region: streak reset → eligible again in the re-decide", async () => {
+  // central1 was parked (streak 3) and outscores west1. A success resets its streak → it wins again.
+  const { deps, calls } = fakeDeps({
+    states: [{ region: "us-central1", consecutiveStockouts: 3 }],
+    rows: { "us-central1": [{ ok: 6, fail: 0 }], "us-west1": [{ ok: 1, fail: 0 }] },
+  });
+  const out = await onOutcome("us-central1", "success", NOW, "llama3_1_8b_v1", "inst-2", deps, () => 0.99);
+  const rec = calls.setState.find((c) => c.region === "us-central1");
+  assert.equal(rec.patch.consecutiveStockouts, 0);
+  assert.equal(out.wouldOpen, "us-central1"); // no longer parked → top score wins
+});
+
+test("onOutcome records + releases in DEV too (recording runs everywhere; the GCE gate is inside actuate)", async () => {
+  const prev = { N: process.env.NODE_ENV, K: process.env.K_SERVICE };
+  delete process.env.NODE_ENV; delete process.env.K_SERVICE; // off-prod
   try {
-    const { deps, calls } = fakeDeps({ throwOn: "discover" });
-    const out = await onEnqueue(NOW, deps); // would throw if it ran decide — but gate skips it
-    assert.deepEqual(out, { skipped: "not-prod" });
-    assert.equal(calls.windowRows.length, 0);
+    const { deps, calls } = fakeDeps({ rows: { "us-central1": [{ ok: 1, fail: 0 }], "us-west1": [{ ok: 1, fail: 0 }] } });
+    const out = await onOutcome("us-west1", "success", NOW, "llama3_1_8b_v1", "inst-3", deps, () => 0.99);
+    assert.equal(calls.incOk.length, 1); // recorded even off-prod
+    assert.equal(calls.releaseBox.length, 1); // controller still calls releaseBox (it self-gates internally)
+    assert.ok(out.wouldOpen);
   } finally {
-    if (prev.NODE_ENV !== undefined) process.env.NODE_ENV = prev.NODE_ENV;
-    if (prev.K_SERVICE !== undefined) process.env.K_SERVICE = prev.K_SERVICE;
+    if (prev.N !== undefined) process.env.NODE_ENV = prev.N;
+    if (prev.K !== undefined) process.env.K_SERVICE = prev.K;
   }
 });
 
-test("onEnqueue swallows a thrown store error in prod (never rethrows)", async () => {
-  const prev = process.env.K_SERVICE;
-  process.env.K_SERVICE = "orchestrator"; // make isProdLike() true so decide actually runs
-  try {
-    const { deps } = fakeDeps({ throwOn: "windowRows" });
-    const out = await onEnqueue(NOW, deps);
-    assert.ok(out.error, "returned an error marker instead of throwing");
-  } finally {
-    if (prev === undefined) delete process.env.K_SERVICE;
-    else process.env.K_SERVICE = prev;
-  }
+test("onOutcome fail: LOG only — no incOk, no setState, no decide, no release", async () => {
+  const { deps, calls } = fakeDeps();
+  const out = await onOutcome("us-west1", "fail", NOW, "llama3_1_8b_v1", "inst-4", deps);
+  assert.equal(calls.incOk.length, 0);
+  assert.equal(calls.setState.length, 0);
+  assert.equal(calls.windowRows.length, 0); // decide never ran
+  assert.equal(calls.releaseBox.length, 0);
+  assert.deepEqual(out, { skipped: "job-fail" });
+});
+
+test("onOutcome swallows a thrown store error (never rethrows)", async () => {
+  const deps = { ...fakeDeps().deps, incOk: async () => { throw new Error("boom"); } };
+  const out = await onOutcome("us-west1", "success", NOW, "llama3_1_8b_v1", "inst-5", deps);
+  assert.ok(out.error, "returned an error marker instead of throwing");
+});
+
+test("onOutcome with no region → skipped (never writes region:null)", async () => {
+  const { deps, calls } = fakeDeps();
+  assert.deepEqual(await onOutcome(null, "success", NOW, "llama3_1_8b_v1", "inst-6", deps), { skipped: "no-region" });
+  assert.equal(calls.incOk.length, 0);
+  assert.equal(calls.releaseBox.length, 0);
+});
+
+test("handleOutcomeEvent adapter: forwards region + status off the decoded payload → onOutcome", async () => {
+  // Uses real default deps, but the fail path returns before any store/GCP call — so no Mongo is touched.
+  assert.deepEqual(await handleOutcomeEvent({ region: "us-west1", status: "fail" }), { skipped: "job-fail" });
+});
+
+// ---- onEnqueue: decides everywhere now (no prod gate) ----
+test("onEnqueue decides (records the would-decision) — runs everywhere, no prod gate", async () => {
+  const { deps, calls } = fakeDeps({ rows: { "us-central1": [{ ok: 0, fail: 5 }], "us-west1": [{ ok: 4, fail: 0 }] } });
+  const out = await onEnqueue(NOW, deps, () => 0.99);
+  assert.equal(out.wouldOpen, "us-west1");
+  assert.equal(calls.windowRows.length, 2); // decide actually ran
+});
+
+test("onEnqueue swallows a thrown store error (never rethrows)", async () => {
+  const { deps } = fakeDeps({ throwOn: "windowRows" });
+  const out = await onEnqueue(NOW, deps);
+  assert.ok(out.error, "returned an error marker instead of throwing");
 });
 
 // ---- regionFromLogEntry: parse the REAL prod log shape (verified 2026-07-15) ----------------
@@ -142,27 +233,39 @@ test("regionFromLogEntry: no zone anywhere → null (handler skips)", () => {
   assert.equal(regionFromLogEntry({ resource: { labels: {} } }), null);
 });
 
-// ---- onMessageDetected: event-driven detect-message (from the publish chokepoint) ------------
-test("onMessageDetected: records the detection + decides (observe), prod-gated", async () => {
-  const prev = process.env.K_SERVICE; process.env.K_SERVICE = "orchestrator";
-  try {
-    const { deps, calls } = fakeDeps({ rows: { "us-central1": [{ ok: 0, fail: 5 }], "us-west1": [{ ok: 4, fail: 0 }] } });
-    const out = await onMessageDetected("llama3_1_8b_v1", NOW, deps);
-    assert.equal(calls.recordMessageDetected[0].topic, "llama3_1_8b_v1");
-    assert.equal(out.detected, "llama3_1_8b_v1");
-    assert.equal(out.wouldOpen, "us-west1"); // decide ran (observe); enable is Phase 2
-  } finally { if (prev === undefined) delete process.env.K_SERVICE; else process.env.K_SERVICE = prev; }
+// ---- handleStockoutLog: the deploy-time log-sink adapter -------------------------------------
+test("handleStockoutLog: entry with no resolvable region → skipped (no store/actuation, no Mongo)", async () => {
+  const { handleStockoutLog } = await import("./controller.js");
+  assert.deepEqual(await handleStockoutLog({ resource: { labels: {} } }), { skipped: "no-region" });
 });
 
-test("onMessageDetected: no-ops off-prod (records nothing)", async () => {
+// ---- onMessageDetected: records + decides + startBox — runs everywhere (no prod gate) ------------
+test("onMessageDetected: records the detection, decides, and startBox(topic, winner)", async () => {
+  const { deps, calls } = fakeDeps({ rows: { "us-central1": [{ ok: 0, fail: 5 }], "us-west1": [{ ok: 4, fail: 0 }] } });
+  const out = await onMessageDetected("llama3_1_8b_v1", NOW, deps, () => 0.99); // never-skip → deterministic
+  assert.equal(calls.recordMessageDetected[0].topic, "llama3_1_8b_v1");
+  assert.equal(out.detected, "llama3_1_8b_v1");
+  assert.equal(out.wouldOpen, "us-west1");
+  assert.deepEqual(calls.startBox, [{ model: "llama3_1_8b_v1", region: "us-west1" }]);
+});
+
+test("onMessageDetected: records + starts in DEV too (recording runs everywhere)", async () => {
   const prev = { N: process.env.NODE_ENV, K: process.env.K_SERVICE };
   delete process.env.NODE_ENV; delete process.env.K_SERVICE;
   try {
-    const { deps, calls } = fakeDeps();
-    assert.deepEqual(await onMessageDetected("t", NOW, deps), { skipped: "not-prod" });
-    assert.equal(calls.recordMessageDetected.length, 0);
+    const { deps, calls } = fakeDeps({ rows: { "us-central1": [{ ok: 1, fail: 0 }], "us-west1": [{ ok: 1, fail: 0 }] } });
+    const out = await onMessageDetected("llama3_1_8b_v1", NOW, deps, () => 0.99);
+    assert.equal(calls.recordMessageDetected.length, 1);
+    assert.equal(calls.startBox.length, 1);
+    assert.ok(out.detected);
   } finally {
     if (prev.N !== undefined) process.env.NODE_ENV = prev.N;
     if (prev.K !== undefined) process.env.K_SERVICE = prev.K;
   }
+});
+
+test("onMessageDetected swallows a thrown store error (never rethrows)", async () => {
+  const { deps } = fakeDeps({ throwOn: "windowRows" });
+  const out = await onMessageDetected("llama3_1_8b_v1", NOW, deps);
+  assert.ok(out.error, "returned an error marker instead of throwing");
 });

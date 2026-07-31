@@ -16,9 +16,12 @@
 // ============================================================
 import { execSync } from "child_process";
 
+// Orchestrator FIRST: it's the fast one (~90s Cloud Run revision) and the most common thing being
+// shipped — deploy it before the long GPU worker build/bake so an orchestrator-only change lands
+// immediately instead of waiting behind (or hanging on) the worker phase.
 const steps = [
-  { name: "workers (GPU/MIG)", cmd: "npm run deploy:workers" },
   { name: "orchestrator (/ai)", cmd: "npm run deploy:orchestrator" },
+  { name: "workers (GPU/MIG)", cmd: "npm run deploy:workers" },
   { name: "relay (Slack alerting)", cmd: "npm run deploy:relay" },
 ];
 

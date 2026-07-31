@@ -33,6 +33,30 @@ export async function workerRegion() {
   return _region;
 }
 
+// Test hook: clear the memoized region + instance-url so a single test module can exercise both the
+// on-GCE and off-GCE branches without the query-string re-import trick (which spins up a whole fresh,
+// mostly-uncovered module instance per case and drags the aggregate coverage down).
+export function _resetMetaCache() { _region = undefined; _instanceUrl = undefined; }
+
+// The full self-link of THIS instance (…/zones/<zone>/instances/<name>) — the reference a regional MIG
+// deleteInstances call targets. Published on the capacity outcome event so the orchestrator's
+// releaseBox can delete THIS finished box precisely (never a blind resize that might evict a busy one).
+// Carries the zone, which region alone (the outcome event's other field) does not. Cached — it never
+// changes for the instance's life; null off-GCE (metadata unreachable → dev/local). Never throws.
+let _instanceUrl;
+export async function workerInstance() {
+  if (_instanceUrl !== undefined) return _instanceUrl;
+  try {
+    const [name, zonePath] = await Promise.all([meta("instance/name"), meta("instance/zone")]);
+    const zone = zonePath.split("/").pop();
+    const projNum = zonePath.split("/")[1]; // projects/<num>/zones/<zone>
+    _instanceUrl = `https://www.googleapis.com/compute/v1/projects/${projNum}/zones/${zone}/instances/${name}`;
+  } catch {
+    _instanceUrl = null;
+  }
+  return _instanceUrl;
+}
+
 // Delete THIS instance from its MIG so the group's target size drops by one. Reads instance identity
 // from the metadata server. Throws off-GCE (metadata unreachable) or when the instance was not
 // created by a MIG (no `created-by`) — the caller decides whether to retry or give up.

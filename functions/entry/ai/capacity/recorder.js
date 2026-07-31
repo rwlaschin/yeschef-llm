@@ -1,14 +1,14 @@
 // Capacity recorder — turns real GCE worker-create OUTCOMES into the region scoreboard. This is the
 // ok/fail source (docs/plans/capacity-steering/plan.md), decoupled from the orchestrator request
 // path. It consumes completed `compute.instances.insert` operations for ollama worker MIGs:
-//   - no status.message           → the create succeeded  → recorded, but NOT counted (ok = job
-//                                    success only; see recordCreateOutcome / dispatch/step.js)
+//   - no status.message           → box came up           → LOG only (ok is stored at job DONE)
 //   - status.message set (e.g.      → the create failed     → incFail(region)
 //     ZONE_RESOURCE_POOL_EXHAUSTED)
 // Region comes from the operation's zone (…/zones/<zone>/… → drop the -<letter>). Deployed as an
 // event-triggered function in the orchestrator codebase (log sink → Pub/Sub), NOT an HTTP endpoint.
-import { incFail, markMessageSeen } from "./store.js";
-import { onMessageDetected } from "./controller.js";
+import { markMessageSeen } from "./store.js";
+import { onMessageDetected, onStockout } from "./controller.js";
+import { topicOfInstance } from "./actuate.js";
 
 const WORKER_RE = /instances\/.*-mig-/;
 
@@ -84,7 +84,7 @@ export async function handleDetectMessage(message, nowMs = Date.now(), deps = { 
 // Record one create-outcome → {region, outcome} or null if the entry isn't a worker-create
 // completion. Never throws into its caller. Uses the event's own timestamp so the row lands in the
 // daypart the create actually happened.
-export async function recordCreateOutcome(entry, nowMs = Date.now(), deps = { incFail }) {
+export async function recordCreateOutcome(entry, nowMs = Date.now(), deps = { onStockout }) {
   try {
     const isComp = isWorkerInsertCompletion(entry);
     console.log(`[capacity/recorder] recordCreateOutcome: isWorkerInsertCompletion=${isComp}, method=${entry?.protoPayload?.methodName}, resource=${entry?.protoPayload?.resourceName}`);
@@ -97,17 +97,25 @@ export async function recordCreateOutcome(entry, nowMs = Date.now(), deps = { in
     const when = entry?.timestamp ? Date.parse(entry.timestamp) || nowMs : nowMs;
     const failed = !!entry?.protoPayload?.status?.message; // any error message = failed create
     console.log(`[capacity/recorder] matches worker create completion: region=${region}, failed=${failed}, timestamp=${when}`);
+    // Two create outcomes, only ONE is stored:
+    //   failed create (ZONE_RESOURCE_POOL_EXHAUSTED etc.) → STORE incFail (couldn't get a box here)
+    //   box came up                                       → LOG only (a boot ≠ a completed job)
+    // `ok` is stored at job DONE (worker/index.js recordCapacityOk), the one point every job type
+    // hits — so a booted-but-idle box never inflates the score. Box-up is logged for observability.
     if (failed) {
-      // A failed create (ZONE_RESOURCE_POOL_EXHAUSTED etc.) is the stockout signal → fail.
-      console.log(`[capacity/recorder] calling incFail for region ${region}`);
-      await deps.incFail(region, when);
+      // Route through onStockout — NOT a bare incFail — so a stockout also bumps the consecutive-stockout
+      // streak (parks the region after MAX_STOCKOUTS in a row) and RE-DECIDES. A bare incFail left the
+      // stored decision stale and never re-steered off the exhausted region. The failed instance name
+      // (…/instances/<image>-mig-<suffix>) carries the model → topic so onStockout can shrink/start the
+      // right MIG at the 3rd straight stockout.
+      const name = (entry?.protoPayload?.resourceName || "").split("/instances/")[1] || "";
+      const model = topicOfInstance(name);
+      console.log(`[capacity/recorder] stockout → onStockout for region ${region} model ${model ?? "?"}`);
+      await deps.onStockout(region, when, model);
       return { region, outcome: "fail" };
     }
-    // A SUCCESSFUL create is NOT a value signal — the instance booted, but the job may still fail.
-    // `ok` means "a job completed here" and is incremented ONLY by onSuccess (dispatch/step.js), so a
-    // booted-but-idle box never inflates the score. We record nothing here (no double-count).
-    console.log(`[capacity/recorder] create ok for region ${region} — no ok increment (ok = job success only)`);
-    return { region, outcome: "created" };
+    console.log(JSON.stringify({ message: `[capacity] box up ${region}`, capacityEvent: "box_up", region }));
+    return { region, outcome: "up" };
   } catch (e) {
     console.error(`[capacity/recorder] swallowed: ${e?.message}`);
     return null;

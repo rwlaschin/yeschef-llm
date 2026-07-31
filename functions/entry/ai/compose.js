@@ -6,7 +6,7 @@
 //
 // NO Firestore here — composeFromDefs takes the already-sorted+filtered defs and the form, and
 // returns plan[]. The Firestore read + filtering lives in menu-plan.js (composeMenuPlan). Keeping
-// this pure makes it unit-testable without the emulator (see scripts/test-compose.mjs).
+// this pure makes it unit-testable without the emulator (see compose.test.js).
 
 import Handlebars from "handlebars";
 

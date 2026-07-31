@@ -16,7 +16,7 @@
         :prompt="editing"
         :available-types="types"
         :available-models="models"
-        :default-types="editing._id ? [] : [selectedType]"
+        :default-types="editing._id || isPseudo(selectedType) ? [] : [selectedType]"
         @save="savePrompt"
         @cancel="editing = null"
       />
@@ -59,6 +59,12 @@
           </template>
         </div>
 
+        <input
+          v-model="contentSearch"
+          placeholder="Filter by content… (searches all types)"
+          class="form-input text-sm flex-1 max-w-md"
+        />
+
         <label class="flex items-center gap-2 text-sm text-secondary cursor-pointer select-none">
           <input type="checkbox" v-model="hideInactive" class="accent-amber-500 w-4 h-4" />
           Hide inactive
@@ -68,6 +74,7 @@
       <PromptsList
         :prompts="visiblePrompts"
         :only="selectedType"
+        :flat="!!contentSearch.trim() || selectedType === 'all'"
         @edit="editPrompt"
         @delete="deletePrompt"
         @reorder="onReorder"
@@ -94,23 +101,36 @@ const selectedType = ref('query') // which type's prompts the list is focused on
 const typeOpen = ref(false)
 const typeSearch = ref('')
 const hideInactive = ref(false)
+const contentSearch = ref('') // free-text content filter — active query searches ALL types
 const editing = ref(null)
 const confirmDialog = ref(null)
 const toast = useToast()
 const { env: currentEnv } = useEnvironment()
 
+// Pseudo-types on top of the real subtype list: "all" shows every group,
+// "unassigned" shows prompts mapped to no type (otherwise invisible in every view).
+const PSEUDO_TYPES = ['all', 'unassigned']
+const isPseudo = (t) => PSEUDO_TYPES.includes(t)
+
 // How many prompts map to a given type (shown next to each type).
-const countFor = (t) => prompts.value.filter((p) => p.mapping && p.mapping[t] != null).length
+const countFor = (t) =>
+  t === 'all' ? prompts.value.length
+  : t === 'unassigned' ? prompts.value.filter((p) => !Object.keys(p.mapping || {}).length).length
+  : prompts.value.filter((p) => p.mapping && p.mapping[t] != null).length
 
 const filteredTypes = computed(() => {
+  const all = [...PSEUDO_TYPES, ...types.value]
   const q = typeSearch.value.trim().toLowerCase()
-  return q ? types.value.filter((t) => t.toLowerCase().includes(q)) : types.value
+  return q ? all.filter((t) => t.toLowerCase().includes(q)) : all
 })
 
-// Prompts shown in the list — optionally hide inactive ones.
-const visiblePrompts = computed(() =>
-  hideInactive.value ? prompts.value.filter((p) => p.active) : prompts.value
-)
+// Prompts shown in the list — optionally hide inactive ones, then apply the content filter.
+const visiblePrompts = computed(() => {
+  let list = hideInactive.value ? prompts.value.filter((p) => p.active) : prompts.value
+  const q = contentSearch.value.trim().toLowerCase()
+  if (q) list = list.filter((p) => (p.content || '').toLowerCase().includes(q))
+  return list
+})
 
 const fetchPrompts = async () => {
   try { prompts.value = await $fetch('/api/admin/prompts') }
@@ -119,8 +139,8 @@ const fetchPrompts = async () => {
 const fetchTypes = async () => {
   try {
     types.value = await $fetch('/api/llm/types')
-    // Default the focus to the first type if the current one isn't available.
-    if (types.value.length && !types.value.includes(selectedType.value)) selectedType.value = types.value[0]
+    // Default the focus to the first type if the current one isn't available (pseudo-types stay).
+    if (types.value.length && !isPseudo(selectedType.value) && !types.value.includes(selectedType.value)) selectedType.value = types.value[0]
   } catch (e) { console.error('Failed to fetch types:', e) }
 }
 const fetchModels = async () => {

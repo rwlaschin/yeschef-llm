@@ -19,8 +19,12 @@ const FAIL_ENTRY = {
 };
 
 function spy() {
-  const calls = { incOk: [], incFail: [] };
-  return { deps: { async incOk(r, t) { calls.incOk.push([r, t]); }, async incFail(r, t) { calls.incFail.push([r, t]); } }, calls };
+  const calls = { incOk: [], incFail: [], onStockout: [] };
+  return { deps: {
+    async incOk(r, t) { calls.incOk.push([r, t]); },
+    async incFail(r, t) { calls.incFail.push([r, t]); },
+    async onStockout(r, t, model) { calls.onStockout.push([r, t, model]); }, // stockout → inc fail + streak + re-decide + actuate
+  }, calls };
 }
 
 test("regionFromInsertOp: zone in resourceName → region (drops -letter)", () => {
@@ -49,18 +53,19 @@ test("isWorkerInsertCompletion: completion of any worker MIG insert", () => {
   assert.equal(isWorkerInsertCompletion({ operation: { last: true }, protoPayload: { methodName: "v1.compute.instances.insert", resourceName: "projects/x/zones/us-west4-c/instances/some-other-vm" } }), false);
 });
 
-test("recordCreateOutcome: successful create → recorded but NOT counted (ok = job success only)", async () => {
+test("recordCreateOutcome: box came up → log-only, NOT stored (ok is stored at job DONE)", async () => {
   const { deps, calls } = spy();
-  assert.deepEqual(await recordCreateOutcome(OK_ENTRY, Date.now(), deps), { region: "us-west4", outcome: "created" });
-  assert.equal(calls.incOk.length, 0); // a booted instance is not a value signal — no ok increment
+  assert.deepEqual(await recordCreateOutcome(OK_ENTRY, Date.now(), deps), { region: "us-west4", outcome: "up" });
+  assert.equal(calls.incOk.length, 0); // a booted box is logged, never stored as ok
   assert.equal(calls.incFail.length, 0);
 });
 
-test("recordCreateOutcome: real stockout → incFail(region)", async () => {
+test("recordCreateOutcome: real stockout → onStockout(region, when, model) — model recovered from the instance name", async () => {
   const { deps, calls } = spy();
   assert.deepEqual(await recordCreateOutcome(FAIL_ENTRY, Date.now(), deps), { region: "us-east1", outcome: "fail" });
-  assert.equal(calls.incFail.length, 1);
-  assert.equal(calls.incFail[0][0], "us-east1");
+  assert.equal(calls.onStockout.length, 1);
+  assert.equal(calls.onStockout[0][0], "us-east1");
+  assert.equal(calls.onStockout[0][2], "llama3_1_8b_v1"); // …/instances/ollama-llama3-1-8b-v1-mig-5z0h → topic
   assert.equal(calls.incOk.length, 0);
 });
 
@@ -84,7 +89,7 @@ test("recordCreateOutcome: worker-insert completion with no resolvable zone → 
 });
 
 test("recordCreateOutcome: swallows a thrown store error (never rethrows)", async () => {
-  const deps = { async incFail() { throw new Error("mongo down"); } };
+  const deps = { async onStockout() { throw new Error("mongo down"); } };
   assert.equal(await recordCreateOutcome(FAIL_ENTRY, Date.now(), deps), null);
 });
 
@@ -93,10 +98,10 @@ test("recordCreateOutcome: missing/unparseable timestamp → falls back to nowMs
   const now = 1_700_000_000_000;
   const { timestamp, ...noTs } = FAIL_ENTRY;
   await recordCreateOutcome(noTs, now, deps);
-  assert.equal(calls.incFail[0][1], now); // no entry timestamp → uses nowMs
+  assert.equal(calls.onStockout[0][1], now); // no entry timestamp → uses nowMs
   const bad = await recordCreateOutcome({ ...FAIL_ENTRY, timestamp: "not-a-date" }, now, deps);
   assert.equal(bad.outcome, "fail");
-  assert.equal(calls.incFail[1][1], now); // Date.parse → NaN → nowMs
+  assert.equal(calls.onStockout[1][1], now); // Date.parse → NaN → nowMs
 });
 
 // ---- handleLogPubSub: the Cloud Logging sink → Pub/Sub adapter -------------------------------
@@ -104,7 +109,7 @@ test("handleLogPubSub: decodes a base64 LogEntry → records via recordCreateOut
   const { deps, calls } = spy();
   const r = await handleLogPubSub(b64(FAIL_ENTRY), Date.now(), deps);
   assert.deepEqual(r, { region: "us-east1", outcome: "fail" });
-  assert.equal(calls.incFail.length, 1);
+  assert.equal(calls.onStockout.length, 1);
 });
 
 test("handleLogPubSub: message with no data → null (nothing to decode)", async () => {

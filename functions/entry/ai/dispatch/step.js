@@ -22,7 +22,6 @@
 // is LINEAR (step+1). `failStep` is honored only when it's a sane revert target (0..step).
 import { getFirestore } from "firebase-admin/firestore";
 import { dispatchStep, unitCount } from "./dispatch.js";
-import { onSuccess } from "../capacity/controller.js";
 
 // Retries per step before giving up and passing through. Env-overridable; sane fallback.
 const MAX_GEN = parseInt(process.env.MAX_GEN, 10) || 2;
@@ -63,10 +62,6 @@ export async function handle(payload, _message) {
   const stepFailed = !!failedRun || status === "fail";
 
   if (!stepFailed) {
-    // Capacity scoreboard: a clean step success in `payload.region` is an end-to-end WIN there (the
-    // worker got its GPU AND finished the work) — record it. Fire-and-forget: onSuccess swallows its
-    // own errors and never blocks the plan. Skipped when region is absent (dev/off-GCE worker).
-    if (payload.region) void onSuccess(payload.region, Date.now());
     return advance(db, jobRef, jobId, step, stepCount, "success");
   }
 

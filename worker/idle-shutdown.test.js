@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { makeIdleShutdown } from "./idle-shutdown.js";
+import { makeIdleShutdown, workerRegion, workerInstance, _resetMetaCache } from "./idle-shutdown.js";
 
 // Deterministic clock: we drive setTimeout by hand so tests don't wait real time.
 function fakeClock() {
@@ -99,21 +99,47 @@ test("a failed shutdown re-arms and retries next window", async () => {
 });
 
 // ---- workerRegion: instance zone → region, cached, null off-GCE -----------------------------
-test("workerRegion: parses region from the instance zone metadata", async () => {
+// Base module instance + _resetMetaCache between cases (not a query-string re-import) so the on- and
+// off-GCE branches share the ONE instrumented module copy instead of each minting a fresh, mostly-
+// uncovered one.
+test("workerRegion: parses region from the instance zone metadata (cached)", async () => {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({ ok: true, text: async () => "projects/38637528569/zones/us-central1-b\n" });
   try {
-    const { workerRegion } = await import("./idle-shutdown.js?case=ok");
+    _resetMetaCache();
+    globalThis.fetch = async () => ({ ok: true, text: async () => "projects/38637528569/zones/us-central1-b\n" });
     assert.equal(await workerRegion(), "us-central1");
     assert.equal(await workerRegion(), "us-central1"); // cached, no second fetch needed
-  } finally { globalThis.fetch = realFetch; }
+  } finally { globalThis.fetch = realFetch; _resetMetaCache(); }
 });
 
 test("workerRegion: metadata unreachable (off-GCE) → null, never throws", async () => {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async () => { throw new Error("ENOTFOUND metadata.google.internal"); };
   try {
-    const { workerRegion } = await import("./idle-shutdown.js?case=offgce");
+    _resetMetaCache();
+    globalThis.fetch = async () => { throw new Error("ENOTFOUND metadata.google.internal"); };
     assert.equal(await workerRegion(), null);
-  } finally { globalThis.fetch = realFetch; }
+  } finally { globalThis.fetch = realFetch; _resetMetaCache(); }
+});
+
+// ---- workerInstance: instance self-link (…/zones/<zone>/instances/<name>), cached, null off-GCE ----
+// Reuses the base module instance (not a query-string re-import) + _resetMetaCache between cases, so
+// both branches run without spinning up a fresh, mostly-uncovered module copy per case.
+test("workerInstance: builds the full self-link, caches it, and is null off-GCE", async () => {
+  const realFetch = globalThis.fetch;
+  const url = "https://www.googleapis.com/compute/v1/projects/38637528569/zones/us-central1-b/instances/ollama-llama3-1-8b-v1-mig-tc0k";
+  try {
+    _resetMetaCache();
+    globalThis.fetch = async (u) => ({
+      ok: true,
+      text: async () => String(u).endsWith("instance/name")
+        ? "ollama-llama3-1-8b-v1-mig-tc0k\n"
+        : "projects/38637528569/zones/us-central1-b\n",
+    });
+    assert.equal(await workerInstance(), url);
+    assert.equal(await workerInstance(), url); // cached — no second fetch needed
+
+    _resetMetaCache();
+    globalThis.fetch = async () => { throw new Error("ENOTFOUND metadata.google.internal"); };
+    assert.equal(await workerInstance(), null); // off-GCE → null, never throws
+  } finally { globalThis.fetch = realFetch; _resetMetaCache(); }
 });

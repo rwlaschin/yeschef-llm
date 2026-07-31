@@ -6,6 +6,9 @@
 // Deliberately narrow: only ingredients that are unambiguous AND already an explicit prompt example.
 // Genuinely ambiguous ingredients (not in this map) are left to the model's judgment.
 const OVERRIDES = {
+  // Oils in aerosol form — the 3b model repeatedly tags these "beverage" (the word "spray"),
+  // and no prompt wording has fixed it, so pin them deterministically.
+  fat: ["cooking spray", "nonstick spray", "non-stick spray", "pan spray", "oil spray", "baking spray"],
   vegetable: ["onion", "garlic", "pepper", "bell pepper", "tomato", "broccoli", "carrot", "mushroom", "celery",
     "lettuce", "spinach", "kale", "cabbage", "zucchini", "cucumber", "eggplant", "squash", "cauliflower"],
   seasoning: ["broth", "stock", "salt", "pepper", "cumin", "paprika", "turmeric", "oregano", "basil",

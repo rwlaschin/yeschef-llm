@@ -55,6 +55,7 @@ export const querySchema = {
     style:       { type: "string", maxLength: 64 },
     subtype:     { type: "string", maxLength: 64 },
     type:        { type: "string", maxLength: 64 },
+    model:       { type: "string", maxLength: 128 },  // topic override; resolveTopic validates against MODELS
   },
 };
 

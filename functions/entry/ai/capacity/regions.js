@@ -31,7 +31,7 @@ async function meta(path) {
 // ADC access token: the GCE metadata server on Cloud Run (the controller), else the gcloud CLI's
 // ADC on a local box (deploy.js / rollback.js run off-GCE). Neither available → throws → the caller
 // falls back to SEED_REGIONS. This is what makes the DEPLOY path read the live API too, not the seed.
-async function adcToken() {
+export async function adcToken() {
   try {
     return JSON.parse(await meta(META_TOKEN)).access_token;
   } catch {
@@ -43,7 +43,7 @@ async function adcToken() {
 // the metadata server, then gcloud config. `gcloud config get-value project` is often empty on a box
 // that sets the project via env/--project, so it can't be the primary source. aggregatedList is
 // project-scoped and accepts the project-id string.
-async function projectId() {
+export async function projectId() {
   const env =
     process.env.GCP_PROJECT_ID ||
     process.env.GOOGLE_CLOUD_PROJECT ||

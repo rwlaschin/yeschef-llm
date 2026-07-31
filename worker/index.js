@@ -35,7 +35,7 @@ import { createSemaphore } from "./semaphore.js";
 // search. Weighted-random pick, Firestore-tracked rolling-30-day quota. See search-pool.js.
 import { searchPool, fetchPage } from "./tools/search-pool.js";
 // Idle self-shutdown — turns the VM off within IDLE_SHUTDOWN_MS of going idle (see idle-shutdown.js).
-import { makeIdleShutdown, selfDeleteFromMig, workerRegion } from "./idle-shutdown.js";
+import { makeIdleShutdown, selfDeleteFromMig, workerRegion, workerInstance } from "./idle-shutdown.js";
 
 // ---- Worker version stamp ----------------------------------
 // Printed the instant the worker starts, so you can SEE which code is running. The version is
@@ -124,6 +124,31 @@ async function reportToOrchestrator(payload) {
     json: { jobId: payload.jobId, action: payload.report, step: payload.step, runId: payload.runId, status: payload.runStatus ?? "success", outcome: payload.outcome ?? null, region },
   });
   console.log(`[worker] → reported to "${ORCHESTRATE_TOPIC}" action=${payload.report} status=${payload.runStatus ?? "success"}${payload.outcome ? ` outcome=${payload.outcome}` : ""} jobId=${payload.jobId}`);
+}
+
+// ---- Capacity outcome event --------------------------------
+// On EVERY completed job (orchestrated step/build AND one-shot queries — NOT gated on payload.report),
+// publish an `outcome` event to the orchestrate topic. The orchestrator's capacity controller records
+// it: success → $inc ok on this region + re-decide; ran-but-failed → LOG only. Recording moved OFF the
+// worker (it no longer writes region_capacity_stats directly) — the orchestrator is the one brain that
+// calculates + writes + logs the would-decision. `region` = where THIS worker ran (instance metadata;
+// null off-GCE). Fire-and-forget: a capacity publish must NEVER break job completion.
+async function publishOutcome(payload) {
+  try {
+    if (!_reportPubsub) _reportPubsub = new PubSub({ projectId: GCP_PROJECT_ID });
+    const region = await workerRegion();
+    // Also carry the model TOPIC (from SUBSCRIPTION_NAME `sub_<topic>` — unambiguous, unlike OLLAMA_MODEL
+    // which several tiers share) and this box's instance self-link, so the orchestrator's releaseBox can
+    // targeted-delete THIS finished box in the right model's MIG. Both null off-GCE.
+    const instance = await workerInstance();
+    const model = SUBSCRIPTION_NAME ? SUBSCRIPTION_NAME.replace(/^sub_/, "") : null;
+    await _reportPubsub.topic(ORCHESTRATE_TOPIC).publishMessage({
+      json: { action: "outcome", jobId: payload.jobId, region, model, instance, status: payload.runStatus ?? "success", outcome: payload.outcome ?? null },
+    });
+    console.log(JSON.stringify({ message: `[capacity] outcome ${payload.runStatus ?? "success"} ${region ?? "?"}`, capacityEvent: "outcome", region, model, status: payload.runStatus ?? "success", jobId: payload.jobId }));
+  } catch (e) {
+    console.error(`[capacity] publishOutcome(${payload.jobId}) swallowed: ${e?.message}`);
+  }
 }
 
 // ---- Firebase Admin ----------------------------------------
@@ -963,6 +988,10 @@ async function handleMessage(message) {
     // Only the WINNER reports — a lost race means another run already told the orchestrator.
     if (wrote) {
       await reportToOrchestrator(payload);
+      // DONE signal → capacity outcome event to the orchestrator for EVERY job type (queries included),
+      // both success AND fail. The orchestrator records it (success → ok + re-decide; fail → log only) —
+      // the worker no longer writes the scoreboard itself. Never blocks ack.
+      await publishOutcome(payload);
       message.ack();
       console.log(`[worker] ✓ acked ${jobId} (status=${runStatus})`);
     } else {

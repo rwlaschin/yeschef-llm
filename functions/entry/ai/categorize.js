@@ -6,15 +6,13 @@ import https from "node:https";
 import { parseYamlBlock, extractYamlString } from "../../../config/yaml.js";
 import { getCollection } from "../../lib/mongo.js";
 import { detectAllergens } from "../../lib/allergenLookup.js";
+import { findAllergens, warmAllergenCache } from "../../lib/allergenFdc.js";
 import { overrideCategory } from "../../lib/categoryOverride.js";
 import { dualRoleFor } from "../../lib/dualRoleLookup.js";
 
 // Categorize uses the HOST's native Ollama (small/fast model), not the Docker worker's.
 const OLLAMA_HOST = process.env.CATEGORIZE_OLLAMA_HOST || process.env.OLLAMA_HOST || "http://localhost:11434";
 const OLLAMA_MODEL = process.env.CATEGORIZE_OLLAMA_MODEL || "llama3.2:3b";
-
-// FDA FALCPA big-9 — the only allergen values the LLM allergen pass may return.
-const BIG9 = ["milk", "eggs", "fish", "shellfish", "tree_nuts", "peanuts", "wheat", "soybeans", "sesame"];
 
 // System prompts live in Mongo prompt_library (mapping.<type>), same shape the worker
 // uses: docs whose mapping has the type key, joined ascending by the mapping value (lex order).
@@ -180,7 +178,7 @@ export async function post(req, reply) {
     return reply.code(400).send({ error: "ingredients[] required" });
   }
 
-  const [system, allergenSystem] = await Promise.all([promptFor("categorize"), promptFor("allergen_check")]);
+  const system = await promptFor("categorize");
   if (!system) {
     console.error(`[categorize] no prompt in prompt_library — nothing maps to "categorize"`);
     return reply.code(503).send({ error: `No categorize prompt in prompt_library` });
@@ -209,9 +207,13 @@ export async function post(req, reply) {
   // Correct the model's category for ingredients the prompt already pins down explicitly (carrot,
   // tomato, broth, garlic, ...) — it contradicts its own given list on these often enough that a
   // deterministic lookup is more reliable than re-prompting.
-  const corrected = (Array.isArray(parsed?.components) ? parsed.components : []).map((c) => ({
-    ...c, category: overrideCategory(c.ingredient) ?? c.category,
-  }));
+  const corrected = (Array.isArray(parsed?.components) ? parsed.components : []).map((c) => {
+    const forced = overrideCategory(c.ingredient);
+    if (forced && forced !== c.category) {
+      console.log(`[categorize] OVERRIDE "${c.ingredient}": model said ${JSON.stringify(c.category)} -> forced "${forced}"`);
+    }
+    return { ...c, category: forced ?? c.category };
+  });
 
   // Dual-plating-role exceptions (cheese/yogurt -> dairy+protein; beans/lentils/peas -> protein+
   // vegetable): the model reports category as an array when dual, and CODE expands that into
@@ -241,22 +243,27 @@ export async function post(req, reply) {
     .filter((c) => c.category === "seasoning")
     .map((c) => ({ ingredient: c.ingredient, quantity: c.quantity ?? undefined, unit: c.unit ?? undefined }));
 
-  // Allergens: the LLM does the real judgment call — a keyword list can't reason about a family
-  // (barley/rye/malt implicating wheat) without enumerating every case by hand, and a missed keyword
-  // is a silent safety gap, not just a data-quality nuisance. Separate, single-purpose call (its own
-  // prompt) so this task doesn't compete with categorization in the same context. The keyword scan
-  // stays as a supplementary safety net — union, not replacement — for the obvious/literal cases.
-  let allergens = detectAllergens([...allItems.map((c) => c.ingredient), ...ingredients]);
-  if (allergenSystem) {
-    try {
-      const aParsed = await chatWithYamlRetry(allergenSystem, userMsg, `allergen pass "${name}"`);
-      const fromLlm = (Array.isArray(aParsed?.allergens) ? aParsed.allergens : [])
-        .filter((a) => typeof a === "string" && BIG9.includes(a.trim().toLowerCase()))
-        .map((a) => a.trim().toLowerCase());
-      allergens = [...new Set([...allergens, ...fromLlm])].sort();
-    } catch (e) {
-      console.error(`[categorize] allergen pass failed for "${name}" — keeping keyword-scan allergens only:`, e.message);
+  // Allergens: DETERMINISTIC FDC-backed lookup (USDA FoodData Central category + majority
+  // ingredient-statement scan), cached in Mongo — NO LLM in the safety-critical decision, because
+  // even single-depth the small model hallucinates on individual tokens (eggplant->eggs, cooking
+  // spray->wheat). One batch warms the cache for the whole recipe, then each ingredient resolves
+  // from cache. Ingredients FDC can't resolve fall back to the keyword scan AND are logged for
+  // review — never silently dropped.
+  const names = [...new Set(allItems.map((c) => c.ingredient))];
+  let allergens = [];
+  try {
+    await warmAllergenCache(names);
+    const resolved = await Promise.all(names.map((n) => findAllergens(n)));
+    const unresolved = [];
+    resolved.forEach((r, i) => (r.allergens === null ? unresolved.push(names[i]) : allergens.push(...r.allergens)));
+    if (unresolved.length) {
+      console.log(`[categorize] "${name}" allergen FDC unresolved -> keyword-scan fallback + REVIEW: [${unresolved.join(", ")}]`);
+      allergens.push(...detectAllergens(unresolved));
     }
+    allergens = [...new Set(allergens)].sort();
+  } catch (e) {
+    console.error(`[categorize] FDC allergen lookup failed for "${name}" — keyword-scan fallback:`, e.message);
+    allergens = detectAllergens([...names, ...ingredients]);
   }
 
   console.log(`[categorize] "${name}" → ${components.length} components [${components.map(c => c.category + ':' + c.ingredient).join(', ')}]`);

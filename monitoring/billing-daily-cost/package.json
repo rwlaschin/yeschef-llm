@@ -1,0 +1,10 @@
+{
+  "name": "billing-daily-cost",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "@google-cloud/bigquery": "^7.9.1",
+    "@google-cloud/monitoring": "^4.1.0",
+    "@google-cloud/functions-framework": "^3.4.2"
+  }
+}

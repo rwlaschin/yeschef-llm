@@ -5,8 +5,8 @@
 //     00..23), day = YYYY-MM-DD (both UTC, so a box's local tz can never split one hour across docs).
 //     A 30-day TTL on `dayTs` (a real Date at that day's UTC midnight) prunes the sliding window, so
 //     the collection is bounded to regions × dayparts × 30.
-//   region_capacity_state — one doc per region: current mode + cooldown + last-event timestamps and
-//     the Phase-1 recorded decision (wouldOpen/wouldPark).
+//   region_capacity_state — one doc per region: current mode + consecutive-stockout streak + last-event
+//     timestamps and the Phase-1 recorded decision (wouldOpen/wouldPark).
 //
 // Reuses functions/lib/mongo.js — the ONE shared, warm-cached client — never a new MongoClient here.
 import { getCollection } from "../../../lib/mongo.js";
@@ -96,7 +96,19 @@ export async function setState(region, patch) {
   );
 }
 
-export const setCooldown = (region, untilMs) => setState(region, { cooldownUntil: untilMs });
+// Consecutive-stockout streak on the region's state doc. A stockout $inc's it; ANY success resets it to
+// 0 (folded into onOutcome's lastSuccessTs setState). select() parks a region once the streak reaches
+// maxStockouts — recovery is via exploration, not a timer (see score.js). lastStockoutTs is stamped in
+// the SAME upsert so a first-ever stockout creates the doc with both fields.
+export async function bumpStockoutStreak(region, whenMs) {
+  await ensureIndexes();
+  const state = await getCollection(STATE_COLL);
+  await state.updateOne(
+    { region },
+    { $inc: { consecutiveStockouts: 1 }, $set: { region, lastStockoutTs: whenMs } },
+    { upsert: true },
+  );
+}
 
 // ── region_capacity_queue ────────────────────────────────────────────────────────────────────────
 // Message-detected events, keyed by topic (model-agnostic — a new model is just a new _id, no code

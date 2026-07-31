@@ -147,3 +147,16 @@ test("proteinBackbone keeps the cut in the name WITHOUT parentheses", () => {
   assert.match(rendered, /Chicken thigh/);                 // cut stays in the name (space-joined)
   assert.doesNotMatch(rendered, /\(/);                     // …and NEVER wrapped in parentheses
 });
+
+test("includeInOutput drives includeInResults; a compliance step reverts to the step it validates", () => {
+  const menu       = { name: "menu",       subtype: "menu_plan",  kind: "fanout", mapOf: "", instruction: "menu", pass: "", fail: "", context: [], includeInOutput: true };
+  const validation = { name: "validation", subtype: "compliance", kind: "fanout", mapOf: "", instruction: "check", pass: "", fail: "", context: ["menu"], includeInOutput: false };
+  const order      = { name: "order",      subtype: "procurement", kind: "aggregation", mapOf: "", instruction: "consolidate", pass: "", fail: "", context: ["menu"], includeInOutput: true };
+  const plan = composeFromDefs([menu, validation, order], form());
+
+  assert.equal(plan[0].includeInResults, true);            // menu → shown in results
+  assert.equal(plan[1].includeInResults, false);           // validation is internal, not output
+  assert.equal(plan[2].includeInResults, true);            // aggregation order form → shown
+  assert.equal(plan[1].failStep, 0);                       // compliance reverts to its context (menu)
+  assert.equal(plan[2].kind, "aggregation");               // non-fanout kind passes through untouched
+});

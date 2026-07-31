@@ -11,6 +11,10 @@
     "setup:firestore": "node scripts/setup-firestore-ttl.js",
     "dev": "cross-env NODE_ENV=dev node scripts/dev.js",
     "dev:quick": "cross-env NODE_ENV=dev DEV_QUICK=1 node scripts/dev.js",
+    "dev:ai": "cross-env NODE_ENV=dev node scripts/dev.js --only=ai",
+    "dev:fake": "cross-env NODE_ENV=dev node scripts/dev.js --only=fake",
+    "dev:workers": "cross-env NODE_ENV=dev node scripts/dev.js --only=workers",
+    "dev:workers:8b": "cross-env NODE_ENV=dev DEV_QUICK=1 node scripts/dev.js --only=workers",
     "kill:emulators": "node scripts/kill-emulators.js",
     "test": "node --test \"worker/**/*.test.js\" \"functions/**/*.test.js\"",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-exclude=\"**/*.test.js\" --test-coverage-lines=90 --test-coverage-functions=80 --test-coverage-branches=60 \"worker/**/*.test.js\"",
@@ -20,6 +24,7 @@
     "images": "cross-env NODE_ENV=production node scripts/audit-images.mjs",
     "deploy:orchestrator": "firebase deploy --only functions:orchestrator",
     "deploy:relay": "cross-env NODE_ENV=production node scripts/deploy-relay.js",
+    "deploy:status": "bash scripts/deploy-status.sh",
     "rollback": "cross-env NODE_ENV=production node scripts/rollback.js",
     "kill:workers": "bash scripts/kill-workers.sh",
     "restore:workers": "bash scripts/restore-workers.sh"
