@@ -36,7 +36,7 @@
     "jsoneditor": "^10.4.3",
     "mongodb": "^6.0.0",
     "neo4j-driver": "^5.15.0",
-    "nuxt": "^3.11.0",
+    "nuxt": "^3.21.10",
     "pino": "^8.17.0",
     "primeicons": "^7.0.0",
     "primevue": "^4.5.5",
