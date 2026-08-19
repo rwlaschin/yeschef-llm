@@ -115,6 +115,21 @@ export async function bumpStockoutStreak(region, whenMs) {
   return (r?.value ?? r)?.consecutiveStockouts ?? 0;
 }
 
+// One walk (abandon + cascade) per stockout episode: atomically claim the region's `walked` flag.
+// Returns TRUE only for the single caller that flips it — the MIG's create retries all land in
+// onStockout and can race, so the claim must be one atomic write, not a read-then-set. onOutcome's
+// success reset clears the flag (with the streak), re-arming the walk for the next episode.
+export async function claimWalk(region) {
+  await ensureIndexes();
+  const state = await getCollection(STATE_COLL);
+  const r = await state.updateOne(
+    { region, walked: { $ne: true } },
+    { $set: { region, walked: true } },
+    { upsert: false },
+  );
+  return r.modifiedCount === 1;
+}
+
 // ── region_capacity_queue ────────────────────────────────────────────────────────────────────────
 // Message-detected events, keyed by topic (model-agnostic — a new model is just a new _id, no code
 // change). Set pending on enqueue-detect; clear on drain. Feeds the observe loop (and Phase-2 steering).

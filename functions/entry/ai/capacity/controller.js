@@ -12,7 +12,7 @@
 // completion.
 import { discoverL4Regions } from "./regions.js";
 import { scoreRegionDaypart, select } from "./score.js";
-import { daypartOf, windowRows, getState, setState, incOk, incFail, bumpStockoutStreak, recordMessageDetected } from "./store.js";
+import { daypartOf, windowRows, getState, setState, incOk, incFail, bumpStockoutStreak, claimWalk, recordMessageDetected } from "./store.js";
 import { startBox, shrinkBox, releaseBox, liveBoxes, topicOfInstance } from "./actuate.js";
 
 // A region is PARKED once it stocks out this many times IN A ROW (see select() in score.js). A fixed
@@ -23,19 +23,24 @@ const MAX_STOCKOUTS = parseInt(process.env.CAPACITY_MAX_STOCKOUTS, 10) || 3;
 // The real modules, injectable so the controller unit-tests with no Mongo/GCP (see controller.test.js).
 // Phase 2 adds the actuators (start/shrink/release) — they self-gate on prod INSIDE actuate.js, so the
 // RECORDING here runs everywhere (dev + prod) and only the GCE call is prod-gated.
-const defaultDeps = { discoverL4Regions, windowRows, getState, setState, incOk, incFail, bumpStockoutStreak, recordMessageDetected, startBox, shrinkBox, releaseBox, needsBox };
+const defaultDeps = { discoverL4Regions, windowRows, getState, setState, incOk, incFail, bumpStockoutStreak, claimWalk, recordMessageDetected, startBox, shrinkBox, releaseBox, needsBox };
 
 // Does (model, region) need ANOTHER box right now? Answered from the same live reads the reconciler
 // uses — GCE for what exists, Pub/Sub for what waits — so detect-driven starts and timer-driven starts
 // can never disagree about the state of the world. Fails OPEN (start) when the queue can't be read: a
 // missing metric must not stall real work, and an extra box idles itself out within the grace window.
-async function needsBox(topic, region) {
+export async function needsBox(topic, region, io = {}) {
   if (!region) return { start: false, why: "no region chosen", seen: {} };
   try {
     const { queueState, decideForModel } = await import("./reconcile.js");
-    const q = await queueState(topic);
-    const inv = await liveBoxes(topic, region);
-    const d = decideForModel({ ...q, live: inv.live ?? 0, region });
+    const q = await (io.queueState ?? queueState)(topic);
+    const inv = await (io.liveBoxes ?? liveBoxes)(topic, region);
+    // A detect event IS a message: this hook only runs because a publish just pushed to
+    // /capacity-detect. The Monitoring metric lags 60–180s, so it reports a stale 0 (not null,
+    // which would trigger the pull probe) and decideForModel answered "queue empty, no boxes" —
+    // stranding the very message that triggered detection (prod 2026-08-19, job 9cea980b).
+    // Floor undelivered at 1: with live boxes the decision is still "none — busy" as before.
+    const d = decideForModel({ ...q, undelivered: Math.max(q.undelivered ?? 0, 1), live: inv.live ?? 0, region });
     return { start: d.action === "start", why: d.why, seen: d.seen };
   } catch (e) {
     return { start: true, why: `queue/inventory read failed (${e?.message}) — starting anyway`, seen: {} };
@@ -132,12 +137,15 @@ export async function onStockout(region, nowMs, model = null, deps = defaultDeps
     const streak = await deps.bumpStockoutStreak(region, nowMs);
     const decision = await decide(nowMs, deps, rand);
     if (model) {
-      // Fire on the CROSSING only. `>=` re-ran the whole abandon+cascade on every retry after the
-      // third — observed climbing to streak 27, issuing a duplicate resize −1 here and a duplicate
-      // resize +1 in the cascade region ten seconds apart, which is how one job ended up with two
-      // boxes. The region is already parked by select() from the third onward; repeating the
-      // actuation buys nothing. A success resets the streak to 0, which re-arms the crossing.
-      if (streak === MAX_STOCKOUTS) {
+      // Fire ONCE per stockout episode, on `>=` guarded by an atomic claim — NOT on the exact
+      // crossing. Bare `>=` re-ran the whole abandon+cascade on every retry after the third
+      // (observed streak 27: duplicate resize −1 / +1 ten seconds apart, one job with two boxes).
+      // But `=== MAX` was wrong the other way (prod 2026-08-19): a streak that entered the day
+      // already past MAX — crossing spent in an earlier episode, no success possible to reset it —
+      // meant 16 stockouts all skipped actuation and the region never walked. claimWalk() flips a
+      // `walked` flag atomically in the state doc (concurrent stockouts race safely: one winner);
+      // a success resets streak to 0 AND clears the flag, re-arming the walk for the next episode.
+      if (streak >= MAX_STOCKOUTS && (await deps.claimWalk(region))) {
         await deps.shrinkBox(model, region, undefined, `stockout streak ${streak} — abandoning ${region}`);
         // decision.wouldOpen is the fresh post-bump winner, which now EXCLUDES the just-parked region
         // (select() vetoes streak>=MAX). Cascade the +1 there; skip if there's nowhere else to go.
@@ -176,7 +184,7 @@ export async function onOutcome(region, status, nowMs = Date.now(), model = null
       return { skipped: "job-fail" };
     }
     await deps.incOk(region, nowMs);
-    await deps.setState(region, { lastSuccessTs: nowMs, consecutiveStockouts: 0 });
+    await deps.setState(region, { lastSuccessTs: nowMs, consecutiveStockouts: 0, walked: false });
     // Every success registers a structured log, matching detect / stockout / job_fail.
     console.log(JSON.stringify({ message: `[capacity] job DONE → ok ${region}`, capacityEvent: "ok", actor: "engine", region, model: model ?? null, instance: instance ?? null }));
     // NO teardown here. A per-job outcome cannot tell whether the box is free: the worker leases up to

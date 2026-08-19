@@ -1,7 +1,7 @@
 process.env.CAPACITY_TZ = "UTC"; // pin dayparts to UTC so the fixed expectations below hold
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decide, onStockout, onEnqueue, onOutcome, handleOutcomeEvent, onMessageDetected, regionFromLogEntry } from "./controller.js";
+import { decide, onStockout, onEnqueue, onOutcome, handleOutcomeEvent, onMessageDetected, needsBox as realNeedsBox, regionFromLogEntry } from "./controller.js";
 
 // A fully in-memory stand-in for store.js + regions.js + actuate.js — no Mongo, no GCP. Records every
 // call so the tests can assert what the controller wrote AND which boxes it actuated. The actuators are
@@ -37,6 +37,12 @@ function fakeDeps({ regions = ["us-central1", "us-west1"], rows = {}, states = [
     async releaseBox(model, region, instance, _gce, reason) { calls.releaseBox.push({ model, region, instance, reason }); },
     // The live boxes-vs-backlog gate (real one reads GCE + Pub/Sub — see reconcile.js).
     async needsBox(topic, region) { calls.needsBox.push({ topic, region }); return needsBox; },
+    async claimWalk(region) {
+      const cur = state.get(region) || { region };
+      if (cur.walked) return false;
+      state.set(region, { ...cur, walked: true });
+      return true;   // the real store claims atomically (updateOne walked:{$ne:true})
+    },
   };
   return { deps, calls, state };
 }
@@ -76,6 +82,35 @@ test("decide with no regions returns empty and writes nothing", async () => {
   const out = await decide(NOW, deps);
   assert.deepEqual(out, { wouldOpen: null, wouldPark: [] });
   assert.equal(calls.setState.length, 0);
+});
+
+// ---- needsBox (detect gate): a detect event IS a message ----
+// Prod 2026-08-19, job 9cea980b: Monitoring lags 60–180s, so seconds after a publish the metric
+// reports a STALE 0 (not null — null triggers the pull probe). decideForModel answered "queue
+// empty, no boxes", no box was started, no retry path existed, and the message expired after 4h.
+// The detect hook only runs because a message was just published, so undelivered is floored at 1.
+test("needsBox starts a box when the metric reports a stale 0 seconds after a publish", async () => {
+  const out = await realNeedsBox("llama3_1_8b_v1", "us-central1", {
+    queueState: async () => ({ sub: "sub_llama3_1_8b_v1", undelivered: 0, outstanding: 0, acked: 0, waiting: null }),
+    liveBoxes: async () => ({ live: 0, boxes: [] }),
+  });
+  assert.equal(out.start, true, `stale metric 0 + 0 boxes on a detect must still start (got: ${out.why})`);
+});
+
+test("needsBox with a live box does NOT start on detect (box already there to take the message)", async () => {
+  const out = await realNeedsBox("llama3_1_8b_v1", "us-central1", {
+    queueState: async () => ({ sub: "sub_llama3_1_8b_v1", undelivered: 0, outstanding: 1, acked: 0, waiting: null }),
+    liveBoxes: async () => ({ live: 1, boxes: [{}] }),
+  });
+  assert.equal(out.start, false);
+});
+
+test("needsBox fails open when the queue read throws", async () => {
+  const out = await realNeedsBox("llama3_1_8b_v1", "us-central1", {
+    queueState: async () => { throw new Error("monitoring down"); },
+  });
+  assert.equal(out.start, true);
+  assert.match(out.why, /starting anyway/);
 });
 
 // ---- onStockout: records everywhere; ACTUATES (shrink + cascade-start) only at the 3rd in a row ----
@@ -155,6 +190,20 @@ test("a success re-arms the crossing, so a later stockout run abandons again", a
   await onOutcome("us-central1", "success", NOW + 9000, "llama3_1_8b_v1", "inst-1", deps, () => 0.99); // resets the streak to 0
   for (let i = 0; i < 5; i++) await onStockout("us-central1", NOW + 10000 + i * 1000, "llama3_1_8b_v1", deps, () => 0.99);
   assert.equal(calls.shrinkBox.length, 2, "crossing fires again after the reset");
+});
+
+// Seen in prod 2026-08-19: us-central1 entered the day with a stale streak of 3 (crossing already
+// spent in an earlier episode, never reset — no success possible while the MIG is stuck in a dead
+// zone). 16 stockouts bumped 4→19 and `streak === MAX` never fired, so the region never walked and
+// the backlog sat all day. A streak already past the threshold must still walk — exactly once.
+test("onStockout with a stale streak already past the threshold still walks — once", async () => {
+  const { deps, calls } = fakeDeps({
+    states: [{ region: "us-central1", consecutiveStockouts: 19 }],
+    rows: { "us-central1": [{ ok: 0, fail: 0 }], "us-west1": [{ ok: 5, fail: 0 }] },
+  });
+  for (let i = 0; i < 4; i++) await onStockout("us-central1", NOW + i * 1000, "llama3_1_8b_v1", deps, () => 0.99);
+  assert.equal(calls.shrinkBox.length, 1, "abandoned the stale region exactly once");
+  assert.deepEqual(calls.startBox.map(({ region }) => region), ["us-west1"], "cascaded exactly once");
 });
 
 test("onStockout with no model → records + decides, but NO actuation (topic unresolved)", async () => {

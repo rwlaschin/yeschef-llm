@@ -1,6 +1,6 @@
 {
   "name": "ollama-infra",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "GCP infrastructure scripts for Ollama LLM deployment",
   "type": "module",
   "engines": {

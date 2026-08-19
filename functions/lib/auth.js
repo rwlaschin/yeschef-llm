@@ -12,7 +12,10 @@ import { getAuth } from "firebase-admin/auth";
 import { LRUCache } from "lru-cache";
 
 // /categorize + its poll route serve the n8n scraper, which carries no Firebase token.
-const PUBLIC = new Set(["/health", "/events", "/categorize", "/categorize/:jobId", "/capacity-detect"]);
+// /capacity-reconcile is hit by Cloud Scheduler (no Firebase token); like /capacity-detect it
+// only re-derives state from live reads, so an unauthenticated call can't do anything the
+// engine wouldn't do on its own next tick.
+const PUBLIC = new Set(["/health", "/events", "/categorize", "/categorize/:jobId", "/capacity-detect", "/capacity-reconcile"]);
 const CACHE_MAX = 2000;
 const SKEW_MS = 60 * 1000;       // expire cache entries a minute before the token does
 const REVERIFY_RATE = 0.05;      // 5% of cache hits re-verify against Firebase

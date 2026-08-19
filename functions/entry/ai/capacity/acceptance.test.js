@@ -52,6 +52,12 @@ function harness({ regions = ["us-west1", "us-central1", "us-east4", "us-east1"]
       return next;   // the real store returns the post-increment streak (atomic findOneAndUpdate)
     },
     async recordMessageDetected() {},
+    async claimWalk(region) {
+      const cur = state.get(region) || { region };
+      if (cur.walked) return false;
+      state.set(region, { ...cur, walked: true });
+      return true;   // the real store claims atomically (updateOne walked:{$ne:true})
+    },
     // The live boxes-vs-backlog gate is stubbed to "yes": the real one reads GCE + Cloud Monitoring, and
     // these tests must make ZERO network calls. Its own policy is proved in reconcile.test.js; here we
     // only need the detect chain to reach the REAL actuator.

@@ -1,0 +1,740 @@
+{
+  "name": "projects/38637528569/dashboards/5852a6f2-2810-4def-83fd-7fd9bdda8546",
+  "displayName": "YesChef LLM — Prod Overview",
+  "etag": "e82ce1d3886ae39c2c3398e2bfe76afc",
+  "mosaicLayout": {
+    "columns": 48,
+    "tiles": [
+      {
+        "xPos": 12,
+        "width": 12,
+        "height": 10,
+        "widget": {
+          "title": "Backlog vs Dispatch/Drain Rate",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"pubsub.googleapis.com/subscription/num_undelivered_messages\" resource.type=\"pubsub_subscription\" resource.label.\"subscription_id\"=starts_with(\"sub_\")",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "Backlog",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"pubsub.googleapis.com/topic/send_message_operation_count\" resource.type=\"pubsub_topic\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "Dispatched/sec",
+                "targetAxis": "Y2"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"pubsub.googleapis.com/subscription/ack_message_count\" resource.type=\"pubsub_subscription\" resource.label.\"subscription_id\"=starts_with(\"sub_\")",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "Drained/sec",
+                "targetAxis": "Y2"
+              }
+            ],
+            "yAxis": {
+              "label": "backlog (messages)",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            },
+            "y2Axis": {
+              "label": "msgs/sec",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "width": 12,
+        "height": 10,
+        "widget": {
+          "title": "Cloud Run Requests by Endpoint",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"logging.googleapis.com/user/ai_requests_by_endpoint\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"endpoint\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "STACKED_BAR",
+                "minAlignmentPeriod": "60s",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "requests/sec",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "width": 12,
+        "height": 10,
+        "widget": {
+          "title": "MIG Instances by Model",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"compute.googleapis.com/instance_group/size\" resource.type=\"instance_group\" resource.label.\"instance_group_name\"=starts_with(\"ollama-\")",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MAX",
+                      "groupByFields": [
+                        "resource.label.\"instance_group_name\"",
+                        "resource.label.\"location\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "instance count",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 12,
+        "yPos": 10,
+        "width": 12,
+        "height": 11,
+        "widget": {
+          "title": "Dead-Lettered vs Acked",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"pubsub.googleapis.com/subscription/dead_letter_message_count\" resource.type=\"pubsub_subscription\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "Dead-Lettered/sec",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"pubsub.googleapis.com/subscription/ack_message_count\" resource.type=\"pubsub_subscription\" resource.label.\"subscription_id\"=starts_with(\"sub_\")",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "Acked/sec",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"pubsub.googleapis.com/subscription/oldest_unacked_message_age\" resource.label.\"subscription_id\"=starts_with(\"sub_\")",
+                    "aggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_MAX",
+                      "groupByFields": [
+                        "resource.label.\"subscription_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "Oldest unacked (${resource.label.subscription_id})",
+                "targetAxis": "Y2"
+              }
+            ],
+            "yAxis": {
+              "label": "messages/sec",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            },
+            "y2Axis": {
+              "label": "oldest unacked (seconds)",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "yPos": 10,
+        "width": 12,
+        "height": 11,
+        "widget": {
+          "title": "Cloud Run Latency (heatmap)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"run.googleapis.com/request_latencies\" resource.type=\"cloud_run_revision\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "HEATMAP",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "request latency",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "yPos": 41,
+        "width": 16,
+        "height": 10,
+        "widget": {
+          "title": "Deploy Phase Duration",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"logging.googleapis.com/user/deploy_phase_duration\"",
+                    "aggregation": {
+                      "alignmentPeriod": "3600s",
+                      "perSeriesAligner": "ALIGN_PERCENTILE_95",
+                      "crossSeriesReducer": "REDUCE_MEAN",
+                      "groupByFields": [
+                        "metric.label.\"phase\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "${metric.label.phase}",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "seconds",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 36,
+        "width": 12,
+        "height": 12,
+        "widget": {
+          "title": "Daily Cost (USD, gross)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/billing/daily_cost_usd\"",
+                    "aggregation": {
+                      "alignmentPeriod": "86400s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "STACKED_BAR",
+                "minAlignmentPeriod": "86400s",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "USD/day",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 24,
+        "yPos": 10,
+        "width": 12,
+        "height": 11,
+        "widget": {
+          "title": "VM & Deploy Errors",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"logging.googleapis.com/user/vm_deploy_errors\"",
+                    "aggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "STACKED_BAR",
+                "legendTemplate": "build/bake + startup",
+                "minAlignmentPeriod": "300s",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"logging.googleapis.com/user/mig_recreations\"",
+                    "aggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "STACKED_BAR",
+                "legendTemplate": "MIG recreations",
+                "minAlignmentPeriod": "300s",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"logging.googleapis.com/user/worker_errors\"",
+                    "aggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "STACKED_BAR",
+                "legendTemplate": "worker crashes",
+                "minAlignmentPeriod": "300s",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"logging.googleapis.com/user/mig_create_errors\" metric.labels.error_code!=\"ZONE_RESOURCE_POOL_EXHAUSTED\"",
+                    "aggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "STACKED_BAR",
+                "legendTemplate": "MIG create failures",
+                "minAlignmentPeriod": "300s",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "events",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 36,
+        "yPos": 12,
+        "width": 12,
+        "height": 9,
+        "widget": {
+          "title": "Monthly Cost — yeschef-llm (USD, 30d)",
+          "scorecard": {
+            "timeSeriesQuery": {
+              "timeSeriesFilter": {
+                "filter": "metric.type=\"custom.googleapis.com/billing/cost_by_service_usd\" AND metric.label.\"service\"=\"Compute Engine\"",
+                "aggregation": {
+                  "alignmentPeriod": "2592000s",
+                  "perSeriesAligner": "ALIGN_SUM",
+                  "crossSeriesReducer": "REDUCE_SUM"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "yPos": 21,
+        "width": 16,
+        "height": 10,
+        "widget": {
+          "title": "Deploys in progress",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"logging.googleapis.com/user/cloudbuild_active_builds\" resource.type=\"build\"",
+                    "aggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_COUNT",
+                      "groupByFields": [
+                        "metric.label.\"build_id\""
+                      ]
+                    },
+                    "secondaryAggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_COUNT"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "builds",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"logging.googleapis.com/user/deploy_baker_lifecycle\" metric.label.\"action\"=\"insert\"",
+                    "aggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "bakers",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "deploy activity / interval",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "yPos": 31,
+        "width": 16,
+        "height": 10,
+        "widget": {
+          "title": "Stale artifacts (builds/templates/bakers)",
+          "scorecard": {
+            "timeSeriesQuery": {
+              "timeSeriesFilter": {
+                "filter": "metric.type=\"custom.googleapis.com/registry/stale_artifacts\" resource.type=\"global\"",
+                "aggregation": {
+                  "alignmentPeriod": "3600s",
+                  "perSeriesAligner": "ALIGN_MEAN",
+                  "crossSeriesReducer": "REDUCE_SUM"
+                }
+              }
+            },
+            "gaugeView": {
+              "upperBound": 10
+            },
+            "thresholds": [
+              {
+                "value": 1,
+                "color": "YELLOW",
+                "direction": "ABOVE"
+              },
+              {
+                "value": 5,
+                "color": "RED",
+                "direction": "ABOVE"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "xPos": 16,
+        "yPos": 41,
+        "width": 16,
+        "height": 18,
+        "widget": {
+          "title": "Live artifacts (images/templates/workers)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/registry/live_artifacts\" metric.label.\"kind\"=\"builds\"",
+                    "aggregation": {
+                      "alignmentPeriod": "3600s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "images kept",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/registry/live_artifacts\" metric.label.\"kind\"=\"templates\"",
+                    "aggregation": {
+                      "alignmentPeriod": "3600s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "templates in use",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"custom.googleapis.com/registry/live_artifacts\" metric.label.\"kind\"=\"workers\"",
+                    "aggregation": {
+                      "alignmentPeriod": "3600s",
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_SUM"
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "legendTemplate": "workers running",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "count",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 16,
+        "yPos": 21,
+        "width": 16,
+        "height": 20,
+        "widget": {
+          "title": "Uptime by Machine (minutes, log)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "label_replace(max by (machine, zone) (label_replace(compute_googleapis_com:instance_uptime_total{monitored_resource=\"gce_instance\",instance_name!~\".*-baker-.*\"}, \"machine\", \"$1\", \"instance_name\", \"(?:ollama-)?([a-z0-9-]+?)-v[0-9]+.*\")) / 60, \"stat\", \"max\", \"\", \"\")"
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "label_replace(avg by (machine, zone) (label_replace(compute_googleapis_com:instance_uptime_total{monitored_resource=\"gce_instance\",instance_name!~\".*-baker-.*\"}, \"machine\", \"$1\", \"instance_name\", \"(?:ollama-)?([a-z0-9-]+?)-v[0-9]+.*\")) / 60, \"stat\", \"mean\", \"\", \"\")"
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "prometheusQuery": "label_replace(min by (machine, zone) (label_replace(compute_googleapis_com:instance_uptime_total{monitored_resource=\"gce_instance\",instance_name!~\".*-baker-.*\"}, \"machine\", \"$1\", \"instance_name\", \"(?:ollama-)?([a-z0-9-]+?)-v[0-9]+.*\")) / 60, \"stat\", \"min\", \"\", \"\")"
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "uptime (minutes)",
+              "scale": "LOG10"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 32,
+        "yPos": 21,
+        "width": 16,
+        "height": 20,
+        "widget": {
+          "title": "MIG Capacity — No box available vs Actual starts",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"logging.googleapis.com/user/mig_create_errors\"",
+                    "aggregation": {
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"region\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "STACKED_BAR",
+                "legendTemplate": "Stockout · ${metric.labels.region}",
+                "targetAxis": "Y1"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"compute.googleapis.com/instance_group/size\" resource.type=\"instance_group\" resource.label.\"instance_group_name\"=starts_with(\"ollama-\")",
+                    "aggregation": {
+                      "perSeriesAligner": "ALIGN_MEAN",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "resource.label.\"location\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "STACKED_BAR",
+                "legendTemplate": "Running · ${resource.labels.location}",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "instances",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 32,
+        "yPos": 41,
+        "width": 16,
+        "height": 18,
+        "widget": {
+          "title": "Capacity — Job enqueues detected (per model)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"logging.googleapis.com/user/capacity_detect\"",
+                    "aggregation": {
+                      "alignmentPeriod": "300s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"topic\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "STACKED_BAR",
+                "legendTemplate": "${metric.labels.topic}",
+                "targetAxis": "Y1"
+              }
+            ],
+            "yAxis": {
+              "label": "enqueues",
+              "scale": "LINEAR"
+            },
+            "chartOptions": {
+              "mode": "COLOR"
+            }
+          }
+        }
+      },
+      {
+        "yPos": 51,
+        "width": 16,
+        "height": 8,
+        "widget": {
+          "title": "Monthly Cost — yeschef (USD, 30d)",
+          "scorecard": {
+            "timeSeriesQuery": {
+              "timeSeriesFilter": {
+                "filter": "metric.type=\"custom.googleapis.com/billing/cost_by_service_usd\" AND metric.label.\"service\"!=\"Compute Engine\"",
+                "aggregation": {
+                  "alignmentPeriod": "2592000s",
+                  "perSeriesAligner": "ALIGN_SUM",
+                  "crossSeriesReducer": "REDUCE_SUM"
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}
