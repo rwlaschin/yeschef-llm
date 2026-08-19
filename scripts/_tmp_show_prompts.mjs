@@ -1,0 +1,10 @@
+import { MongoClient } from "mongodb";
+import dotenvFlow from "dotenv-flow";
+dotenvFlow.config({ node_env: "dev" });
+const c = new MongoClient(process.env.MONGO_URI);
+await c.connect();
+const col = c.db(process.env.MONGO_DB || "yeschef").collection("prompt_library");
+const rows = await col.find({}).toArray();
+console.log("TOTAL prompt_library:", rows.length);
+for (const r of rows) console.log(`_id=${r._id} active=${r.active} name=${JSON.stringify(r.name)} mapping=${JSON.stringify(r.mapping)} len=${(r.content||"").length}`);
+await c.close();

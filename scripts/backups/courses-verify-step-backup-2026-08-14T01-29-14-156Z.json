@@ -1,0 +1,333 @@
+{
+  "plan_library": [
+    {
+      "_id": "6a2caac3817b5236ffd8bb7d",
+      "name": "Fetch Legal ",
+      "kind": "fanout",
+      "active": true,
+      "requiredFlags": [],
+      "inputs": [
+        "institution",
+        "legals"
+      ],
+      "context": [],
+      "tools": [
+        "web_search",
+        "web_fetch"
+      ],
+      "order": "V",
+      "mapOf": "Legals as |legal|",
+      "subtype": "compliance",
+      "failStep": "",
+      "successStep": "",
+      "includeInOutput": true,
+      "model": "llama3_1_8b_v1",
+      "fail": "Any of: a rule with no code; a fabricated, guessed, or memory-supplied code; a code that does not match its rule's content; a bullet that is only a heading or category label rather than an actual followable rule; any preamble, narrative, or commentary beyond the headings and their bulleted rules; or an INCOMPLETE result that omits a requirement which legally applies (e.g. beverages/fluids served with meals) or treats the example areas as an exhaustive list.",
+      "pass": "Output is ONLY area headings, each followed by its bulleted rules — no preamble, narrative, closing remarks, or commentary. Each bullet is ONE concrete, followable rule paired with the real regulatory code that governs it (e.g. a CFR section or F-tag), retrieved from an authoritative source and never invented, with the code matching the content of its rule. The headings and bullets COMPREHENSIVELY cover the food, meal, and nutrition requirements that apply to {{legal}} — including beverages/fluids served with meals and any area not explicitly named in the task — not merely the example areas.",
+      "instruction": "Find EVERY regulation that governs meals, food, and nutrition service for {{#eq Institution 1}}a{{/eq}} \"{{join Institution \", \"}}\" facilit{{#ne Institution 1}}ies{{/ne}}{{#eq Institution 1}}y{{/eq}} under {{legal}} — the complete set, not a sample. The areas below are EXAMPLES to orient your search, NOT a limit: dietary restrictions, menus and meal patterns, beverages and fluids offered with meals, food preparation, cooking, handling, sanitation, storage, and temperature. Include any requirement that legally applies to feeding residents even if it is not named here; never drop one just because it was not listed.\n\nGroup the rules under short area headings (e.g. Beverages & Fluids, Food Preparation, Storage & Temperature, Sanitation). Under each heading, list each rule as a bullet: the rule text followed by its regulatory code in parentheses. Output ONLY the headings and their bulleted rules — no preamble, narrative, or commentary.",
+      "createdAt": "2026-06-13T00:56:35.768Z",
+      "updatedAt": "2026-06-15T02:27:53.107Z",
+      "modelProd": "llama3_3_70b_v1",
+      "style": "structured"
+    },
+    {
+      "_id": "6a2caac3817b5236ffd8bb7a",
+      "name": "Build Daily Recipes",
+      "subtype": "recipe",
+      "kind": "chain",
+      "mapOf": "",
+      "active": true,
+      "includeInOutput": true,
+      "requiredFlags": [],
+      "context": [
+        "Build Seasonal Menus"
+      ],
+      "tools": [
+        "web_search",
+        "web_fetch"
+      ],
+      "failStep": "",
+      "successStep": "",
+      "order": "v",
+      "fail": "A menu dish has no recipe; a recipe scales a diet variant to the full {{residents}} instead of its share, or multiplies the serving size by the headcount; a recipe is missing batch yield / critical temps / hold temps; a recipe omits its diet or texture label or includes a banned ingredient; or it departs from the menu — wrong diet, wrong texture, a substituted dish, or a swapped ingredient.",
+      "pass": "Every dish on the day's menu has a complete recipe: a normal single-serving portion, a batch that yields only that diet's share of ~{{residents}} residents (plus a small buffer) with ingredient totals scaled to that batch, prep and service steps, HACCP critical temps, and hold temps. Across a meal's diet variants the portions sum to about {{residents}}, not {{residents}} each. Each recipe is labeled with its diet and texture, matches the dish the menu specified (same diet, same texture), and contains no banned ingredient.",
+      "inputs": [
+        "residents"
+      ],
+      "instruction": "Write every kitchen recipe needed for day {{day}} ({{weekday (date day)}}, {{date day}}). The day's full menu is provided as context — it already settles which dishes to cook and has applied diet, season, texture, and restriction rules. Produce one complete recipe for each distinct dish on it (all meals), exactly as specified — same dish, same diet, same texture; do not substitute, re-season, or swap ingredients.\n\nPortioning — about {{residents}} residents eat each meal in TOTAL, split across the diet variants. Distribute that headcount across the diets by their typical statistical share, then add a small buffer. Each recipe's batch yields only ITS diet's slice — never the full {{residents}}; all variants of one meal sum to roughly {{residents}} (+ buffer). Set a normal single-serving portion (e.g. 1 cup of a casserole; a side salad with ~¼ cup tomatoes) and scale only the INGREDIENT totals up to that batch's portion count — never multiply the serving size by the headcount.\n\nWhere dishes share components, reuse the same prep so the order list stays tight. Cost tier: {{costTier}}.",
+      "model": "llama3_1_8b_v1",
+      "createdAt": "2026-06-13T00:56:35.768Z",
+      "updatedAt": "2026-06-15T02:27:53.107Z",
+      "modelProd": "llama3_3_70b_v1",
+      "style": "structured"
+    },
+    {
+      "_id": "6a2caac3817b5236ffd8bb7b",
+      "subtype": "menu_plan",
+      "kind": "fanout",
+      "active": true,
+      "requiredFlags": [],
+      "context": [
+        "Fetch Legal "
+      ],
+      "tools": [
+        "web_search",
+        "web_fetch"
+      ],
+      "order": "r",
+      "mapOf": "days as |day|",
+      "inputs": [
+        "institution",
+        "diets",
+        "restrictions",
+        "preferences",
+        "legals",
+        "meals"
+      ],
+      "name": "Build Seasonal Menus",
+      "fail": "Any of: a missing meal; a meal that does not give every diet ({{join diets \", \"}}) its own suitable dish; a meal with no beverages; a banned or restricted ingredient present; a legal/safety or {{costTier}} budget violation; an out-of-season item for {{season (date day)}}{{#if flags.pureed}}; or any dish with an ingredient that will not puree smooth{{/if}}.",
+      "pass": "For day {{day}}: every meal ({{join meals \", \"}}) is present, and within each meal EVERY diet ({{join diets \", \"}}) has its own suitable dish — never one dish covering all diets. Each meal includes appropriate beverages. No banned or restricted ingredient appears. Every dish stays within the legal and food-safety requirements in the context above and within the {{costTier}} budget, and uses produce in season for {{season (date day)}}{{#if flags.pureed}}; every dish uses only blendable ingredients — nothing with bones, shells, pits, hard seeds, or gristle{{/if}}.",
+      "instruction": "Plan day {{day}} of {{itemCount}} ({{date day}}) for {{residents}} residents at a {{join institution \", \"}} facility — provide {{join Meals \", \"}}.\n\nHonor EVERY diet: {{join diets \", \"}}. Stay within the legal and food-safety requirements in the context above. Keep it within a {{costTier}} budget.\n{{#if preferences}}Favor resident preferences where you can: {{join preferences \", \"}}.{{/if}}\nResidents per diet: {{#each (allocate diets residents) as |d|}}{{d.diet}} {{d.demand}}{{#unless @last}}, {{/unless}}{{/each}} (total {{residents}}).\n{{#if (season (date day))}}\nUse produce that is in season for {{season (date day)}}{{#if region}} in {{region}}{{/if}}.\n{{/if}}\n{{#if region}}{{#eq (weekday (date day)) \"Friday\"}}\nMake today's dinner a {{region}} regional theme.\n{{/eq}}{{/if}}\n{{#if flags.pureed}}\nEvery dish must be safe to blend — use only ingredients that can go in a blender (no bones, shells, pits, hard seeds, gristle, or anything that won't puree smooth).\n{{/if}}\n\nThe only functions you may call are: {{join tools \", \"}}. Never call or emit a function/tool call for any other name (e.g. meal_plan, menu_planner) — output your meal plan as plain YAML content, not as a {\"name\": ..., \"parameters\": ...} object.\n",
+      "failStep": "",
+      "successStep": "",
+      "includeInOutput": true,
+      "model": "llama3_1_8b_v1",
+      "createdAt": "2026-06-13T00:56:35.768Z",
+      "updatedAt": "2026-06-24T23:28:14.223Z",
+      "modelProd": "llama3_3_70b_v1",
+      "style": "structured"
+    },
+    {
+      "_id": "6a2caac3817b5236ffd8bb7c",
+      "name": "Build Inventory",
+      "subtype": "inventory",
+      "kind": "chain",
+      "mapOf": "",
+      "active": true,
+      "includeInOutput": true,
+      "requiredFlags": [],
+      "inputs": [
+        "residents"
+      ],
+      "context": [
+        "Build Daily Recipes"
+      ],
+      "tools": [
+        "normalize_ingredients"
+      ],
+      "model": "llama3_1_8b_v1",
+      "failStep": "",
+      "successStep": "",
+      "order": "x",
+      "fail": "Any of: an ingredient from day {{day}}'s recipes with no row; a row missing its unit or quantity; a quantity not scaled to the day's portion counts; a missing used_in; an unconverted \"to taste\"/\"pinch\"/\"smidgen\" amount; or a row for an ingredient not present in the day's recipes.",
+      "pass": "Every ingredient used in day {{day}}'s recipes appears as exactly one row, each with its unit and a quantity scaled to that day's portion counts (diet distribution: {{#each (allocate diets residents) as |d|}}{{d.diet}} {{d.pct}}%{{#unless @last}}, {{/unless}}{{/each}}), plus a used_in naming the recipes or meals it comes from. Any \"to taste\", \"a pinch\", or \"a smidgen\" amount has been converted to 0.25 tsp. No row exists for an ingredient that is not in the day's recipes.",
+      "instruction": "This is day {{day}} for {{residents}} residents with {{count diets}} diets, distribution: {{#each (allocate diets residents) as |d|}}{{d.diet}} {{d.pct}}%{{#unless @last}}, {{/unless}}{{/each}}.\n\nPlease do the following conversion when there is no measurable amount — \"to taste\", \"a pinch\", \"a smidgen\", or the equivalent in ANY language → amount 0.25, unit \"tsp\".\n",
+      "createdAt": "2026-06-13T00:56:35.768Z",
+      "updatedAt": "2026-06-15T02:27:53.107Z",
+      "modelProd": "llama3_3_70b_v1",
+      "style": "structured"
+    },
+    {
+      "_id": "6a2ccc90b64a693b981892d7",
+      "name": "Analyze Daily Nutrition",
+      "subtype": "nutrition",
+      "kind": "chain",
+      "mapOf": "",
+      "active": true,
+      "includeInOutput": true,
+      "requiredFlags": [],
+      "context": [
+        "Build Daily Recipes"
+      ],
+      "tools": [
+        "web_search",
+        "web_fetch"
+      ],
+      "failStep": "",
+      "successStep": "",
+      "order": "w",
+      "inputs": [
+        "residents"
+      ],
+      "model": "llama3_1_8b_v1",
+      "instruction": "Produce the nutritional analysis for day {{day}}'s recipes. The day's recipes are provided as context above — analyze them exactly as written; do not invent, substitute, or re-portion any dish.\n\nFor EACH recipe, give a per-serving nutritional profile: calories, protein, carbohydrates, total fat, saturated fat, sodium, potassium, phosphorus, fiber, and added sugar, in the units of the user's locale. Base every number on that recipe's actual ingredients and portion — do not guess.\n\nThen, for EACH diet present ({{join diets \", \"}}), state explicitly whether the day's meals fall within that diet's clinical limits, and name any recipe and nutrient that exceeds one — e.g. low-sodium: sodium per meal/day within limit; renal: potassium and phosphorus within limit; diabetic: carbohydrates and added sugar within limit.",
+      "pass": "Every recipe in day {{day}}'s context has a per-serving nutritional profile covering calories, protein, carbohydrates, total fat, saturated fat, sodium, potassium, phosphorus, fiber, and added sugar, in locale-appropriate units, with numbers grounded in that recipe's actual ingredients and portion. Each diet present ({{join diets \", \"}}) has an explicit within-limits-or-exceeds verdict tied to its clinical targets (low-sodium → sodium, renal → potassium & phosphorus, diabetic → carbohydrates & added sugar), and every exceedance names the offending recipe and nutrient.",
+      "fail": "Any of: a recipe with no nutritional profile or a missing nutrient field; a diet present ({{join diets \", \"}}) with no within-limits verdict; an exceedance that does not name the recipe and nutrient; numbers fabricated rather than derived from the recipe's ingredients and portion; or analysis of dishes that are not in day {{day}}'s recipes.",
+      "createdAt": "2026-06-13T03:20:47.415Z",
+      "updatedAt": "2026-06-15T02:27:53.107Z",
+      "modelProd": "llama3_3_70b_v1",
+      "style": "structured"
+    },
+    {
+      "_id": "6a2f0e33a58659898eb33166",
+      "name": "Build Order Form",
+      "subtype": "procurement",
+      "kind": "fanout",
+      "mapOf": "",
+      "active": true,
+      "includeInOutput": true,
+      "requiredFlags": [],
+      "inputs": [],
+      "context": [
+        "Build Inventory"
+      ],
+      "tools": [
+        "web_search",
+        "web_fetch"
+      ],
+      "model": "llama3_1_8b_v1",
+      "modelProd": "llama3_3_70b_v1",
+      "order": "y",
+      "failStep": "",
+      "successStep": "",
+      "instruction": "Build ONE purchasing order form covering the ENTIRE meal plan ({{days}} days{{#if weeks}}, ~{{weeks}} weeks{{/if}}) from the inventory ingredient lists provided as context above. The context holds every day inventory — aggregate across all of them. Do NOT produce a per-day order.\n\nAssign each ingredient an ordering cadence and place it in the matching group:\n- monthly order — shelf-stable items (dry goods, canned, frozen): one purchase for the whole period; quantity = total needed across all days.\n- weekly order — short shelf-life items: ordered once per week; quantity = the amount needed per week.\n- daily order — highly perishable items (fresh produce, dairy, bakery, fresh protein): ordered per delivery; quantity = the amount needed per delivery.\n\nWithin each group, organize by category and convert amounts into the vendor BULK order unit, rounding each quantity UP to the next whole vendor unit. Use web_search / web_fetch to find a real vendor, SKU, vendor URL, contact, and unit price; set price = unit price * quantity. If you cannot verify a field, leave it ~ and explain in notes — NEVER invent one. Carry used_in through from the inventory.",
+      "pass": "The order form covers the whole plan period in a single form with three cadence groups — monthly, weekly, and daily — and every ingredient from the inventory context appears in exactly one group, assigned by perishability (shelf-stable -> monthly, short shelf-life -> weekly, highly perishable -> daily). Within each group items are organized by a valid category, quantities are in whole vendor bulk units (rounded up) and reflect that cadence amount (monthly = whole-period total, weekly = per-week, daily = per-delivery), each carries used_in, and every procurement field (sku, vendor, vendor url, contact, price) is either web-sourced — with price = unit price * quantity — or left ~ with a notes flag. No inventory ingredient is dropped and none is added that was not in the inventory.",
+      "fail": "Any of: per-day forms instead of one period-wide form; a missing monthly, weekly, or daily group; an inventory ingredient absent from every group or placed in more than one; an item with no or invalid category; a quantity not in whole vendor units or not matching its cadence; a fabricated sku/vendor/price not web-sourced and not flagged ~; a price that is not unit price * quantity; a missing used_in; or an item not present in the inventory.",
+      "createdAt": "2026-06-14T20:25:22.905Z",
+      "updatedAt": "2026-06-15T02:27:53.107Z",
+      "style": "structured"
+    },
+    {
+      "_id": "6a352fab1466253eb8af833c",
+      "name": "Build Protein Grid",
+      "active": true,
+      "context": [],
+      "fail": "Any missing day/mealtime slot, a protein disallowed on the {{diet}} diet, or output that is not the pipe-delimited rows.",
+      "includeInOutput": true,
+      "inputs": [
+        "diets",
+        "meals",
+        "preferences"
+      ],
+      "instruction": "For the {{diet}} diet, assign ONE protein per day and mealtime across {{days}} days and these mealtimes: {{join meals \", \"}}. A protein = a type plus a cut/form (e.g. Beef / chuck, Egg / scrambled, Lentil). Honor the {{diet}} diet strictly (vegan = no animal products; vegetarian = no meat/poultry/seafood; renal = control phosphorus & potassium; honor no-pork/halal/kosher).{{#if costTier}} Respect the {{costTier}} cost tier.{{/if}}{{#if region}} Respect {{region}} regional/cultural availability.{{/if}}{{#if preferences}} Where it doesn’t conflict, lean toward resident preferences: {{join preferences \", \"}}.{{/if}} Rotate proteins so the same one is not repeated on consecutive days for a mealtime. Label days Day 1 through Day {{days}}.\n\nOutput ONLY pipe-delimited rows, one per line, with this exact header and columns and nothing else:\nDay | Mealtime | Type | Cut\nLeave Cut blank when a protein has no meaningful cut.",
+      "kind": "fanout",
+      "mapOf": "diets as |diet|",
+      "model": "llama3_1_8b_v1",
+      "order": "A",
+      "pass": "Every day (1..{{days}}) × mealtime ({{join meals \", \"}}) has exactly one protein row, all appropriate for the {{diet}} diet, in the `Day | Mealtime | Type | Cut` format with no prose.",
+      "requiredFlags": [],
+      "style": "structured",
+      "subtype": "protein_grid",
+      "updatedAt": "2026-08-13T21:02:33.934Z"
+    },
+    {
+      "_id": "6a36faab1466253eb8b13ae2",
+      "name": "Build Recipes",
+      "active": true,
+      "context": [],
+      "fail": "A mealtime with no entrée, a diet fed by no row, the same dish written twice, a Kind other than `entree`, an empty or uncategorized Components cell, a `name:category` pair written into the Protein/Starch/Vegetable/Fruit columns, Components naming an accompaniment that is not part of the dish, a component disallowed on a diet the row claims, or output that is not the pipe-delimited rows.",
+      "includeInOutput": true,
+      "inputs": [
+        "diets",
+        "meals",
+        "preferences"
+      ],
+      "instruction": "For DAY {{slot.day}}, write THE ENTRÉE for each of these mealtimes: {{join meals \", \"}}. ONE CALL COVERS EVERY DIET: {{join diets \", \"}}. Write the FEWEST dishes that feed all of them — one dish per mealtime wherever a single dish satisfies every diet, and an extra row ONLY for a diet that genuinely cannot eat it. Diets share a meal by default; a separate dish per diet is the exception you must justify by the diet's own restriction. AN ENTRÉE IS ONE DISH: it carries its own PROTEIN and nothing else — the starch, vegetable and fruit columns stay EMPTY on an entrée row, because the starch and vegetable positions are dishes of their own written by the next step. THIS IS DAY {{slot.day}} OF A {{days}}-DAY CYCLE, for the {{slot.diet}} diet. THIS DAY’S PROTEIN IS DECIDED BY ARITHMETIC ON THE DAY NUMBER, never by preference. The chef’s protein pool is printed below IN ROTATION ORDER — the proteins this kitchen serves most often come first — and each entry states the diets it is allowed on:\n{{proteinLines proteinWeights}}{{#each addedProteins}}\n- {{this}}{{/each}}\n\nIf no pool is printed above this line, then this plan reached you without its protein list. That is incomplete input: FAIL and say the protein pool is missing. Never invent a pool of your own.\nRead that list in the printed order and STRIKE OUT every entry not allowed on the {{slot.diet}} diet. Number what remains 1, 2, 3 … in that same order, and TAKE ENTRY NUMBER {{slot.day}} — wrapping back to entry 1 if the list is shorter than {{slot.day}}. That entry is the protein for {{#if (gt (count meals) 1)}}the FIRST mealtime of day {{slot.day}}. The SECOND mealtime takes the entry numbered {{slot.day}} PLUS ONE, the third the one after that, and so on — each mealtime steps exactly one place further down the numbered list, wrapping to entry 1 at the end. Step down the list ONCE PER MEALTIME and no further: this day has {{count meals}} mealtimes, so you use {{count meals}} entries and stop{{else}}{{join meals \", \"}} on day {{slot.day}} — this day has ONE mealtime, so you use ONE entry and stop. Do NOT continue down the list{{/if}}. Before you write any row, name the numbered entry you are using for each mealtime in your Why block, so the count is visible and can be checked. Build each mealtime’s entrée on the protein you land on and no other, and do not substitute one because it suits the mealtime better. You are writing this ONE day and you cannot see what the other days were given, so nothing will catch a repeat for you: choose this day’s proteins and preparations from its POSITION IN THE CYCLE, so that day 1 through day {{days}} do not land on the same dish. The first dish that comes to mind is the one every other day will also reach for — on day {{slot.day}} of {{days}}, pick differently. THE COOKING METHOD IS CHOSEN BY THE DAY TOO: count {{slot.day}} down this list, wrapping if you run past the end — roasted, braised, baked, grilled, stewed, poached, stir-fried — and cook this day’s main entrée that way. A protein that comes round more than once in the cycle must arrive under a different method and a different dish name each time. Honor every diet strictly (vegan = no animal products; vegetarian = no meat/poultry/seafood; renal = control phosphorus & potassium; honor no-pork/halal/kosher). {{#if costTier}}Respect the {{costTier}} cost tier.{{/if}}{{#if region}} Respect {{region}} regional/cultural availability.{{/if}} Every row is labelled Day {{slot.day}} — you are writing DAY {{slot.day}} ONLY. Never write a row for any other day, and never write a Mealtime that is not one of: {{join meals \", \"}}. A row for another day or another mealtime is not yours to write; the other days are separate calls.\n\nKind is always `entree` on every row.\nDiets is a comma-separated list of the diets this dish satisfies, drawn ONLY from this plan's diets: {{join diets \", \"}}. It is the dish's own declaration — nothing downstream can work out who may eat a dish except from this column.\nThe dish name says how it is made — `<cooking method> <protein> with <starch>`, not `<protein>`. Never a bare ingredient. Those angle brackets are a FORM to fill from this day’s own choices, never words to copy.\nComponents is THIS DISH'S OWN ingredient list, written as `Ingredient:category; Ingredient:category`, with category one of: protein, starch, vegetable, fruit, beverage, dairy, fat, seasoning. It is never empty — every dish is made of something. List ONLY what is cooked into this dish — a braised meat over a grain is `<meat>:protein; <grain>:starch`. NEVER list the dishes plated beside it: the side, the fruit cup and the drink are rows of their own, and naming them here turns one dish into a whole meal.\nNEVER write the same dish twice under different wording. One dish exists once, on one row, declaring every diet it feeds.\n\nCHECK EVERY ROW AGAINST THESE TWO RULES BEFORE YOU WRITE IT:\n1. A DIET CLAIM IS A SAFETY CLAIM. Read the dish's own Components, then claim a diet only if every one of them is allowed on it. Meat, poultry, seafood or their stocks → NOT vegetarian, NOT vegan. Egg, dairy or honey → NOT vegan. Wheat, barley or rye → NOT gluten-free. A dish built on meat and a wheat, barley or rye grain is `standard` and nothing more. Leaving a diet off is safe; claiming one falsely is not.\n2. Protein, Starch, Vegetable and Fruit each hold ONE BARE INGREDIENT NAME — `Beef`, never `Beef:protein`, never a semicolon-separated list. The `name:category` form appears in Components and nowhere else.",
+      "kind": "fanout",
+      "mapOf": "dietDays as |slot|",
+      "model": "llama3_1_8b_v1",
+      "order": "B",
+      "pass": "Every mealtime ({{join meals \", \"}}) on Day {{slot.day}} is fed, every diet in {{join diets \", \"}} appears in some row's Diets list, no two rows name the same dish, every row's Components names only ingredients cooked into that dish, each tagged with a category, in the `Day | Mealtime | Dish | Protein | Starch | Vegetable | Fruit | Kind | Diets | Components` format with no prose, and every Kind is `entree`.",
+      "requiredFlags": [],
+      "style": "structured",
+      "subtype": "recipes",
+      "updatedAt": "2026-08-13T23:08:41.885Z"
+    },
+    {
+      "_id": "6a36faab1466253eb8b13ae4",
+      "name": "Build Nutrients",
+      "active": true,
+      "context": [],
+      "fail": "Any missing day/mealtime slot, non-numeric values, or output that is not the pipe-delimited rows.",
+      "includeInOutput": true,
+      "inputs": [
+        "diets",
+        "meals"
+      ],
+      "instruction": "For the {{diet}} diet, give per-meal nutrient totals for each day and mealtime across {{days}} days and these mealtimes: {{join meals \", \"}}. Estimate calories, protein (g), sodium (mg), and carbohydrates (g) for the meal. Keep values appropriate to the {{diet}} diet (renal = control sodium & protein; diabetic = moderate carbs). Label days Day 1 through Day {{days}}.\n\nOutput ONLY pipe-delimited rows, one per line, with this exact header and columns and nothing else:\nDay | Mealtime | Calories | Protein g | Sodium mg | Carbs g",
+      "kind": "fanout",
+      "mapOf": "diets as |diet|",
+      "model": "llama3_1_8b_v1",
+      "order": "C",
+      "pass": "Every day (1..{{days}}) × mealtime ({{join meals \", \"}}) has exactly one row of numeric totals in the `Day | Mealtime | Calories | Protein g | Sodium mg | Carbs g` format with no prose.",
+      "requiredFlags": [],
+      "style": "structured",
+      "subtype": "nutrients",
+      "updatedAt": "2026-08-13T21:02:33.987Z"
+    },
+    {
+      "_id": "6a763c2613403f653cfb4951",
+      "name": "Categorize Proteins By Diet",
+      "active": true,
+      "context": [],
+      "fail": "Fewer than 12 or more than 20 rows; a duplicated protein; a name carrying a cut, form, preparation or dish (\"chicken thigh\", \"ground beef\", \"scrambled egg\", \"beef stew\"); an empty Why; a Why that merely describes the food instead of naming what decided it; a Diets value outside {{join diets \", \"}}; a diet left with no protein; every protein tagged with every diet; or output that is not the pipe-delimited rows. Or a protein the chef added is missing from the output.",
+      "includeInOutput": true,
+      "inputs": [
+        "diets"
+      ],
+      "instruction": "Propose the RAW PROTEINS this kitchen should rotate through for these diets: {{join diets \", \"}}.\n\nPropose 12 to 20 distinct proteins spanning meat, poultry, seafood, egg, dairy and plant sources so the cycle has real variety. For each, list every diet from {{join diets \", \"}} it is an appropriate routine choice for, and give the reason that decided it — the rule, restriction or nutrient limit that applies.{{#if costTier}} Respect the {{costTier}} cost tier.{{/if}}{{#if region}} Respect {{region}} regional availability.{{/if}}{{#if proteinWeights}}\n\nThe chef has ALREADY chosen the proteins for this cycle — do NOT propose your own. Use EXACTLY these and classify every one of them. The number in parentheses is how much of the cycle that protein should fill, and any diets listed after it are the ones the chef marked it for:\n{{proteinLines proteinWeights}}{{/if}}{{#if addedProteins}}\n\nThe chef has ALSO added these proteins by hand — include EVERY one of them in your output and classify it the same way, even if you would not have proposed it: {{join addedProteins \", \"}}.{{/if}}",
+      "kind": "aggregation",
+      "mapOf": "",
+      "model": "llama3_1_8b_v1",
+      "order": "@",
+      "pass": "Between 12 and 20 rows, each a DISTINCT raw protein named as the bare ingredient with no cut, form, preparation or dish word; every row has a non-empty Why naming the rule, restriction or nutrient limit that decided it; Diets names only diets drawn from {{join diets \", \"}}; every diet in {{join diets \", \"}} appears in at least one row; and the output is the pipe-delimited rows with no prose. Every protein the chef added is present in the output.",
+      "requiredFlags": [],
+      "style": "structured",
+      "subtype": "protein_dietary_categorization",
+      "updatedAt": "2026-08-07T20:26:48.625Z",
+      "createdAt": "2026-08-07T20:12:22.848Z"
+    },
+    {
+      "_id": "6a774dee46da04360288571f",
+      "name": "Build Courses",
+      "active": true,
+      "context": [
+        "Build Recipes"
+      ],
+      "fail": "A slot from the previous step left with no row, a row whose Dish is a sauce, gravy, dressing, dip, relish or condiment rather than a dish, an empty or uncategorized Components cell, a `name:category` pair written into the Protein/Starch/Vegetable/Fruit columns, courses invented for positions no course list asked for, or output that is not the pipe-delimited rows. ",
+      "includeInOutput": true,
+      "inputs": [
+        "diets",
+        "meals",
+        "preferences"
+      ],
+      "instruction": "The previous step's result gives you the ENTRÉES for Day {{slot.day}}, each declaring the diets it feeds. For each of those slots, write the dishes that accompany that entrée — never the entrée itself, which already exists.\n\nTHIS IS DAY {{slot.day}} OF A {{days}}-DAY CYCLE, for the {{slot.diet}} diet. EVERY ACCOMPANIMENT IS CHOSEN FOR THE ENTRÉE PRINTED ABOVE, and that entrée is different on every day of the cycle — so this day's accompaniments are different too. Read the entrée's own ingredients first: a side that repeats the starch or the vegetable already cooked into the entrée is the same food twice on one tray, and the same side written on every day of the cycle is the defect this step exists to prevent.\n\n{{#if pairingMethodology}}Choose each accompaniment for flavor affinity with the entrée using this approach: {{pairingMethodology}}.{{/if}}\n{{#if courseList}}This meal offers exactly: {{courseList}}. The ENTRÉE positions in that list are ALREADY WRITTEN by the previous step — skip them entirely and never repeat them. Write one row for each of the REMAINING, NON-ENTRÉE positions, no more and no fewer.{{else}}No course list was given, so write SIDES ONLY — one or two `side` rows per slot. Do not invent soup, salad, dessert, drink, appetizer, starch or vegetable positions that were not asked for.{{/if}}\n\nA SAUCE IS NEVER A DISH ON ITS OWN. Never give a sauce, gravy, dressing, dip, relish or condiment a row to itself — it has no Kind it can legally take. It arrives as PART OF A DISH: the dish is `Mashed Potatoes and Gravy`, not a `Gravy` row beside a `Mashed Potatoes` row. Write that one dish, and name the sauce in its Components as `<sauce>:seasoning`.\n\nMEALTIME is the SERVICE PERIOD the dish is served in — WHEN the tray goes out. Its only legal values are this plan's own mealtimes: {{join meals \", \"}}. Copy one of those, spelled exactly as written there, and write nothing else in that column. Every row on this call carries the mealtime of the slot it belongs to.\nMEALTIME AND KIND ARE INDEPENDENT: Mealtime is WHEN it is served, Kind is WHAT POSITION it fills on the tray. One does not decide the other. A word can sit on both lists — `dessert` is the clearest case:\n  - `dessert` as MEALTIME = the service period when the tray goes out (a dessert service period).\n  - `dessert` as KIND = the course position on the tray (a dessert course served during the lunch mealtime).\nSo a dessert-Kind row is normally served at lunch or dinner, NOT at a mealtime called dessert; writing `dessert` in Mealtime just because Kind is `dessert` is a defect. Check the Mealtime cell against this plan's mealtime list and the Kind cell against the Kind list; a value that is not on the list for THAT column is a defect, even when it is on the other one.\nKIND is the COURSE POSITION the dish occupies on the tray — what it IS to the diner, not what it is made of. Kind is one of: side, dessert, drink, appetizer, soup, salad, starch, vegetable. Never `entree`.\nDIETS lists which diets the dish is SAFE for. Every value in that cell must be copied exactly from this plan's diet list: {{join diets \", \"}}. Separate several with a comma. WRITE NOTHING ELSE IN THAT CELL — never a diet that is not on that list, never the word NOT, never a negation, never a reason, never a parenthesis. `NOT vegetarian` and `standard (no nuts)` are both defects; `{{join diets \", \"}}` is the shape. If the dish is unsafe for every diet on the list, do not write the dish at all.\nDiets SHARE these dishes: write one row that feeds them all wherever possible, and a separate row only where a diet cannot have it.\nFill only the component columns the dish actually occupies; leave the others empty.\n\nOutput ONLY pipe-delimited rows, one per line, with this header and nothing else, UNLESS you are specifically instructed to overload it:\nDay | Mealtime | Dish | Protein | Starch | Vegetable | Fruit | Kind | Diets | Components",
+      "kind": "fanout",
+      "mapOf": "dietDays as |slot|",
+      "model": "llama3_1_8b_v1",
+      "order": "Ba",
+      "pass": "Every cell named in the response has at least one accompanying data row; every row's Components names only ingredients cooked into that dish, each tagged with a category; Each column is present  per the requirements.  Each row has the same number of columns and is delimited with '|'.",
+      "requiredFlags": [],
+      "style": "structured",
+      "subtype": "courses",
+      "updatedAt": "2026-08-14T01:28:49.142Z",
+      "failStep": "",
+      "modelProd": "",
+      "successStep": "",
+      "tools": []
+    },
+    {
+      "_id": "6a7bacfbdff6312de74171a8",
+      "name": "Build Recipe Details",
+      "active": true,
+      "context": [
+        "Build Recipes",
+        "Build Courses"
+      ],
+      "fail": "A block for any dish other than {{row.Dish}}, more than one DISH block, a renamed dish, an ingredient that is not in its Components, a missing Yield or Portion, a component with no quantity, unit or prep state, a unit outside the accepted list, `to taste` in place of a number, an oven setting recorded as criticalTempF, fewer than five steps, a cooking step stating no time or no temperature, a method that never portions, or any output that is not the DISH/YIELD/PORTION/COMPONENT/SEASONING/STEP lines.",
+      "includeInOutput": true,
+      "inputs": [],
+      "instruction": "You are writing ONE dish and only one: {{row.Dish}} — the {{row.Kind}} for DAY {{row.Day}}, {{row.Mealtime}}, serving these diets: {{row.Diets}}. It is one row of the tables above, and it is already decided: never rename it, never substitute another dish, and never write a second dish.\n\nIts ingredients are exactly its Components: {{row.Components}} (written `Ingredient:category`). Use all of them, named exactly as they are written there, and add nothing beyond the seasonings the dish plainly needs.\n\nWrite the DETAIL of that dish. A side, soup, salad, dessert or drink is a dish a cook has to make: with no method and no quantities it is not a recipe.\n\nOpen with `DISH:` and the name copied exactly: {{row.Dish}}.\n\nState a Yield of 50 portions unless the dish is plainly a sauce, a garnish or a condiment, which yield more.\n\nState, in this order: YIELD, PORTION, one COMPONENT line per ingredient, one SEASONING line per seasoning, then at least five STEP lines ending with the step that portions it.\n\nA COLD dish is still a recipe: it still states measured components, a yield, a portion and ordered steps, and its holding step states 41 as the food temperature.\n\nEvery number is for the WHOLE BATCH at the stated Yield, never for one plate. Every component states a quantity, a unit from the accepted list, and a prep state. `criticalTempF` is the temperature the FOOD reaches, never the oven setting.",
+      "kind": "fanout",
+      "model": "llama3_1_8b_v1",
+      "order": "Bb",
+      "pass": "Exactly one DISH block, for {{row.Dish}}, named exactly as the table names it. The block states a Yield, a Portion, one measured COMPONENT line per ingredient of its Components with a unit from the accepted list and a prep state, measured SEASONING lines, and at least five STEP lines with make_ahead before on_line, both numbers on every step that cooks or holds, and a portioning step last.",
+      "requiredFlags": [],
+      "style": "structured",
+      "subtype": "recipe_detail",
+      "updatedAt": "2026-08-12T14:47:25.268Z",
+      "rowsOf": "Build Recipes, Build Courses as |row|",
+      "columns": "Day | Mealtime | Dish | Protein | Starch | Vegetable | Fruit | Kind | Diets | Components"
+    }
+  ]
+}

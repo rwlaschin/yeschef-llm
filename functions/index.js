@@ -11,6 +11,12 @@
 // Routes are lazy-imported on first hit (cheaper cold start than top-level imports).
 // ============================================================
 
+// FIRST, before anything can log: Cloud Run does NOT map console.error to ERROR here — measured
+// 139 INFO / 111 blank / 0 ERROR over 90 minutes — so reconcile_failed, actuate_failed and every
+// swallowed exception were indistinguishable from routine output. Same shim the worker uses.
+import { installSeverityLogging } from "../config/log-severity.js";
+installSeverityLogging();
+
 import { onRequest } from "firebase-functions/v2/https";
 import { onMessagePublished } from "firebase-functions/v2/pubsub";
 import { initializeApp, getApps } from "firebase-admin/app";
@@ -107,7 +113,20 @@ ai.post("/capacity-detect", async (req, reply) => {
   }
   return reply.code(204).send(); // always ack — detection must never redeliver-storm
 });
-ai.post("/categorize", lazy(() => import(`./entry/ai/categorize.js`), "post")); // scraper: sync ingredient categorization via Ollama (no auth, no Firestore)
+// Capacity reconcile: Cloud Scheduler hits this on a timer. The engine re-derives boxes-vs-messages
+// per model from LIVE reads and starts/stops accordingly — the only place idle boxes are torn down.
+// Returns the decisions so a scheduler run's own log shows what it chose.
+ai.post("/capacity-reconcile", async (_req, reply) => {
+  try {
+    const { reconcile } = await import(`./entry/ai/capacity/reconcile.js`);
+    return reply.code(200).send({ decisions: await reconcile() });
+  } catch (e) {
+    console.error(`[ai/capacity-reconcile] ${e?.message}`);
+    return reply.code(200).send({ error: e?.message }); // never fail the timer — next tick re-derives
+  }
+});
+ai.post("/categorize", lazy(() => import(`./entry/ai/categorize.js`), "post"));           // scraper: launch a categorize job → 202 {jobId} (no auth)
+ai.get("/categorize/:jobId", lazy(() => import(`./entry/ai/categorize.js`), "get"));      // scraper: poll that job → {status, result} (no auth)
 ai.get("/health", () => ({ status: "ok" }));                            // liveness probe (dashboard health panel)
 
 ai.setNotFoundHandler((_req, reply) => reply.code(404).send({ error: "Not found" }));
@@ -131,7 +150,9 @@ export { _ai as ai };
 // Cloud Logging sink `capacity-create-sink` (see scripts/setup-capacity-sink.sh) routes completed
 // ollama worker `compute.instances.insert` operations to the `capacity_create_events` topic; this
 // function decodes each and records the ok/fail outcome. recordCreateOutcome stays hand-invocable.
-export const capacityRecorder = onMessagePublished(
+// Exported as `capacity` (not capacityRecorder) — the export name IS the Cloud Run service name, and
+// it prefixes every log line this function writes.
+export const capacity = onMessagePublished(
   { topic: "capacity_create_events", region: "us-central1", memory: "256MiB", retry: false },
   async (event) => {
     const { handleLogPubSub } = await import("./entry/ai/capacity/recorder.js");
@@ -142,14 +163,15 @@ export const capacityRecorder = onMessagePublished(
 // Startup ENV dump → Cloud Logging. We keep hitting dev/prod config drift (NODE_ENV and the
 // values it gates); log the full env at boot with secret-looking values REDACTED to their length
 // so credentials never hit the logs.
+// One line per var, each prefixed `DBG ` — logd splits an ingest body on newlines, so a single
+// multi-line log became ~200 INFO records. The head token puts the whole dump below logd's default
+// floor; it only shows up with LOGD_MIN_LEVEL=debug.
 {
   const SECRET_RE = /(KEY|TOKEN|SECRET|PASS|CRED|AUTH|MONGO|URI|PASSWORD)/i;
-  console.log(
-    `[orchestrator] ENV dump (NODE_ENV=${process.env.NODE_ENV ?? "unset"}):\n` +
-      Object.keys(process.env).sort()
-        .map((k) => `  ${k}=${SECRET_RE.test(k) ? (process.env[k] ? `<redacted:${process.env[k].length}>` : "") : process.env[k]}`)
-        .join("\n")
-  );
+  console.log(`DBG [orchestrator] ENV dump (NODE_ENV=${process.env.NODE_ENV ?? "unset"}):`);
+  for (const k of Object.keys(process.env).sort()) {
+    console.log(`DBG   ${k}=${SECRET_RE.test(k) ? (process.env[k] ? `<redacted:${process.env[k].length}>` : "") : process.env[k]}`);
+  }
 }
 
 // Create the `orchestrate` topic + push subscription on startup (idempotent).
@@ -157,7 +179,7 @@ import("./lib/pubsub.js")
   .then(({ configurePubSub, configureCapacityDetect }) => Promise.all([configurePubSub(), configureCapacityDetect()]))
   .catch((e) => console.error("[orchestrator] pubsub setup failed:", e.message));
 
-// Capacity recorder's log sink → topic → capacityRecorder. Provisioned on startup (idempotent), so
+// Capacity recorder's log sink → topic → the `capacity` function. Provisioned on startup (idempotent), so
 // it's part of the endpoint coming up, not a manual step. Prod only (needs real Cloud Logging + ADC).
 // Gate on NODE_ENV, NOT K_SERVICE — the emulator sets K_SERVICE too, so it can't tell prod from dev.
 if (/prod(uction)?/i.test(process.env.NODE_ENV || "")) {

@@ -1,0 +1,125 @@
+{
+  "dnsSuffix": "dev.yeschef.life",
+  "l4Zones": [
+    "us-west1-a",
+    "us-west1-b",
+    "us-west1-c",
+    "us-west4-a",
+    "us-west4-c",
+    "us-central1-a",
+    "us-central1-b",
+    "us-central1-c",
+    "us-east4-a",
+    "us-east4-c",
+    "us-east1-b",
+    "us-east1-c",
+    "us-east1-d"
+  ],
+  "defaults": {
+    "machine": "g2-standard-8",
+    "gpus": 1,
+    "disk": 200,
+    "model": "llama3.1:8b"
+  },
+  "rates": {
+    "g2-standard-8": {
+      "default": 0.85
+    },
+    "g2-standard-24": {
+      "default": 2.15
+    },
+    "g2-standard-48": {
+      "default": 4.3
+    }
+  },
+  "boxes": {
+    "001": {
+      "machine": "g2-standard-8",
+      "gpus": 1,
+      "disk": 200,
+      "model": "llama3.1:8b",
+      "enabled": true,
+      "zones": [
+        "us-east4-c",
+        "us-central1-a",
+        "us-central1-b",
+        "us-central1-c",
+        "us-east4-a",
+        "us-west1-a",
+        "us-west1-b",
+        "us-west1-c",
+        "us-east1-b",
+        "us-east1-c",
+        "us-east1-d",
+        "us-west4-a",
+        "us-west4-c"
+      ]
+    },
+    "002": {
+      "machine": "g2-standard-8",
+      "gpus": 1,
+      "disk": 200,
+      "model": "llama3.1:8b",
+      "enabled": false,
+      "zones": [
+        "us-central1-a",
+        "us-central1-b",
+        "us-central1-c",
+        "us-west1-a",
+        "us-west1-b",
+        "us-west1-c",
+        "us-east1-b",
+        "us-east1-c",
+        "us-east1-d",
+        "us-west4-a",
+        "us-west4-c",
+        "us-east4-a",
+        "us-east4-c"
+      ]
+    },
+    "003": {
+      "machine": "g2-standard-8",
+      "gpus": 1,
+      "disk": 200,
+      "model": "llama3.1:8b",
+      "enabled": false,
+      "zones": [
+        "us-west1-a",
+        "us-west1-b",
+        "us-west1-c",
+        "us-west4-a",
+        "us-west4-c",
+        "us-central1-a",
+        "us-central1-b",
+        "us-central1-c",
+        "us-east1-b",
+        "us-east1-c",
+        "us-east1-d",
+        "us-east4-a",
+        "us-east4-c"
+      ]
+    },
+    "004": {
+      "machine": "g2-standard-8",
+      "gpus": 1,
+      "disk": 200,
+      "model": "llama3.1:8b",
+      "enabled": false,
+      "zones": [
+        "us-east1-b",
+        "us-east1-c",
+        "us-east1-d",
+        "us-east4-a",
+        "us-east4-c",
+        "us-west4-a",
+        "us-west4-c",
+        "us-west1-a",
+        "us-west1-b",
+        "us-west1-c",
+        "us-central1-a",
+        "us-central1-b",
+        "us-central1-c"
+      ]
+    }
+  }
+}

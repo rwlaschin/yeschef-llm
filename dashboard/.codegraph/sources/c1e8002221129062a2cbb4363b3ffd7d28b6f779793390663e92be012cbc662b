@@ -1,0 +1,15 @@
+import { checkAuthAsync, clearAuthCache } from '#devbox'
+
+export { clearAuthCache }
+
+export async function handleAuthGet(event: any = {}, checkFn = checkAuthAsync) {
+  const auth = await checkFn()
+  return {
+    ok: auth.ok,
+    account: auth.account,
+    error: auth.error,
+    loginCmd: 'gcloud auth login',
+  }
+}
+
+export default defineEventHandler((event) => handleAuthGet(event))

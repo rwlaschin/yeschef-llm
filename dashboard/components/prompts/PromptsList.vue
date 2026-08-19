@@ -7,61 +7,60 @@
     <div v-for="g in groups" :key="g.type" class="mb-8">
       <h3 v-if="!flat && !only" class="text-sm font-mono text-primary mb-2">{{ g.type }} <span class="text-muted">· {{ g.items.length }}</span></h3>
 
-      <div v-if="g.items.length === 0" class="text-muted text-sm py-8">
+      <div v-if="g.items.length === 0 && !g.sections" class="text-muted text-sm py-8">
         {{ flat ? 'No prompts match.' : `No prompts for "${g.type}" yet. Click "New Prompt" to add one.` }}
       </div>
 
-      <article
+      <!-- Sectioned: fragments grouped by WHERE they are assembled, in send order. An empty section
+           still renders, so there is somewhere to drop a fragment you want to move into it. -->
+      <template v-if="g.sections">
+        <div
+          v-for="s in g.sections"
+          :key="s.section"
+          class="mb-4"
+          @dragover.prevent
+          @drop="onDrop(g.type, s.items, null, s.section)"
+        >
+          <div class="flex items-baseline gap-2 border-b border-gray-200 dark:border-gray-700/40 pb-1 mb-1">
+            <span class="text-xs font-mono uppercase tracking-wide text-secondary">{{ s.section }}</span>
+            <!-- what the placement DOES, never the raw {marker} — that token is an engine detail
+                 the author cannot act on. Copy lives beside the vocabulary in config/. -->
+            <span class="text-xs text-muted">{{ SECTION_DESCRIPTION[s.section] }}</span>
+            <span class="text-xs text-muted ml-auto">{{ s.items.length }}</span>
+          </div>
+
+          <div v-if="s.items.length === 0" class="text-xs text-muted italic py-2 pl-6">nothing here — drop a prompt to place it</div>
+
+          <PromptRow
+            v-for="p in s.items"
+            :key="p._id"
+            :p="p" :type="g.type" :section="s.section" :items="s.items"
+            :flat="flat" :dragId="dragId" :dragType="dragType" :overId="overId"
+            @dragstart="onDragStart" @dragend="reset" @over="overId = $event" @drop="onDrop"
+            @edit="$emit('edit', $event)" @delete="$emit('delete', $event)" @toggleActive="$emit('toggleActive', $event)"
+          />
+        </div>
+      </template>
+
+      <!-- Flat / unassigned: no ordering, no sections. -->
+      <PromptRow
+        v-else
         v-for="p in g.items"
         :key="p._id"
-        :draggable="!flat && g.type !== 'unassigned'"
-        @dragstart="onDragStart(g.type, p._id)"
-        @dragend="reset"
-        @dragover.prevent
-        @drop="onDrop(g.type, g.items, p._id)"
-        @dragenter="overId = p._id"
-        :class="[
-          'group relative pl-6 pr-28 py-6 transition',
-          dragId === p._id ? 'opacity-40' : '',
-          dragType === g.type && overId === p._id && dragId !== p._id ? 'ring-2 ring-amber-500 rounded-lg' : '',
-          !p.active ? 'opacity-50' : ''
-        ]"
-      >
-        <!-- drag affordance (whole row is draggable) — hidden where reorder is off (flat/unassigned) -->
-        <span
-          v-if="!flat && g.type !== 'unassigned'"
-          class="absolute left-0 top-6 text-muted opacity-30 group-hover:opacity-100 cursor-move select-none"
-          title="Drag to reorder"
-        >⠿</span>
-
-        <!-- actions: active toggle, edit, delete -->
-        <div class="absolute right-0 top-6 flex items-center gap-3">
-          <Toggle :modelValue="p.active" @update:modelValue="$emit('toggleActive', p)" />
-          <button @click="$emit('edit', p)" title="Edit" class="text-secondary hover:text-primary transition">
-            <PencilSquareIcon class="w-5 h-5" />
-          </button>
-          <button @click="$emit('delete', p._id)" title="Delete" class="text-secondary hover:text-error transition">
-            <TrashIcon class="w-5 h-5" />
-          </button>
-        </div>
-
-        <!-- which types this prompt maps to — always visible so multi-type pinning is never hidden -->
-        <div class="text-xs font-mono text-primary mb-2">
-          {{ Object.keys(p.mapping || {}).sort().join(' · ') || 'unassigned' }}
-        </div>
-
-        <!-- full prompt, shown verbatim (whitespace + indentation preserved) -->
-        <pre class="prompt-doc text-sm text-secondary whitespace-pre-wrap break-words">{{ display(p.content) }}</pre>
-      </article>
+        :p="p" :type="g.type" :section="null" :items="g.items"
+        :flat="flat" :dragId="dragId" :dragType="dragType" :overId="overId"
+        @dragstart="onDragStart" @dragend="reset" @over="overId = $event" @drop="onDrop"
+        @edit="$emit('edit', $event)" @delete="$emit('delete', $event)" @toggleActive="$emit('toggleActive', $event)"
+      />
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed } from 'vue'
-import { PencilSquareIcon, TrashIcon } from '@heroicons/vue/24/outline'
-import Toggle from '~/components/Toggle.vue'
+import PromptRow from '~/components/prompts/PromptRow.vue'
 import { lexBetween } from '~/utils/lexBetween'
+import { RELATES_TO, SYSTEM, SECTION_DESCRIPTION } from '~/utils/assemblePrompt'
 
 const props = defineProps({
   prompts: { type: Array, default: () => [] },
@@ -72,6 +71,7 @@ const emit = defineEmits(['edit', 'delete', 'toggleActive', 'reorder'])
 
 const dragId = ref(null)
 const dragType = ref(null)
+const dragSection = ref(null)
 const overId = ref(null)
 
 // Group prompts by the types they map to; within each type, sort ascending by order.
@@ -88,36 +88,54 @@ const groups = computed(() => {
     for (const type of keys) (byType[type] ||= []).push(p)
   }
   const types = props.only ? [props.only] : Object.keys(byType).sort()
-  return types.map((type) => ({
-    type,
+  return types.map((type) => {
     // plain code-unit sort (matches lexBetween's 0-9A-Za-z ordering; NOT localeCompare)
-    items: (byType[type] || []).slice().sort((a, b) => {
+    const items = (byType[type] || []).slice().sort((a, b) => {
       const x = String(a.mapping?.[type] ?? ''), y = String(b.mapping?.[type] ?? '')
       return x < y ? -1 : x > y ? 1 : 0
-    }),
-  }))
+    })
+    return {
+      type,
+      items,
+      // Second level: where in the step each fragment is assembled. Rendered in SEND order, and an
+      // empty section still renders its header — otherwise there is nowhere to drop a fragment you
+      // want to move INTO it. "unassigned" has no order key, so it stays a single flat list.
+      sections: type === 'unassigned' ? null : RELATES_TO.map((section) => ({
+        section,
+        items: items.filter((p) => sectionOf(p) === section),
+      })),
+    }
+  })
 })
+
+// Mirrors assembly: an unset or unrecognised relatesTo is the system message.
+const sectionOf = (p) => (RELATES_TO.includes(p?.relatesTo) ? p.relatesTo : SYSTEM)
 
 // Show the prompt exactly as stored — verbatim, no transforms/trim/unescape.
 const display = (c) => (c && c.length ? c : '(empty)')
 
-const onDragStart = (type, id) => { dragId.value = id; dragType.value = type }
-const reset = () => { dragId.value = null; dragType.value = null; overId.value = null }
+const onDragStart = (type, id, section = null) => { dragId.value = id; dragType.value = type; dragSection.value = section }
+const reset = () => { dragId.value = null; dragType.value = null; dragSection.value = null; overId.value = null }
 
-const onDrop = (type, items, dropId) => {
+// `section` is the section DROPPED INTO. Dropping into a different one moves the fragment there —
+// which writes TWO fields, relatesTo and a fresh order key against its new neighbours. `dropId` is
+// null when the drop lands on an empty section header, which is the only way to reach a section
+// that has nothing in it yet.
+const onDrop = (type, items, dropId, section = null) => {
   const id = dragId.value
   // only reorder within the same real type — "unassigned" has no order key to write
-  if (type === 'unassigned' || dragType.value !== type || !id || id === dropId) return reset()
-  const arr = [...items]
-  const from = arr.findIndex((p) => p._id === id)
-  const to = arr.findIndex((p) => p._id === dropId)
-  if (from < 0 || to < 0) return reset()
-  const [moved] = arr.splice(from, 1)
-  arr.splice(to, 0, moved)
+  if (type === 'unassigned' || dragType.value !== type || !id || (id === dropId && section === dragSection.value)) return reset()
+  const arr = [...items].filter((p) => p._id !== id)
+  const to = dropId ? arr.findIndex((p) => p._id === dropId) : arr.length
+  const moved = items.find((p) => p._id === id) || (props.prompts || []).find((p) => p._id === id)
+  if (!moved) return reset()
+  arr.splice(to < 0 ? arr.length : to, 0, moved)
   const idx = arr.findIndex((p) => p._id === id)
   const prev = idx > 0 ? String(arr[idx - 1].mapping[type]) : null
   const next = idx < arr.length - 1 ? String(arr[idx + 1].mapping[type]) : null
-  emit('reorder', { id, type, order: lexBetween(prev, next) })
+  const payload = { id, type, order: lexBetween(prev, next) }
+  if (section && section !== dragSection.value) payload.relatesTo = section
+  emit('reorder', payload)
   reset()
 }
 </script>

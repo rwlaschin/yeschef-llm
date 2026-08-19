@@ -3,10 +3,26 @@
 # as long as the worker. For OpenClaw gateway tiers (GATEWAY=openclaw), bring up the
 # OpenClaw gateway in front of the model first. (POSIX /bin/sh has no `wait -n`.)
 
-ollama serve &
+# OLLAMA_HOST is TWO things to ollama: the address `ollama serve` BINDS, and the URL a client
+# generates against. The worker reads it as the latter. So when it points off-box — dev on macOS,
+# where Docker's Linux VM gets no Metal passthrough and the host's own Ollama does — there is no
+# server to start here, and `ollama serve` would try to bind an address it does not own and exit.
+# Skip the local server in that case and wait on the remote one instead. A gateway tier proxies a
+# model that must live in THIS container, so it always keeps its own server.
+case "${OLLAMA_HOST}" in
+  ""|*localhost*|*127.0.0.1*) serve_local=1 ;;
+  *)                         serve_local=0 ;;
+esac
+[ "$GATEWAY" = "openclaw" ] && serve_local=1
 
-echo "Waiting for Ollama..."
-until curl -sf http://localhost:11434/api/tags > /dev/null; do
+ready_url="${OLLAMA_HOST:-http://localhost:11434}/api/tags"
+if [ "$serve_local" = "1" ]; then
+  OLLAMA_HOST=127.0.0.1:11434 ollama serve &
+  ready_url="http://localhost:11434/api/tags"
+fi
+
+echo "Waiting for Ollama at ${ready_url} ..."
+until curl -sf "$ready_url" > /dev/null; do
   sleep 1
 done
 echo "Ollama ready"

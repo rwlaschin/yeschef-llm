@@ -9,6 +9,9 @@
 // this pure makes it unit-testable without the emulator (see compose.test.js).
 
 import Handlebars from "handlebars";
+// Section markers — the SAME file the worker and the dashboard read, via the functions/config
+// symlink. One definition, so the layout cannot drift between what is composed and what is sent.
+import { withMarkers } from "../../config/promptSections.js";
 
 // One shared Handlebars instance with our helpers registered once.
 const hb = Handlebars.create();
@@ -17,6 +20,18 @@ hb.registerHelper("join", (arr, sep) => (Array.isArray(arr) ? arr.join(typeof se
 // {{count list}} → number of items in a list field, e.g. {{count diets}}. Empty/non-array → 1
 // (never 0, so it's safe as a divisor).
 hb.registerHelper("count", (arr) => (Array.isArray(arr) && arr.length ? arr.length : 1));
+
+// {{keys obj}} → its own keys as a list, so any ctx OBJECT can feed the list helpers ({{join}},
+// {{without}}, {{#each}}). Non-object → [], so a missing ctx field renders empty instead of throwing.
+hb.registerHelper("keys", (o) => (o && typeof o === "object" && !Array.isArray(o) ? Object.keys(o) : []));
+
+// {{without list a b …}} → list minus the named values. The values are ARGUMENTS, so what to exclude
+// is authored in the prompt and changing it needs no deploy — the helper knows nothing about what it
+// is filtering. Handlebars passes an options object as the trailing arg, so drop it.
+hb.registerHelper("without", (list, ...args) => {
+  const drop = args.slice(0, -1).map(String);
+  return Array.isArray(list) ? list.filter((x) => !drop.includes(String(x))) : [];
+});
 
 // Comparisons: eq ne gt lt ge le. Each works BOTH as a subexpression — {{#if (eq (count diets) 1)}}
 // — and as a block — {{#eq (count diets) 1}}…{{else}}…{{/eq}}. (Handlebars has no infix operators,
@@ -74,6 +89,23 @@ hb.registerHelper("proteinBackbone", (proteins, diet, day) => {
       if (p && p.type) lines.push(`Day ${day} | ${meal} | ${p.type}${p.cut ? ` ${p.cut}` : ""}`);
     }
   }
+  return lines.length ? new Handlebars.SafeString(lines.join("\n")) : "";
+});
+
+// {{proteinLines proteinWeights}} → the setup page's arranged protein list as
+// `Name · cut (weight) — diet, diet` lines, one per line, in the order the chef arranged them. The weight is
+// how much of the cycle that protein should fill. Same job as proteinBackbone: turn structured plan
+// data into rows the model can read, because a raw array interpolates as "[object Object]" and the
+// model then invents its own list. The name arrives as `protein` on the real plan rows and as
+// `label`/`slug` from the older shape, so accept all three.
+// Empty → "" (falsy, so {{#if}} skips the block) rather than an empty "Proteins:" heading.
+hb.registerHelper("proteinLines", (choices) => {
+  const list = Array.isArray(choices) ? choices : [];
+  const lines = list
+    .map((p) => (typeof p === "string" ? { protein: p } : p || {}))
+    .map((p) => ({ name: p.protein || p.label || p.slug, cut: p.cut, weight: p.weight, diets: Array.isArray(p.diets) ? p.diets : [] }))
+    .filter((p) => p.name)
+    .map((p) => `${p.name}${p.cut ? ` · ${p.cut}` : ""}${p.weight == null ? "" : ` (${p.weight})`}${p.diets.length ? ` — ${p.diets.join(", ")}` : ""}`);
   return lines.length ? new Handlebars.SafeString(lines.join("\n")) : "";
 });
 
@@ -234,6 +266,17 @@ function parseMapOf(mapOf) {
   return { name: null, source: raw };
 }
 
+// "Run once per ROW of an earlier step's output": `rowsOf` names those steps and the loop var —
+// "Build Recipes, Build Courses as |row|". The rows don't exist at compose time (the steps haven't
+// run), so compose only resolves the NAMES to plan indices; dispatch materialises the items. Parsed
+// here rather than by parseMapOf because a step NAME contains spaces, which a Handlebars path can't
+// express. Returns { name, sources: [step name…] }.
+function parseRowsOf(rowsOf) {
+  const raw = String(rowsOf || "").trim();
+  const m = /^([\s\S]*?)\s+as\s*\|\s*([A-Za-z_$][\w$]*)\s*\|$/.exec(raw);
+  return { name: m ? m[2] : null, sources: toList(m ? m[1] : raw) };
+}
+
 // Build the render context shared by every step, plus per-step value/valueList overlaid per def.
 // form shape: { values:{institution,legals,diets,restrictions,preferences,meals}, duration:{weeks,businessDaysOnly,days},
 //               residents, flags:{pureed:bool}, costTier, enabled:{<name>:bool}, model }
@@ -273,9 +316,41 @@ function baseContext(form) {
     weeks,
     businessDaysOnly: !!duration.businessDaysOnly,
     costTier: form.costTier || "",
+    // Course position → dishes per meal, plus a rendered "1 entrée, 2 sides" line the prompt can
+    // drop straight in. The list form is what makes "IF NO COURSE LIST IS GIVEN, write SIDES ONLY"
+    // in the courses step decidable.
+    courseCounts: form.courseCounts || {},
+    courseList: Object.entries(form.courseCounts || {})
+      .filter(([, n]) => Number(n) > 0)
+      .map(([k, n]) => `${n} ${k}${Number(n) > 1 ? "s" : ""}`)
+      .join(", "),
+    // Same list with the ENTRÉE positions removed. A step that must not consider entrées gets this
+    // instead of `courseList` + a sentence telling it to ignore the entrées it was just handed:
+    // asking an 8b model to subtract one set from another is the measured failure mode (it counted
+    // "entree: 0 — MISSING" against a list it had been told to exclude). Hand it only what it must find.
+    courseListNoEntree: Object.entries(form.courseCounts || {})
+      .filter(([k, n]) => Number(n) > 0 && !/^entr[ée]e?s?$/i.test(k))
+      .map(([k, n]) => `${n} ${k}${Number(n) > 1 ? "s" : ""}`)
+      .join(", "),
     flags: form.flags || {},
     dietWeights: form.dietWeights || {}, // { <diet>: relative weight } → consumed by the {{allocate}} helper
     proteins: form.proteins || {}, // per-slot grid proteins (normDiet → day → mealtime → {type,cut}); rides ctx → fake dispatch → cannedRecipes so recipes mirror the grid
+    // The setup page's arranged protein list: [{ slug, label, weight }]. Deliberately NOT merged into
+    // `proteins` above — that field is the per-slot grid map, a different shape, and overloading one
+    // name with two shapes breaks whichever helper guesses wrong. Rendered by {{proteinLines}}.
+    proteinChoices: Array.isArray(form.proteinChoices) ? form.proteinChoices : [],
+    // The plan's own field name for that same arranged list ([{ protein, diets, weight }]) — what the
+    // client actually sends. Kept beside proteinChoices because scripts/prompt-lab.mjs still feeds the
+    // older key, and baseContext is a CLOSED allow-list: without this line the chef's weighting never
+    // reaches any template.
+    proteinWeights: Array.isArray(form.proteinWeights) ? form.proteinWeights : [],
+    // Proteins the chef typed in on the setup page. The categorization step must include and classify
+    // them alongside the ones it proposes — baseContext is a CLOSED allow-list, so an unlisted field
+    // renders as empty string with no error.
+    addedProteins: Array.isArray(form.addedProteins) ? form.addedProteins : [],
+    // Per-course dish counts, e.g. { entree: 6, side: 5 }. Read with {{lookup counts "entree"}} so a
+    // new course type needs no code change here.
+    counts: form.counts || {},
 
     // Runtime ids — unknown at compose (the job/run don't exist yet). Pass through as literal {{tokens}}
     // so the worker substitutes the real values at execution (it has jobId/step/unit). batchIndex = this
@@ -293,7 +368,6 @@ function baseContext(form) {
     hemisphere: form.hemisphere || "",
     tz: form.tz || "",
     startDate: (form.duration || {}).startDate || "", // plan start → {{date n}} computes the nth unit's date
-    businessDaysOnly: !!(form.duration || {}).businessDaysOnly,
   };
 }
 
@@ -318,6 +392,11 @@ export function composeFromDefs(stepDefs, form, opts = {}) {
       const src = (def.context || [])[0];
       itemsByName[def.name] = itemsByName[src] || [null];
       itemVarsByName[def.name] = itemVarsByName[src] || [];
+    } else if (def.rowsOf) {
+      // Fans over another step's OUTPUT ROWS — the item list only exists once that step has run, so
+      // it stays empty here and dispatch fills it in (dispatch/dispatch.js).
+      itemsByName[def.name] = [];
+      itemVarsByName[def.name] = [parseRowsOf(def.rowsOf).name].filter(Boolean);
     } else {
       const { name, source } = parseMapOf(def.mapOf);
       itemsByName[def.name] = resolveItems(source, ctx);
@@ -325,7 +404,7 @@ export function composeFromDefs(stepDefs, form, opts = {}) {
     }
   }
 
-  const plan = stepDefs.map((def) => {
+  const plan = stepDefs.map((def, stepIndex) => {
     // Resolve context names -> 0-based indices among the emitted steps (drop unknown/forward refs).
     const contexts = (def.context || [])
       .map((nm) => indexByName[nm])
@@ -370,7 +449,32 @@ export function composeFromDefs(stepDefs, form, opts = {}) {
       // reaches cannedRecipes. Harmless for the real path (renderCtx is dropped from the dry-run view).
       step.renderCtx = stepCtx;
 
-      if (fanned) {
+      // Row-level fan-out: `rowsOf` names EARLIER steps whose output ROWS are this step's units. Only
+      // the names resolve here (to plan indices, exactly like `context`) — the rows themselves exist
+      // only once those steps have run, so dispatch fills `items` in before it launches the units.
+      const rowSteps = def.rowsOf ? parseRowsOf(def.rowsOf).sources
+        .map((nm) => indexByName[nm]).filter((idx) => idx != null && idx < stepIndex) : [];
+      if (def.rowsOf && !rowSteps.length) {
+        throw new Error(`rowsOf "${def.rowsOf}" names no earlier step in this plan`);
+      }
+      // The rows can only be keyed against the columns the source tables are contracted to emit,
+      // because the model may omit the header line — see tableRows in dispatch/dispatch.js. Without
+      // the declaration the fan-out would key rows by whatever the response's first line happened to
+      // be, so this is a compose-time error (visible on a dry run) rather than a runtime surprise.
+      // Split on `|` too so the def can hold the header line verbatim, as the prompt writes it.
+      const columns = String(def.columns || "").split(/[|,]/).map((c) => c.trim()).filter(Boolean);
+      if (def.rowsOf && !columns.length) {
+        throw new Error(`rowsOf "${def.rowsOf}" needs a \`columns\` list naming the columns those steps emit`);
+      }
+
+      if (rowSteps.length) {
+        step.rowsOf = rowSteps;
+        step.columns = columns;
+        step.items = [];                                   // materialised at dispatch, one per row
+        step.template = { instruction: def.instruction || "", pass: def.pass || "", fail: def.fail || "" };
+        if (itemVars.length) step.itemVars = itemVars;
+        step.instructions = renderUnit(step, 0);           // display sample: no row yet → row fields blank
+      } else if (fanned) {
         step.template = { instruction: def.instruction || "", pass: def.pass || "", fail: def.fail || "" };
         step.items = items;                                // orchestrator launches one unit per entry
         if (itemVars.length) step.itemVars = itemVars;     // bound to items[unit] in renderUnit
@@ -381,7 +485,11 @@ export function composeFromDefs(stepDefs, form, opts = {}) {
         const aliases = {};
         for (const v of itemVars) aliases[v] = item;
         const uctx = { ...stepCtx, ...aliases, item, itemIndex: 1, itemCount: items.length };
-        step.instructions = `${render(def.instruction, uctx)}\n\nPass: ${render(def.pass, uctx)}\nFail: ${render(def.fail, uctx)}`;
+        // withMarkers, NOT a hand-written layout: a non-fanned step must carry the section markers
+        // too, or fragment placement silently does nothing here while working on the fanned path —
+        // same records, same step, structurally different prompt, no signal anywhere. (A single-diet
+        // plan makes the recipes build non-fanned, so this is the ordinary case, not an edge one.)
+        step.instructions = withMarkers(render(def.instruction, uctx), render(def.pass, uctx), render(def.fail, uctx));
       }
       if (def.kind === "chunks") step.groups = parseInt(def.mapOf, 10) || 1;
     } catch (e) {
@@ -403,6 +511,24 @@ export function composeFromDefs(stepDefs, form, opts = {}) {
 
   // successStep is linear (i+1; last is null) — advancement is linear in step.js anyway.
   plan.forEach((s, i) => { s.successStep = i < plan.length - 1 ? i + 1 : null; });
+
+  // ONE line per composed plan — not per step and not per fan-out unit. Composition was the only
+  // unlogged link in the chain (/ai/plan and dispatch/* are instrumented either side of it), so a
+  // wrong or empty step list was invisible: the request looked accepted and simply produced nothing.
+  // Kept to a single line because a 14-day × 6-diet plan renders thousands of units.
+  const shape = plan
+    .map((s, i) => `${i}:${s.subtype || "?"}/${s.kind || "?"}×${s.items ? s.items.length : 1}`)
+    .join(" ");
+  if (!plan.length) {
+    console.warn(`[ai/compose] ✗ EMPTY PLAN — ${stepDefs.length} step def(s) in, 0 composed. Nothing will be dispatched.`);
+  } else {
+    console.log(`[ai/compose] composed ${plan.length} step(s): ${shape}`);
+  }
+  // A step whose template failed to render carries `error` and would otherwise be dispatched
+  // silently with empty instructions — the model then answers nothing useful and the failure
+  // surfaces far downstream, if at all.
+  const broken = plan.map((s, i) => (s.error ? `${i}:${s.subtype || "?"} → ${s.error}` : null)).filter(Boolean);
+  if (broken.length) console.error(`[ai/compose] ✗ ${broken.length} step(s) failed to render: ${broken.join(" | ")}`);
 
   return plan;
 }
@@ -445,5 +571,10 @@ export function renderUnit(step, unit) {
   const uctx = { ...step.renderCtx, item, itemIndex: unit + 1, itemCount: step.items.length };
   for (const v of step.itemVars || []) uctx[v] = item;
   const t = step.template;
-  return `${render(t.instruction, uctx)}\n\nPass: ${render(t.pass, uctx)}\nFail: ${render(t.fail, uctx)}`;
+  // Section markers for fragment placement — substituted by the WORKER at send time
+  // (worker/lib/assemble.js), never here: a job freezes plan[], and assembling fragments at compose
+  // time would freeze them too, so a prompt edit would stop reaching running jobs. Every marker is
+  // emitted whether or not a fragment claims it; an unclaimed one collapses to nothing.
+  // The `\n\nPass:` seam is preserved exactly — callers split on it to isolate the instruction half.
+  return withMarkers(render(t.instruction, uctx), render(t.pass, uctx), render(t.fail, uctx));
 }

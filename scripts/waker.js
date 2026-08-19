@@ -39,6 +39,13 @@ const {
   OPENCLAW_GATEWAY_TOKEN, // shared bearer token for the OpenClaw gateway (gateway tiers)
   NODE_ENV = "dev", // forwarded to the worker → loads inactive prompt_library entries in dev
   DOCKER_GPU, // e.g. "all" if an NVIDIA GPU is present; leave unset on Mac (CPU)
+  // WHICH Ollama the worker generates against. Defaults to the one baked into the image, running
+  // inside this container — which on macOS is CPU-ONLY, because Docker Desktop's Linux VM gets no
+  // Metal passthrough, so an 8B model there generates at a fraction of a token per second. Pointing
+  // this at `http://host.docker.internal:11434` hands generation to the Mac's own Ollama.app, which
+  // does use Metal. Only the generation TARGET moves; the container, its worker and its Pub/Sub
+  // lease are unchanged.
+  WORKER_OLLAMA_HOST = "http://localhost:11434",
 } = process.env;
 
 const pollMs = parseInt(WAKER_POLL_MS, 10);
@@ -161,7 +168,7 @@ function startContainer(m) {
     `GCP_PROJECT_ID=${GCP_PROJECT_ID}`,
     `SUBSCRIPTION_NAME=${m.subscription}`,
     `OLLAMA_MODEL=${m.model}`,
-    `OLLAMA_HOST=http://localhost:11434`,
+    `OLLAMA_HOST=${WORKER_OLLAMA_HOST}`,
     `MONGO_URI=${MONGO_URI}`,
     `MONGO_DB=${MONGO_DB}`,
     `MONGO_COLLECTION=${MONGO_COLLECTION}`,

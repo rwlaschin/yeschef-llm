@@ -3,6 +3,11 @@
   "version": "1.0.0",
   "type": "module",
   "private": true,
+  "imports": {
+    "#prompt-sections": "./config/promptSections.js",
+    "#models": "./config/models.js",
+    "#devbox": "./scripts/devbox.js"
+  },
   "scripts": {
     "dev": "nuxt dev --port 3200 --host",
     "build": "nuxt build",

@@ -26,11 +26,11 @@ The end-to-end path a single LLM request takes: `yeschef` UI → `/api/llm` → 
 
 This is the request/response backbone connecting the `yeschef` frontend to Ollama/OpenClaw inference. A user action in the UI becomes a Pub/Sub message; a worker (GPU-backed, autoscaled 0↔N) performs inference and streams the result into a single Firestore document that the UI subscribes to in real time. It exists so that inference — which is slow, GPU-bound, and needs to scale independently — is fully decoupled from the request-serving Next.js backend, and so that a page reload never loses track of an in-flight job (the client resubscribes from `localStorage`-tracked job IDs).
 
-Two model tiers exist today (`config/models.js`): `llama3.2:3b` (slim, 1×L4, dev-enabled) and `llama3.3:70b-instruct-q4_K_M` (large, 2×L4). A third tier, **OpenClaw**, is a gateway/abstraction layer (`ollama launch openclaw --model <backing>`) that fronts either of the above and adds a tool layer (web search/fetch, MCP servers, messaging channels, plugins) — it is not itself a model. OpenClaw tiers are `dev: false` in the registry until the gateway-launch wiring in `start.sh` is implemented.
+Four model tiers exist today (`config/models.js`): `llama3.1:8b` (1×L4, dev-enabled, 128K ctx), `llama3.3:70b-instruct-q4_K_M` (2×L4, no dev GPU, ≈44 GB at q4_K_M), `gemma4:12b-it-qat` (1×L4, dev-enabled, 256K ctx) and `qwen3.5:9b` (1×L4, dev-enabled, 256K ctx). A third tier, **OpenClaw**, is a gateway/abstraction layer (`ollama launch openclaw --model <backing>`) that fronts either of the above and adds a tool layer (web search/fetch, MCP servers, messaging channels, plugins) — it is not itself a model. OpenClaw tiers are `dev: false` in the registry until the gateway-launch wiring in `start.sh` is implemented.
 
 ## Architecture
 
-**Topic/Model Mapping.** Topics are named after the model only (no function type in the name), e.g. `llama3_2_3b_v1`. The topic is the single value the dashboard and subscriptions derive from — change it once in `config/models.js` and everything follows.
+**Topic/Model Mapping.** Topics are named after the model only (no function type in the name), e.g. `llama3_1_8b_v1`. The topic is the single value the dashboard and subscriptions derive from — change it once in `config/models.js` and everything follows.
 
 **OpenClaw Gateway.** Backing model must be local/self-hosted (see Design Constraints). Features are CLI/config-managed:
 

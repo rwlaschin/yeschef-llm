@@ -5,6 +5,7 @@
 
 import { section, joinSections } from "./prompt.js";
 import { unitDocId } from "../../config/models.js";
+import { assembleFor } from "../lib/assemble.js";
 
 // ---- Chat message assembly --------------------------------------------------
 // Build chat messages from a system prompt (+ optional RAG context) and the user content.
@@ -25,6 +26,15 @@ export function buildMessages(system, query, context) {
 // contexts, then gather the results of the steps named in `contexts` (0-based indices). A prior
 // step's output is the `response` of its active (non-deleted) run in steps/. deps.getFirestoreClient
 // is injected. Returns { def, ctxBlocks } so builders decide how to assemble the prompt.
+// Fields two fan-out items JOIN on: the upstream item's own keys that this unit's item also carries.
+// Both must be plain objects — a string/number/null item (e.g. "run once per diet name", "per day N")
+// has no keys to join on and keeps the join-the-whole-step behaviour.
+const isPlainItem = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+export function joinKeys(item, srcItem) {
+  if (!isPlainItem(item) || !isPlainItem(srcItem)) return [];
+  return Object.keys(srcItem).filter((k) => k in item);
+}
+
 export async function loadStep(payload, deps) {
   const db = deps.getFirestoreClient();
   const jobDoc = db.collection("llmResults").doc(payload.jobId);
@@ -33,6 +43,7 @@ export async function loadStep(payload, deps) {
   const def = plan[payload.step] || {};
 
   const ctxBlocks = [];
+  const item = Array.isArray(def.items) ? def.items[payload.unit] : null;
   for (const idx of def.contexts || []) {
     // A `chain` step rides its source step's fan-out 1:1 — THIS unit reads ONLY the source's matching
     // unit (small + aligned), not the whole step. Other kinds get the whole step joined (as before).
@@ -40,6 +51,27 @@ export async function loadStep(payload, deps) {
       const d = await jobDoc.collection("steps").doc(unitDocId(idx, payload.unit)).get();
       const text = d.exists && !d.data().isDeleted ? (d.data().response || "") : "";
       if (text) ctxBlocks.push(`# Result of step ${idx} (unit ${payload.unit}):\n${text}`);
+      continue;
+    }
+    // A `fanout` step whose item CARRIES the upstream step's fan-out key reads only its own upstream
+    // unit. Generic: the join keys are whatever fields the upstream item and this item share (a
+    // row-fanned item carries the fields of the item that produced its row, so a row over dietDays
+    // {diet,day} joins on diet+day). No shared fields (a string/number/null item, or an unrelated fan)
+    // → the whole step is joined, as before. Without this a per-row unit would receive EVERY unit's
+    // output from the upstream step and blow the context window.
+    const srcItems = plan[idx]?.items;
+    const keys = joinKeys(item, Array.isArray(srcItems) ? srcItems[0] : null);
+    if (def.kind === "fanout" && typeof payload.unit === "number" && keys.length) {
+      const unit = srcItems.findIndex((it) => it && keys.every((k) => it[k] === item[k]));
+      if (unit < 0) {
+        throw new TerminalError(
+          `step ${payload.step} unit ${payload.unit} ${JSON.stringify(item)} has no matching unit in ` +
+          `context step ${idx} on [${keys.join(", ")}] — the two steps' fan-outs are misaligned.`
+        );
+      }
+      const d = await jobDoc.collection("steps").doc(unitDocId(idx, unit)).get();
+      const text = d.exists && !d.data().isDeleted ? (d.data().response || "") : "";
+      if (text) ctxBlocks.push(`# Result of step ${idx} (unit ${unit}):\n${text}`);
       continue;
     }
     const runs = await jobDoc.collection("steps").where("step", "==", idx).get();
@@ -84,10 +116,22 @@ export async function buildStepMessages(payload, context, deps) {
   const sub = deps.subtypeBuilders?.[def.subtype];
   if (sub) return sub({ payload, def, ctxBlocks, context, deps });
 
-  const system = await deps.systemPromptFor(def.subtype || "query");
+  // Fragment placement (lib/assemble.js). A fragment with a `relatesTo` is substituted into the
+  // marker of that name INSIDE the instruction; the rest stay in the system prompt. An instruction
+  // with no markers — every plan frozen before this shipped — puts all of them in the system prompt,
+  // which is byte-for-byte what systemPromptFor did before, so nothing needed backfilling.
+  const type = def.subtype || "query";
+  // assembleFor ALWAYS runs, even with no prompt records: markers must never reach the model, and a
+  // caller that forgets to inject getPrompts must degrade to "no fragments placed", never to
+  // "{leading} shipped verbatim". (It did exactly that once — deps had no getPrompts and the
+  // markers went out whole.) With no getPrompts the fragments still come from systemPromptFor, so
+  // the system message is unchanged.
+  const placed = assembleFor(deps.getPrompts ? await deps.getPrompts() : [], type, def.instructions);
+  const system = deps.getPrompts ? placed.system : await deps.systemPromptFor(type);
+
   // "# Instructions" + the already-labeled prior-step results. (Removed the "# Step type" note —
   // it injected the engine term "fan-out", which the model has no concept of, and was untested.)
-  const user = joinSections(section("Instructions", def.instructions), ...ctxBlocks);
+  const user = joinSections(section("Instructions", placed.instructions), ...ctxBlocks);
   return buildMessages(system, user, context);
 }
 

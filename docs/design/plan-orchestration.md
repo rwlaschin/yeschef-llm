@@ -5,7 +5,7 @@ dependencies: [llm-pipeline, worker-dispatch]
 
 # Plan Orchestration
 
-A **plan** is a multi-step LLM request (Build → Execution → Finalization) — the layer above a single [[llm-pipeline]] request when a job needs more than one model call, with branching and retry between steps. Read this before touching `functions/entry/ai/dispatch/*`, the `plan` topic, or the `<@@::PASS/FAIL::@@>` status marker format. Port of developit-ai's `process_context` + fan-out, fully async. Implemented in `functions/entry/ai/dispatch/{start,build,dispatch,step,finalize}.js`.
+A **plan** is a multi-step LLM request (Build → Execution → Finalization) — the layer above a single [[llm-pipeline]] request when a job needs more than one model call, with branching and retry between steps. Read this before touching `functions/entry/ai/dispatch/*`, the `plan` topic, or the `@@::PASS/FAIL::@@` status marker format. Port of developit-ai's `process_context` + fan-out, fully async. Implemented in `functions/entry/ai/dispatch/{start,build,dispatch,step,finalize}.js`.
 
 ## Sensitive Areas
 
@@ -79,7 +79,7 @@ finalize(J) :- complete(J), expire(J).
 ```
 Computed, never stored: `outcome`, `all_done`, `unit_streaming`, `generations`. Effects: `publish, assert_steps, new_generation, refire, record, claim_advance, complete, expire`.
 
-**Status marker.** Delimiters: literal `<@@::` at the start, `::@@>` at the end. `PASS` alone; `FAIL` adds a single-colon reason: `<@@::PASS::@@>` / `<@@::FAIL:<reason>::@@>`. Parser: `/<@@::(PASS|FAIL)(?::\s*([\s\S]*?))?\s*::@@>/i` — our tweak of developit-ai's `PLAN_STATUS` block (dropped the `?!`/`!?` weak models fumble; the `<@@:: … ::@@>` bookend still can't false-trigger). Parsed **while streaming** (`worker/steps/outcome.js`): the visible response freezes at the opening delimiter and withholds any trailing partial of it, so a forming block never leaks into the live `response` field. Content before the block is user data; the block itself becomes the `outcome` field and feeds the orchestrator's report. Unparseable at end-of-stream → retry the unit, never a silent pass.
+**Status marker.** `worker/steps/outcome.js` is the source of truth for this format. Delimiters: literal `@@::` at the start, `::@@` at the end — **no angle brackets**, because weak models drop `<`/`>` and markdown renderers eat `<…>` as a tag. `PASS` alone; `FAIL` adds a single-colon reason of **at least one character** (a bare `@@::FAIL::@@` is non-compliant): `@@::PASS::@@` / `@@::FAIL:<reason>::@@`. Parser: `/@@::(?:(PASS)|FAIL:\s*([\s\S]+?))\s*::@@/i` — our tweak of developit-ai's `PLAN_STATUS` block (dropped the `?!`/`!?` weak models fumble; the `@@:: … ::@@` bookend still can't false-trigger). Parsed **while streaming** (`worker/steps/outcome.js`): the visible response freezes at the opening delimiter and withholds any trailing partial of it, so a forming block never leaks into the live `response` field. Content before the block is user data; the block itself becomes the `outcome` field and feeds the orchestrator's report. Unparseable at end-of-stream → retry the unit, never a silent pass.
 
 ## Functions
 

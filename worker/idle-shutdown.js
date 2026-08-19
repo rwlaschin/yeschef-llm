@@ -112,6 +112,14 @@ export function makeIdleShutdown({ idleMs, onIdle, log = console }) {
   };
 
   return {
+    // Once `firing` is true the self-delete has ALREADY been requested — the box is on its way out. A
+    // message accepted in that window is taken by a worker that is about to be destroyed mid-flight, so
+    // it is lost and has to wait for redelivery with no box left to receive it. Callers must check this
+    // and hand the message straight back (nack) so a live box gets it instead.
+    isShuttingDown: () => firing,
+    /** How many deliveries are mid-flight. Public because the transport logs it when it gives up and
+     *  exits — that number is what tells you how much work the restart dropped into redelivery. */
+    inFlight: () => inFlight,
     onStart(jobId) {
       inFlight++;
       clear();

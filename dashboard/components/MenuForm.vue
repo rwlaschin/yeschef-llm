@@ -59,6 +59,33 @@
             </div>
           </div>
         </div>
+
+        <!-- Protein rotation — the categorization step FILLS this list from the selected diets; the
+             chef only orders it (priority) and weights it (share of the cycle). Zero-weight rows are
+             dropped at submit, so a 0 reads as "not in this rotation". It sits at the foot of the
+             inputs column, which the taller settings column would otherwise leave as dead space. -->
+        <div class="space-y-1">
+          <div class="flex items-center justify-between">
+            <span class="text-xs text-muted">Proteins</span>
+            <button
+              type="button"
+              title="Ask Remy again which proteins suit these diets"
+              :disabled="proteinsPending"
+              class="grid place-items-center w-6 h-6 rounded-full text-muted transition hover:text-amber-400 hover:bg-amber-400/10 active:scale-90 disabled:opacity-40"
+              @click="fetchProteins()"
+            >
+              <SparklesIcon class="w-4 h-4" :class="proteinsPending ? 'animate-pulse text-amber-400' : ''" />
+            </button>
+          </div>
+          <ProteinWeights
+            v-model="proteinRows"
+            :loading="proteinsPending && !proteinRows.length"
+            :refreshing="proteinsPending && proteinRows.length > 0"
+            :adding="addingProtein"
+            @add="addProtein"
+            @remove="removeProtein"
+          />
+        </div>
       </div>
 
       <!-- Right column: duration, residents, step toggles -->
@@ -98,6 +125,26 @@
         <div class="space-y-1">
           <span class="text-xs text-muted">Cost tier</span>
           <Select v-model="costTier" :options="costOptions" />
+          <textarea
+            v-model="costTierDescription"
+            rows="2"
+            maxlength="4000"
+            class="form-input w-full text-sm"
+            placeholder="What that tier means here — optional"
+          ></textarea>
+        </div>
+
+        <!-- Dishes per meal, per course position. 1 is not a menu, so the range skips it; 0 removes
+             the course. Left at the seeded values the field is still sent — it matches the server's
+             own default. -->
+        <div class="space-y-2">
+          <div class="text-xs text-muted">Dishes per course</div>
+          <div v-for="c in COURSE_POSITIONS" :key="c.key" class="flex items-center justify-between gap-2">
+            <span class="text-sm">{{ c.label }}</span>
+            <div class="w-28">
+              <Select v-model="courseCounts[c.key]" :options="courseCountOptions" />
+            </div>
+          </div>
         </div>
 
         <!-- Prep/texture flags — constraints applied to the menu, NOT separate diets -->
@@ -118,6 +165,7 @@
           </div>
         </div>
       </div>
+
     </div>
 
     <div class="flex justify-end">
@@ -141,6 +189,9 @@ import { SparklesIcon } from '@heroicons/vue/24/outline'
 import ChipInput from '~/components/ChipInput.vue'
 import Select from '~/components/Select.vue'
 import SearchableSelect from '~/components/SearchableSelect.vue'
+import ProteinWeights from '~/components/ProteinWeights.vue'
+import { useJob } from '~/composables/useJob'
+import { findCachedProteinsJob } from '~/composables/useProteinsCache'
 
 const emit = defineEmits(['created', 'rerun'])
 const props = defineProps({ preset: { type: Object, default: null } })
@@ -214,10 +265,33 @@ onMounted(() => {
 // Cost tier override (default = institution-implied) — a budget/quality label.
 const costTier = ref(COST_TIERS[0].key)
 const costOptions = COST_TIERS.map((t) => ({ value: t.key, label: t.label }))
+const costTierDescription = ref('')
+
+// The chef's protein rotation. The list is PRODUCED by the categorization step (see fetchProteins);
+// addedProteins holds only the names the chef typed, because that is what the step consumes.
+const proteinRows = ref([])
+const addedProteins = ref([])
+const removedProteins = ref([]) // remembered so a later re-fetch can't hand a removed protein back
+const proteinsPending = ref(false)
+const addingProtein = ref(false)
+
+// Course positions and their seeds mirror DEFAULT_COURSE_COUNTS in functions/entry/ai/menu.js —
+// the server applies exactly these when courseCounts is absent, so the form must not show something
+// else. 1 is omitted from the range on purpose: one dish is not a course.
+const COURSE_POSITIONS = [
+  { key: 'appetizer', label: 'Appetizer', default: 3 },
+  { key: 'entree', label: 'Entrée', default: 2 },
+  { key: 'side', label: 'Side', default: 3 },
+]
+const courseCountOptions = [{ value: 0, label: 'Not served' }, ...[2, 3, 4, 5, 6, 7].map((n) => ({ value: n, label: String(n) }))]
+const courseCounts = reactive(Object.fromEntries(COURSE_POSITIONS.map((c) => [c.key, c.default])))
 const loading = ref(false)
 
 // Duration
 const DURATIONS = [
+  // TEST-ONLY: a 2-day span, so a run costs 2 days × diets units instead of a full week. Expressed
+  // as a fraction of a week because the option value IS `weeks`; `days` below rounds it back to 2.
+  { label: '2 days (TEST)', weeks: 2 / 7 },
   { label: '1 week', weeks: 1 }, { label: '2 weeks', weeks: 2 }, { label: '3 weeks', weeks: 3 },
   { label: '1 month', weeks: 4 }, { label: '6 weeks', weeks: 6 }, { label: '2 months', weeks: 8 },
   { label: '3 months', weeks: 12 },
@@ -225,7 +299,7 @@ const DURATIONS = [
 const durationOptions = DURATIONS.map((d) => ({ value: d.weeks, label: d.label }))
 const weeks = ref(2)
 // "Weekdays" is the business_days flag (in the Options list), not a separate duration toggle.
-const days = computed(() => weeks.value * (flags.business_days ? 5 : 7))
+const days = computed(() => Math.round(weeks.value * (flags.business_days ? 5 : 7)))
 
 // Range built with dayjs: starts today, spans `days` calendar days (or weekdays when
 // businessDaysOnly). dayjs gives the human-readable label and the start/end the plan range needs.
@@ -269,6 +343,205 @@ const fetchDefaults = (e) => {
   success('Remy', `Remy suggestions for ${e.label.toLowerCase()} aren't wired up yet`)
 }
 
+const duration = computed(() => ({
+  weeks: weeks.value,
+  businessDaysOnly: flags.business_days,
+  days: days.value,
+  startDate: start.value.format('YYYY-MM-DD'),
+  endDate: end.value.format('YYYY-MM-DD'),
+}))
+const valuesWire = () => Object.fromEntries(inputEntries.map((e) => [e.key, (chips[e.key] || []).join(',')]))
+const dietWeightsWire = () => Object.fromEntries((chips.diets || []).map((d) => [d, Number(dietWeights[d]) || 0]))
+
+// ── Protein list ── The chef never types a protein's diets: the `protein_dietary_categorization`
+// step works them out. So the list is FILLED by running that step on its own, mid-form — a separate
+// job from Generate. `enabled` gates by subtype and a step is only dropped on an explicit false, so
+// every other key must be named false to keep this to ONE step.
+const proteinJob = useJob()
+// Only the NEWEST request may bind. Two fetches can overlap (a diet edit while one is in flight, or
+// a hot reload), and the responses can come back out of order — binding whichever replied last left
+// the list watching a job that was already superseded, waiting forever while a newer one finished.
+let proteinFetchSeq = 0
+const fetchProteins = async (extra = addedProteins.value) => {
+  // Nothing to categorize against without diets — and no job without an owner.
+  if (!companyId.value || !userId.value || !(chips.diets || []).length) return
+  const seq = ++proteinFetchSeq
+  // Minted before the POST so the orchestrator log can be joined to the request that caused it —
+  // the jobId only exists in the reply, which is too late to correlate the way in.
+  const clientRequestId = crypto.randomUUID()
+  proteinsPending.value = true
+  try {
+    const { jobId } = await $fetch(`${aiBase.value}/menu`, {
+      method: 'POST', timeout: 15000, headers: { Authorization: `Bearer ${await getToken()}` },
+      body: {
+        userId: userId.value,
+        companyId: companyId.value,
+        values: valuesWire(),
+        duration: duration.value,
+        residents: residents.value,
+        flags: { ...flags },
+        dietWeights: dietWeightsWire(),
+        costTier: costTier.value,
+        costTierDescription: costTierDescription.value,
+        location: location.value,
+        enabled: {
+          protein_dietary_categorization: true, protein_grid: false, recipes: false, courses: false,
+          nutrients: false, compliance: false, menu: false, recipe: false, nutrition: false,
+          inventory: false, order_form: false,
+        },
+        addedProteins: [...extra],
+        metadata: { clientRequestId },
+      },
+    })
+    if (seq !== proteinFetchSeq) return // a newer fetch already owns the list — this reply is stale
+    proteinJob.bind(jobId) // bind() clears the previous job's runs synchronously — no stale parse
+  } catch (e) {
+    if (seq !== proteinFetchSeq) return
+    proteinsPending.value = false
+    addingProtein.value = false
+    showError('Protein list failed', e.data?.error || e.message)
+  }
+}
+
+// The step answers with a pipe table. The HEADER names the columns (the model reorders them), and
+// `protein` is the current name for the first column while `type` is the older one — accept either so
+// an in-flight prompt change can't blank the list.
+const parseProteinTable = (text) => {
+  const lines = String(text || '').split('\n').map((l) => l.trim())
+    .filter((l) => l.includes('|') && !l.startsWith('```'))
+    .map((l) => l.split('|').map((c) => c.trim()))
+    .filter((cells) => !cells.every((c) => !c || /^:?-{2,}:?$/.test(c)))
+  const h = lines.findIndex((cells) => cells.some((c) => /^(protein|type)$/i.test(c)))
+  if (h < 0) return []
+  const header = lines[h].map((c) => c.toLowerCase())
+  const iType = header.indexOf('protein') >= 0 ? header.indexOf('protein') : header.indexOf('type')
+  const iCut = header.indexOf('cut'), iDiets = header.indexOf('diets')
+  return lines.slice(h + 1)
+    .map((cells) => ({
+      protein: (cells[iType] ?? '').trim(),
+      cut: iCut >= 0 ? (cells[iCut] ?? '').trim() : '',
+      diets: iDiets >= 0 ? (cells[iDiets] ?? '').split(',').map((d) => d.trim()).filter(Boolean) : [],
+      weight: 0,
+    }))
+    .filter((r) => r.protein && !/^(protein|type)$/i.test(r.protein)) // models re-quote the header line
+}
+
+// MERGE, never replace. A re-fetch (a diet or location change) must not discard the chef's curation:
+// existing proteins keep their weight AND their position, only their diets refresh. Genuinely new
+// proteins land at the bottom on weight 0 — visible, but out of the rotation until the chef weights
+// them. First load only: nothing to preserve, so seed a descending pre-ranking to adjust from.
+const mergeProteins = (fresh) => {
+  const gone = new Set(removedProteins.value.map((p) => p.toLowerCase()))
+  const seen = new Map(fresh.filter((r) => !gone.has(r.protein.toLowerCase())).map((r) => [r.protein.toLowerCase(), r]))
+  const prev = proteinRows.value
+  if (!prev.length) {
+    const seed = [...seen.values()]
+    proteinRows.value = seed.map((r, i) => ({ ...r, weight: Math.max(1, seed.length * 2 - i * 2) }))
+    return
+  }
+  const kept = prev.map((p) => {
+    const f = seen.get(p.protein.toLowerCase())
+    seen.delete(p.protein.toLowerCase())
+    return f ? { ...p, diets: f.diets, cut: f.cut || p.cut } : p
+  })
+  proteinRows.value = [...kept, ...seen.values()]
+}
+
+// The worker STREAMS a run's response, so `runs` updates many times while the table is still being
+// written. Taking the first update that parsed kept row one and dropped the rest, because clearing
+// the pending flag made every later chunk fall out of this watch. Wait for the run to be terminal.
+const TERMINAL = new Set(['success', 'fail', 'error'])
+watch(proteinJob.runs, (runs) => {
+  if (!proteinsPending.value && !addingProtein.value) return
+  const stepRuns = runs.filter((r) => r.step !== 'plan')
+  if (!stepRuns.length || !stepRuns.every((r) => TERMINAL.has(r.status))) return
+  const rows = parseProteinTable(stepRuns.map((r) => r.response || '').filter(Boolean).join('\n'))
+  if (!rows.length) return
+  mergeProteins(rows)
+  proteinsPending.value = false
+  addingProtein.value = false
+}, { deep: true })
+
+// A failed job never writes a parseable table, so the pending flags would otherwise spin forever.
+watch(proteinJob.jobStatus, (s) => {
+  if (s !== 'fail') return
+  proteinsPending.value = false
+  addingProtein.value = false
+  showError('Protein list failed', 'Remy could not categorize these proteins — try again')
+})
+
+// The list is derived from the DIETS and the LOCATION (region drives availability), so it re-fetches
+// when either changes — a stale list would offer proteins the new diets or region can't use.
+// Keyed on a signature, not a boolean, and compared SYNCHRONOUSLY — a flag that only flips once
+// could never re-fetch, and the synchronous compare is what stops a load-time race kicking several
+// jobs at once. Mirrors the app's own trigger (CreatePlanPage.tsx:847-857): the list derives from the
+// DIETS and the LOCATION, so those two alone key it.
+const proteinsKey = computed(() => `${[...(chips.diets || [])].sort().join(',')}|${location.value}`)
+let lastProteinsKey = null
+// Watches the OWNER too, not just the key: the diets are seeded at init, so keying on them alone
+// meant the first fetch waited for a change that never came. immediate:true covers the case where
+// company and user are already resolved on mount.
+// Coalesced: swapping a diet is a REMOVE then an ADD, two key changes a moment apart, and each one
+// firing straight through launched its own job — the first already superseded before it was answered.
+let proteinsSettle
+watch([proteinsKey, companyId, userId], ([key]) => {
+  if (!companyId.value || !userId.value || !(chips.diets || []).length) return
+  if (lastProteinsKey === key) return
+  clearTimeout(proteinsSettle)
+  proteinsSettle = setTimeout(async () => {
+    const settled = proteinsKey.value
+    if (lastProteinsKey === settled) return
+    lastProteinsKey = settled
+    // REUSE BEFORE REBUILD. The guard above only suppresses repeats WITHIN this component instance;
+    // `lastProteinsKey` is null again on every mount, so a reload or a hot reload re-asked a question
+    // already answered. Bind a past success on this exact key instead — proteinJob.bind() feeds the
+    // same parse whether the runs landed a second ago or this morning. Only a miss builds.
+    proteinsPending.value = true
+    const cached = await findCachedProteinsJob(settled, addedProteins.value, { fake: false }, companyId.value).catch(() => null)
+    // The key can move while the lookup is in flight (a diet edit). Binding a job for the OLD key
+    // would show a list the form no longer asked for, so drop a result that is no longer current.
+    if (lastProteinsKey !== settled) return
+    if (cached) { proteinJob.bind(cached); return }
+    proteinsPending.value = false // fetchProteins owns the spinner from here
+    void fetchProteins()
+  }, 600)
+}, { immediate: true })
+
+const addProtein = (name) => {
+  const k = name.toLowerCase()
+  // Guard BOTH lists: a protein the step hasn't returned yet is in addedProteins but not in the
+  // rows, so checking the rows alone let a second add through and the prompt read "Moose, Moose".
+  if (proteinRows.value.some((p) => p.protein.toLowerCase() === k)) return
+  if (addedProteins.value.some((p) => p.toLowerCase() === k)) return
+  removedProteins.value = removedProteins.value.filter((p) => p.toLowerCase() !== k) // re-adding must bring it back
+  addedProteins.value = [...addedProteins.value, name]
+  addingProtein.value = true
+  void fetchProteins(addedProteins.value)
+}
+
+// Local only — removing NEVER re-runs the step. Recorded so a later re-fetch can't hand it back, and
+// dropped from addedProteins if the chef had typed it in.
+const removeProtein = (name) => {
+  const k = name.toLowerCase()
+  if (!removedProteins.value.some((p) => p.toLowerCase() === k)) removedProteins.value = [...removedProteins.value, name]
+  addedProteins.value = addedProteins.value.filter((p) => p.toLowerCase() !== k)
+  proteinRows.value = proteinRows.value.filter((p) => p.protein.toLowerCase() !== k)
+}
+
+// Wire shape. A weight of 0 means "not in this rotation", so those rows are dropped; order is kept
+// because it carries priority. Diets pass through as the categorization step wrote them — they are
+// the model's answer, not a chef's tagging, so re-filtering them here would silently drop rows.
+const proteinWeightsWire = computed(() =>
+  proteinRows.value
+    .filter((p) => p.protein?.trim() && (Number(p.weight) || 0) > 0)
+    .map((p) => ({
+      protein: p.protein.trim(),
+      ...(p.cut?.trim() ? { cut: p.cut.trim() } : {}),
+      diets: [...(p.diets || [])],
+      weight: Number(p.weight) || 0,
+    }))
+)
+
 // ── Load a saved plan (from history) into the form, then track whether it's been edited. ──
 // preset = { jobId, input } (input = the blob /ai/menu saved to menuPlans). Hydrate every field, then
 // snapshot the signature: the button reads "Rerun" while the form still matches the loaded plan and
@@ -281,6 +554,8 @@ const currentSig = computed(() => JSON.stringify({
   weeks: weeks.value, businessDaysOnly: flags.business_days, residents: residents.value,
   flags: { ...flags }, costTier: costTier.value, location: location.value,
   dietWeights: Object.fromEntries((chips.diets || []).map((d) => [d, Number(dietWeights[d]) || 0])),
+  proteinWeights: proteinWeightsWire.value, addedProteins: addedProteins.value,
+  courseCounts: { ...courseCounts }, costTierDescription: costTierDescription.value,
   enabled: { ...enabled },
 }))
 const dirty = computed(() => loadedSig.value != null && currentSig.value !== loadedSig.value)
@@ -298,6 +573,13 @@ const hydrate = (input) => {
   if (input.costTier != null) costTier.value = input.costTier
   if (input.location != null) location.value = input.location
   if (input.dietWeights) Object.assign(dietWeights, input.dietWeights)
+  if (input.costTierDescription != null) costTierDescription.value = input.costTierDescription
+  proteinRows.value = (input.proteinWeights || []).map((p) => ({ protein: p.protein, cut: p.cut || '', diets: [...(p.diets || [])], weight: p.weight ?? 0 }))
+  addedProteins.value = [...(input.addedProteins || [])]
+  // A loaded plan already carries its protein list. Claim the key it would produce so the watch
+  // treats this as seen — otherwise the load itself launches a job that merges over what was saved.
+  if (proteinRows.value.length) lastProteinsKey = proteinsKey.value
+  if (input.courseCounts) Object.assign(courseCounts, input.courseCounts)
   if (input.enabled) Object.assign(enabled, input.enabled)
 }
 watch(() => props.preset, (p) => {
@@ -324,21 +606,21 @@ const submit = async () => {
       userId: userId.value,
       companyId: companyId.value,
       // every input entry's chips → comma-delimited string, keyed by entry key (spaces kept)
-      values: Object.fromEntries(inputEntries.map((e) => [e.key, (chips[e.key] || []).join(',')])),
-      duration: {
-        weeks: weeks.value,
-        businessDaysOnly: flags.business_days,
-        days: days.value,
-        startDate: start.value.format('YYYY-MM-DD'),
-        endDate: end.value.format('YYYY-MM-DD'),
-      },
+      values: valuesWire(),
+      duration: duration.value,
       residents: residents.value,
       flags: { ...flags },
       costTier: costTier.value,
       location: location.value,
       // per-diet relative weights, only for the diets actually selected → server {{allocate}} split
-      dietWeights: Object.fromEntries((chips.diets || []).map((d) => [d, Number(dietWeights[d]) || 0])),
+      dietWeights: dietWeightsWire(),
       enabled: { ...enabled },
+      // Each of these is OMITTED when empty rather than sent blank, so the server's own defaults
+      // still apply (absent courseCounts = DEFAULT_COURSE_COUNTS).
+      ...(proteinWeightsWire.value.length ? { proteinWeights: proteinWeightsWire.value } : {}),
+      ...(addedProteins.value.length ? { addedProteins: [...addedProteins.value] } : {}),
+      ...(Object.keys(courseCounts).length ? { courseCounts: { ...courseCounts } } : {}),
+      ...(costTierDescription.value.trim() ? { costTierDescription: costTierDescription.value.trim() } : {}),
       ...(reran ? { jobId: loadedJobId.value } : {}), // rerun → recompose & re-run THIS job in place
     }
     const { jobId } = await $fetch(`${aiBase.value}/menu`, { method: 'POST', timeout: 15000, body, headers: { Authorization: `Bearer ${await getToken()}` } })

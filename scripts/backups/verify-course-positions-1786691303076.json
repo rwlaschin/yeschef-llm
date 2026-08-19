@@ -1,0 +1,6 @@
+{
+  "_id": "6a7e6f6adff6312de744477a",
+  "instruction": "# REQUIRED POSITIONS\n\n{{courseListNoEntree}}\n\nEVERY position on that list MUST have AT LEAST ONE row in the table below. More than one row for a position is CORRECT.\nA row whose Kind is `entree` is NOT ALLOWED — entrées are written by an earlier step and are not yours to check.\n\n# TABLE TO CHECK",
+  "pass": "Every position on the list has AT LEAST ONE row, and every Kind in the table is a position on that list. More than one row for a position is CORRECT, never a fault.",
+  "fail": "A position on the list with NO row, or a Kind in the table that is not on the list (including `entree`). Name every one."
+}

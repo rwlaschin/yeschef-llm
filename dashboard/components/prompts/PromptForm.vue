@@ -46,6 +46,21 @@
       </div>
     </div>
 
+    <!-- name: optional, purely so a fragment can be referred to by something other than its _id -->
+    <div class="mb-5 max-w-md">
+      <label class="block text-sm text-secondary mb-1">Name <span class="text-muted">· optional</span></label>
+      <input v-model="form.name" placeholder="e.g. Status contract" class="w-full form-input text-sm" />
+    </div>
+
+    <!-- placement: which part of the step this fragment sits beside. `system` is a DIFFERENT
+         message, the other five are positions inside the user message. -->
+    <div class="mb-5 max-w-md">
+      <label class="block text-sm text-secondary mb-1">Placement</label>
+      <select v-model="form.relatesTo" class="w-full form-input text-sm">
+        <option v-for="s in RELATES_TO" :key="s" :value="s">{{ s }} — {{ SECTION_DESCRIPTION[s] }}</option>
+      </select>
+    </div>
+
     <!-- model override: pin a model for this prompt; otherwise the request's model is used -->
     <div class="mb-5 max-w-md">
       <label class="block text-sm text-secondary mb-1">Model override</label>
@@ -80,6 +95,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import Toggle from '~/components/Toggle.vue'
+import { RELATES_TO, SYSTEM, SECTION_DESCRIPTION } from '~/utils/assemblePrompt'
 
 const props = defineProps({
   prompt: { type: Object, required: true },
@@ -89,7 +105,10 @@ const props = defineProps({
 })
 const emit = defineEmits(['save', 'cancel'])
 
-const form = ref({ active: false, content: '', modelOverride: null, ...JSON.parse(JSON.stringify(props.prompt)) })
+// `relatesTo` defaults to SYSTEM so an existing record with the field unset shows the section it is
+// actually assembled into, rather than an empty select the author has to guess at.
+const form = ref({ active: false, content: '', modelOverride: null, name: '', relatesTo: SYSTEM, ...JSON.parse(JSON.stringify(props.prompt)) })
+if (!RELATES_TO.includes(form.value.relatesTo)) form.value.relatesTo = SYSTEM
 // Existing prompt → its mapped types; new prompt → the type currently in focus.
 const initialTypes = Object.keys(props.prompt.mapping || {})
 const selected = ref(initialTypes.length ? initialTypes : [...props.defaultTypes])
@@ -115,6 +134,10 @@ const onSave = () => {
     active: !!form.value.active,
     content: form.value.content || '',
     modelOverride: form.value.modelOverride || null,
+    // name + relatesTo MUST be here. The page reads `data.relatesTo ?? 'system'`, so omitting them
+    // does not fail — it silently saves the default, discarding whatever the author chose.
+    name: form.value.name || '',
+    relatesTo: form.value.relatesTo || SYSTEM,
     types: selected.value, // page builds mapping from these; deselected types are dropped (order cleared)
   })
 }

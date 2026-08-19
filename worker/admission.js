@@ -33,10 +33,11 @@ export function shouldRun(slot, attempt = 0) {
 // re-evaluates here against the winner's write and returns null.
 //   - slot owned by a NEWER attempt        -> null (don't clobber a retry that overtook us)
 //   - this/newer attempt already terminal  -> null (first writer already won)
-//   - otherwise                            -> write {status, attempt, response, outcome}
-export function completionWrite(slot, { attempt = 0, status, response = "", outcome = null }) {
+//   - otherwise                            -> write {status, attempt, response, outcome, thinking}
+// `thinking` is the model's working, separated from the deliverable rather than discarded.
+export function completionWrite(slot, { attempt = 0, status, response = "", outcome = null, thinking = "" }) {
   const a = slot?.attempt ?? 0;
   if (a > attempt) return null;                        // superseded by a newer attempt
   if (isTerminal(slot) && a >= attempt) return null;   // already terminal for this/newer attempt
-  return { status, attempt, response, outcome };
+  return { status, attempt, response, outcome, thinking };
 }

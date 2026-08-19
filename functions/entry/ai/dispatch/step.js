@@ -61,6 +61,25 @@ export async function handle(payload, _message) {
   const failedRun = terminal.find((r) => r.status === "fail");
   const stepFailed = !!failedRun || status === "fail";
 
+  // P1: SAY WHAT EVERY UNIT DECIDED, ALWAYS — success and fail alike. A step whose units all
+  // self-assessed PASS logged nothing but "advancing", so a unit that returned a malformed table
+  // was indistinguishable from a good one until a LATER step choked on its rows and blamed itself
+  // ("step 4: step 3 unit 0: row … has 9 cell(s)"). Debugging that meant reading Firestore by hand.
+  // One line per unit: which unit, what it decided, why, how big its answer was.
+  const byUnit = terminal
+    .slice()
+    .sort((a, b) => String(a.id ?? "").localeCompare(String(b.id ?? "")))
+    .map((r) => {
+      const len = String(r.response ?? "").length;
+      const why = r.outcome ? ` reason="${String(r.outcome).slice(0, 120)}"` : "";
+      return `unit ${r.unit ?? "?"}=${r.status}(${len}c)${why}`;
+    })
+    .join("  ");
+  console.log(
+    `[ai/step] job=${jobId} step=${step} (${def.subtype ?? "?"}) ${terminal.length}/${expected} units terminal ` +
+    `→ ${stepFailed ? "FAIL" : "SUCCESS"} :: ${byUnit}`,
+  );
+
   if (!stepFailed) {
     return advance(db, jobRef, jobId, step, stepCount, "success");
   }

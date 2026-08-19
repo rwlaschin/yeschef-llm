@@ -51,9 +51,75 @@
     <!-- Executed steps, in run order. Each is collapsible. "thinking" (not in the final output)
          is dimmed and auto-collapses once done; "output" stays open and emphasized. Each step's ▷
          runs the NEXT step (this step's output as input); the last step shows a stop square. -->
+    <template v-for="s in executed" :key="s.index">
+    <!-- The INPUT that produced the response below. ABOVE its own step, because a prompt rendered
+         AFTER its step sits directly above the NEXT step's card and reads as that step's input —
+         step 2's prompt was pasted as step 3's. Input then output, and every block names its own
+         step so position can't be misread. Holds the prompt AS SENT: instructions, Pass/Fail and
+         the status contract, variables already resolved (worker index.js writes `prompt` as the
+         joined messages). Collapsed by default — 10-50k chars would bury the run.
+
+         ONE BLOCK PER UNIT, never the joined string. A fanned step is N separate calls that each
+         carry the same system preamble, so concatenating them reads as one document that repeats
+         itself. Labelled `<kind> i/n` so the boundary is visible. -->
+    <div v-for="(u, ui) in (s.units || [])" :key="`p-${u.id}`" v-show="u.prompt"
+      class="rounded px-3 py-2 border-divider bg-black/5 dark:bg-white/5">
+      <div class="flex items-center gap-2 text-xs text-muted">
+        <button type="button" @click="togglePrompt(`${s.index}-${ui}`)" class="flex items-center gap-1.5 shrink-0 text-left">
+          <ChevronRightIcon class="w-3.5 h-3.5 shrink-0 transition-transform" :class="promptOpen(`${s.index}-${ui}`) ? 'rotate-90' : ''" />
+          <span class="truncate max-w-[16rem]">prompt sent · step {{ s.index }} · {{ s.subtype }}</span>
+        </button>
+        <span v-if="(s.units || []).length > 1" class="shrink-0 tabular-nums opacity-70">
+          {{ s.kind || 'unit' }} {{ ui + 1 }}/{{ s.units.length }}
+        </span>
+        <span class="ml-auto shrink-0 tabular-nums opacity-70">{{ (u.prompt || '').length.toLocaleString() }} chars</span>
+        <button type="button" @click="copy(u.prompt, `prompt-${s.index}-${ui}`)"
+          :title="copiedKey === `prompt-${s.index}-${ui}` ? 'Copied' : 'Copy this prompt'"
+          class="grid place-items-center w-6 h-6 rounded-full text-muted transition hover:text-amber-400
+                 hover:bg-amber-400/10 active:scale-90 cursor-pointer">
+          <component :is="copiedKey === `prompt-${s.index}-${ui}` ? CheckIcon : ClipboardDocumentIcon" class="w-4 h-4" />
+        </button>
+      </div>
+      <!-- No card, no indent, no scroller: the step cards ARE the containers on this page, and every
+           other block expands into the page's own scroll. Full opacity when open — this is read
+           closely, and the dimmed treatment used for collapsed scaffolding makes it unreadable. -->
+      <pre v-show="promptOpen(`${s.index}-${ui}`)"
+        class="mt-1 text-xs whitespace-pre-wrap break-words font-mono"
+        :class="isDark ? 'text-gray-100' : 'text-gray-900'"
+      >{{ u.prompt }}</pre>
+    </div>
+
+    <!-- The model's WORKING, between the prompt that produced it and the deliverable it produced.
+         splitOutcome strips this out of the response before storing, so without this block it is
+         written and never seen — and it is the only record of HOW a row was decided, which is how
+         we found the model landing on the wrong pool entry at all.
+         Same treatment as the prompt above: per unit, collapsed by default, no card and no scroller,
+         because the step cards ARE the containers on this page. -->
+    <div v-for="(u, ui) in (s.units || [])" :key="`t-${u.id}`" v-show="u.thinking"
+      class="rounded px-3 py-2 border-divider bg-black/5 dark:bg-white/5">
+      <div class="flex items-center gap-2 text-xs text-muted">
+        <button type="button" @click="toggleThinking(`${s.index}-${ui}`)" class="flex items-center gap-1.5 shrink-0 text-left">
+          <ChevronRightIcon class="w-3.5 h-3.5 shrink-0 transition-transform" :class="thinkingOpen(`${s.index}-${ui}`) ? 'rotate-90' : ''" />
+          <span class="truncate max-w-[16rem]">working · step {{ s.index }} · {{ s.subtype }}</span>
+        </button>
+        <span v-if="(s.units || []).length > 1" class="shrink-0 tabular-nums opacity-70">
+          {{ s.kind || 'unit' }} {{ ui + 1 }}/{{ s.units.length }}
+        </span>
+        <span class="ml-auto shrink-0 tabular-nums opacity-70">{{ (u.thinking || '').length.toLocaleString() }} chars</span>
+        <button type="button" @click="copy(u.thinking, `thinking-${s.index}-${ui}`)"
+          :title="copiedKey === `thinking-${s.index}-${ui}` ? 'Copied' : 'Copy this working'"
+          class="grid place-items-center w-6 h-6 rounded-full text-muted transition hover:text-amber-400
+                 hover:bg-amber-400/10 active:scale-90 cursor-pointer">
+          <component :is="copiedKey === `thinking-${s.index}-${ui}` ? CheckIcon : ClipboardDocumentIcon" class="w-4 h-4" />
+        </button>
+      </div>
+      <pre v-show="thinkingOpen(`${s.index}-${ui}`)"
+        class="mt-1 text-xs whitespace-pre-wrap break-words font-mono"
+        :class="isDark ? 'text-gray-100' : 'text-gray-900'"
+      >{{ u.thinking }}</pre>
+    </div>
+
     <div
-      v-for="s in executed"
-      :key="s.index"
       class="rounded px-3 py-2"
       :class="s.displayAs === 'output' ? 'glass' : 'border-divider bg-black/5 dark:bg-white/5 opacity-60'"
     >
@@ -102,6 +168,28 @@
       >{{ s.response || '…' }}</pre>
     </div>
 
+    </template>
+
+    <!-- A step that failed BEFORE it dispatched has NO run doc, so it gets no card above and the
+         reason is invisible — the job just stops with nothing to look at. That happens whenever
+         dispatch rejects the upstream table (dispatch.js writes status/outcome on the JOB and
+         returns without publishing a unit). Surface it where the missing step would have been. -->
+    <div v-if="failedBeforeDispatch" class="rounded px-3 py-2 mt-1 glass border border-error/40">
+      <div class="flex items-center gap-2 text-xs text-error">
+        <span class="font-medium">step {{ failedStepIndex }}<template v-if="failedStepSubtype"> · {{ failedStepSubtype }}</template></span>
+        <!-- The job's own status, not an interpretation of it. This card exists because the step
+             has no run doc to carry one; inventing a phrase here would put words in the engine's
+             mouth. The reason itself is job.outcome, printed verbatim below. -->
+        <StepStatus :status="job.status" class="ml-auto shrink-0" />
+        <button type="button" @click="copy(job.outcome, 'job-outcome')"
+          :title="copiedKey === 'job-outcome' ? 'Copied' : 'Copy the failure'"
+          class="grid place-items-center w-6 h-6 rounded-full transition hover:bg-error/10 active:scale-90 cursor-pointer">
+          <component :is="copiedKey === 'job-outcome' ? CheckIcon : ClipboardDocumentIcon" class="w-4 h-4" />
+        </button>
+      </div>
+      <pre class="mt-2 text-xs whitespace-pre-wrap break-words font-mono text-error">{{ job.outcome }}</pre>
+    </div>
+
     <!-- Old one-shot jobs that streamed straight onto the job doc (no plan step). Also the empty
          state before anything runs. Hidden once steps execute (e.g. a composed plan has no planner
          run but does have step cards). -->
@@ -126,6 +214,48 @@ const { job, plan, output, investigating, jobStatus, runtimeOf, bind } = useJob(
 const executed = computed(() =>
   [...investigating.value, ...output.value].sort((a, b) => a.index - b.index)
 )
+
+const { isDark } = useTheme()
+
+// Steps whose prompt reached the worker. A step that failed BEFORE dispatch has no run doc and so
+// no prompt — it simply doesn't get a card here.
+const withPrompts = computed(() => executed.value.filter((s) => s.prompt))
+
+// The job failed at a step that produced NO RUN — the reason lives only on the job doc's `outcome`,
+// so without this the UI shows a stopped job and no explanation anywhere.
+//
+// Do NOT gate this on `cursor`. A step can fail while DISPATCHING the NEXT one: rowItems rejects a
+// malformed upstream row, dispatch.js writes status:"fail" + outcome and returns WITHOUT advancing,
+// so `cursor` still points at the last step that ran. Measured on job 6be54418: cursor=3, outcome
+// "step 4: step 3 unit 0: row … has 9 cell(s) — cannot fan out over its rows". Step 3 HAS runs, so
+// a cursor-based guard hid the only explanation the user had — a bare "Fail" with nothing beside it.
+// The rule is simply: the job failed, there is an outcome, and no step card is already showing it.
+const failedBeforeDispatch = computed(() =>
+  job.value?.status === 'fail' &&
+  !!job.value?.outcome &&
+  !executed.value.some((s) => s.outcome && String(s.outcome).includes(String(job.value.outcome)))
+)
+// WHICH step failed — read it from the outcome, not from `cursor`. dispatch.js prefixes the reason
+// with "step N: " and does NOT advance the cursor when it rejects the next step's inputs, so cursor
+// names the last step that RAN, not the one that failed. Labelling this card "step 3" for a "step 4:"
+// outcome sent the reader to the wrong step. Fall back to cursor only when the outcome has no prefix.
+const failedStepIndex = computed(() => {
+  const m = String(job.value?.outcome || '').match(/^step (\d+):/)
+  return m ? Number(m[1]) : job.value?.cursor
+})
+const failedStepSubtype = computed(() => job.value?.plan?.[failedStepIndex.value]?.subtype || '')
+
+// Prompt-as-sent disclosure, per step index. Closed by default — see the template comment.
+const promptOpenSet = reactive({})
+const promptOpen = (i) => !!promptOpenSet[i]
+const togglePrompt = (i) => { promptOpenSet[i] = !promptOpenSet[i] }
+
+// The model's own working, stripped out of the deliverable before it was stored (worker
+// steps/outcome.js splitOutcome). Collapsed by default and keyed per unit, exactly like the prompt
+// above it — it is scaffolding, not output, and a fanned step has one per call.
+const thinkingOpenSet = reactive({})
+const thinkingOpen = (i) => !!thinkingOpenSet[i]
+const toggleThinking = (i) => { thinkingOpenSet[i] = !thinkingOpenSet[i] }
 
 // Copy to clipboard with a brief per-button "Copied" tick (keyed so only the clicked one flips).
 const copiedKey = ref('')

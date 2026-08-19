@@ -1,0 +1,9 @@
+{
+  "_id": "6a7fa15a6c8125895e0d27f9",
+  "coll": "prompt_library",
+  "name": "Courses thinking block",
+  "field": "content",
+  "before": "Your response is three things, in this order: your working, then the table, then the status block on the last line by itself.\n\nYour working goes between these two markers, exactly as written:\n--- THINKING START ---\n--- THINKING END ---\nBetween them, count out the rows this call needs, one line at a time, position by position. What you write there is working, not the deliverable.\n\n--- EXAMPLE START — NEVER include or reproduce any part of this in your response ---\n--- THINKING START ---\nThis call needs: 2 Alpha, 3 Bravo\nAlpha 1 of 2: <dish>\nAlpha 2 of 2: <dish>\nAlpha complete: 2 of 2\nBravo 1 of 3: <dish>\nBravo 2 of 3: <dish>\nBravo 3 of 3: <dish>\nBravo complete: 3 of 3\nDiets so far: <diet> eats none of these, so it needs one more\nBravo 4: <dish>\n--- THINKING END ---\n<the table for this step, in the format this step defines>\n--- EXAMPLE END — NEVER include or reproduce any part of this in your response ---",
+  "after": "Your response is three things, in this order: your working, then the table, then the status block on the last line by itself.\n\nYour working goes between these two markers, exactly as written:\n--- THINKING START ---\n--- THINKING END ---\nBetween them, count out the rows this call needs, one line at a time, position by position, using the position names and counts you were given above — never a name from an example. For each position: write one line per row as you commit to it, then a line confirming that position is complete before you move to the next. Then check the diets — if any diet on this plan eats none of what you have written, add a row for it and say so. What you write there is working, not the deliverable.\n",
+  "takenAt": "2026-08-15T02:29:56.425Z"
+}

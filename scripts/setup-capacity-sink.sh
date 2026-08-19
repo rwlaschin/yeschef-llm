@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time infra for the capacity recorder's auto-trigger: a Cloud Logging sink that routes completed
 # ollama worker create operations (success AND ZONE_RESOURCE_POOL_EXHAUSTED) to a Pub/Sub topic the
-# `capacityRecorder` function (functions/index.js) subscribes to. Idempotent — safe to re-run.
+# `capacity` function (functions/index.js) subscribes to. Idempotent — safe to re-run.
 #
 # Deploy the function first (npm run deploy:orchestrator) so the topic `capacity_create_events` exists,
 # then run this once. Re-run only if the filter or topic changes.
@@ -29,4 +29,4 @@ WRITER=$(gcloud logging sinks describe "$SINK" --project="$PROJECT" --format="va
 echo "Sink writer identity: $WRITER"
 gcloud pubsub topics add-iam-policy-binding "$TOPIC" --project="$PROJECT" \
   --member="$WRITER" --role="roles/pubsub.publisher" >/dev/null
-echo "Done. Sink '$SINK' → topic '$TOPIC' → capacityRecorder. Recorder will now log ok/fail on real creates."
+echo "Done. Sink '$SINK' → topic '$TOPIC' → the capacity function. Recorder will now log ok/fail on real creates."

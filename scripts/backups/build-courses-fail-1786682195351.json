@@ -1,0 +1,4 @@
+{
+  "_id": "6a774dee46da04360288571f",
+  "fail": "A course position on the list left with no row at all, a slot from the previous step left with no row, a row whose Dish is a sauce, gravy, dressing, dip, relish or condiment rather than a dish, an empty or uncategorized Components cell, a `name:category` pair written into the Protein/Starch/Vegetable/Fruit columns, courses invented for positions no course list asked for, or output that is not the pipe-delimited rows. "
+}

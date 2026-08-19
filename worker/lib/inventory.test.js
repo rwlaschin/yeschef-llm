@@ -83,3 +83,21 @@ test("processDay: a diet with no pct → 0 servings (surfaced, never guessed)", 
   const rows = processDay({ residents: 300, diets: [{ diet: "regular", pct: 58 }], recipes: [{ diet: "vegan", items: [{ name: "tofu", amount: 1, unit: "block" }] }] });
   assert.equal(rows[0].servingQuantity, 0);
 });
+
+// Measured on job fa2671b5 step 10: the model sent one of these fields as a non-array and
+// `(x || []).forEach` threw a bare TypeError, which then became the retry feedback verbatim —
+// "REJECTED because: ((intermediate value) || []).forEach is not a function" tells the model
+// nothing it can act on, so attempt 2 failed the same way. The shape error must NAME the field.
+for (const [field, args] of [
+  ["diets", { residents: 20, diets: { standard: 77 }, recipes: [] }],
+  ["recipes", { residents: 20, diets: [], recipes: { day1: [] } }],
+  ["items", { residents: 20, diets: [], recipes: [{ diet: "standard", items: "banana, rice" }] }],
+]) {
+  test(`processDay: a non-array \`${field}\` is rejected by name, not a bare TypeError`, () => {
+    assert.throws(() => processDay(args), (e) => {
+      assert.match(e.message, new RegExp(field));
+      assert.doesNotMatch(e.message, /is not a function/);
+      return true;
+    });
+  });
+}

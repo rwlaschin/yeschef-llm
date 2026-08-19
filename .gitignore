@@ -26,4 +26,7 @@ cloudbuild.*.yaml
 functions/.env
 functions/.env.*
 
+# Temporary and one off scripts and files
+.scratch
+
 # NOTE: .env files are intentionally NOT ignored (private repo).

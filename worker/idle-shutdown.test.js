@@ -143,3 +143,30 @@ test("workerInstance: builds the full self-link, caches it, and is null off-GCE"
     assert.equal(await workerInstance(), null); // off-GCE → null, never throws
   } finally { globalThis.fetch = realFetch; _resetMetaCache(); }
 });
+
+// The window between "self-delete requested" and the VM actually going away: a message accepted here is
+// taken by a box about to be destroyed mid-flight, so index.js must be able to refuse it.
+test("isShuttingDown stays true after a successful self-delete, so work is refused on the way out", async () => {
+  const clock = fakeClock();
+  try {
+    const idle = makeIdleShutdown({ idleMs: 1000, onIdle: async () => {}, log: silent });
+    assert.equal(idle.isShuttingDown(), false, "a fresh worker is not shutting down");
+    idle.armInitial();
+    await clock.advance(1000);
+    assert.equal(idle.isShuttingDown(), true, "delete requested — the box is on its way out");
+  } finally { clock.restore(); }
+});
+
+test("a failed self-delete clears isShuttingDown so the box accepts work again", async () => {
+  const clock = fakeClock();
+  try {
+    const idle = makeIdleShutdown({
+      idleMs: 1000,
+      onIdle: async () => { throw new Error("compute API blip"); },
+      log: silent,
+    });
+    idle.armInitial();
+    await clock.advance(1000);
+    assert.equal(idle.isShuttingDown(), false, "still alive after a failed delete, so it must take work");
+  } finally { clock.restore(); }
+});

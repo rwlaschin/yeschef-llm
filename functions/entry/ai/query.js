@@ -35,11 +35,30 @@ const QUERY_TYPE = "task";
 
 export async function post(req, reply) {
   const { query, context, history, userId, companyId, companyName, fake, style, subtype, type, model } = req.body || {};
-  if (!query || typeof query !== "string") return reply.code(400).send({ error: "query is required" });
+
+  // Every exit from this route logs. Previously only the success path did, so a rejected or
+  // throwing query produced NO output at all and simply vanished — the caller saw a spinner and
+  // the orchestrator log showed nothing. Mirrors the [ai/menu] idiom.
+  console.log(
+    `[ai/query] ← type=${type || QUERY_TYPE} subtype=${subtype || "-"} model=${model || "(default)"}` +
+    ` fake=${!!fake} company=${companyId || "-"} queryLen=${typeof query === "string" ? query.length : 0}`,
+  );
+
+  if (!query || typeof query !== "string") {
+    console.warn(`[ai/query] ✗ 400 query is required (got ${typeof query}) company=${companyId || "-"}`);
+    return reply.code(400).send({ error: "query is required" });
+  }
 
   // fake:true → canned topic (no Ollama, no delay), SAME transport as a real query.
   const topic = fake ? FAKE_TOPIC : resolveTopic(model);
-  if (!topic) return reply.code(400).send({ error: `unknown or unavailable model "${model}"` });
+  if (!topic) {
+    console.warn(
+      `[ai/query] ✗ 400 unknown or unavailable model "${model}" —` +
+      ` isProdLike=${isProdLike()}, dev-eligible topics: ${MODELS.filter((m) => m.dev).map((m) => m.topic).join(", ")}`,
+    );
+    return reply.code(400).send({ error: `unknown or unavailable model "${model}"` });
+  }
+  console.log(`[ai/query] resolved topic="${topic}"${fake ? " (FAKE — canned, no model)" : ""}${model ? " (caller override)" : " (default tier)"}`);
   // Copilot output style → temperature (worker maps style→temp). type:"task" defaults to
   // "structured" (temp ~0.1, near-deterministic → identical answers). The copilot wants
   // variety, so default to "unstructured" (~0.7); callers may override per request.
@@ -57,16 +76,38 @@ export async function post(req, reply) {
 
   const db = getFirestore();
   const jobId = randomUUID();
-  await db.collection("llmResults").doc(jobId).set({
-    jobId, query, type: effectiveType, subtype: subtype || "", model: topic, fake: !!fake,
-    status: "pending", response: "",
-    uid: userId || "", companyId: companyId || "", organization: companyName || "",
-    context: context || null, isDeleted: false,
-    createdAt: FieldValue.serverTimestamp(), completedAt: null,
-  });
-  await pubsub().topic(topic).publishMessage({
-    json: { jobId, query: effectiveQuery, type: effectiveType, subtype: subtype || "", model: topic, fake: !!fake, style: genStyle },
-  });
-  console.log(`[ai/query] jobId=${jobId} → "${topic}"${fake ? " (fake)" : ""} (company=${companyId || "-"})`);
+
+  // The seed and the publish are the two awaits that can throw. Unlogged, a failure here surfaced
+  // only as a bare 500 — indistinguishable from the job silently never being picked up. Log and
+  // RETHROW so the framework's error handling is unchanged; this adds visibility, not behaviour.
+  try {
+    await db.collection("llmResults").doc(jobId).set({
+      jobId, query, type: effectiveType, subtype: subtype || "", model: topic, fake: !!fake,
+      status: "pending", response: "",
+      uid: userId || "", companyId: companyId || "", organization: companyName || "",
+      context: context || null, isDeleted: false,
+      createdAt: FieldValue.serverTimestamp(), completedAt: null,
+    });
+  } catch (err) {
+    console.error(`[ai/query] ✗ FIRESTORE seed failed jobId=${jobId}: ${err?.message || err}`);
+    throw err;
+  }
+
+  try {
+    await pubsub().topic(topic).publishMessage({
+      json: { jobId, query: effectiveQuery, type: effectiveType, subtype: subtype || "", model: topic, fake: !!fake, style: genStyle },
+    });
+  } catch (err) {
+    console.error(
+      `[ai/query] ✗ PUBLISH failed jobId=${jobId} topic="${topic}": ${err?.message || err}` +
+      ` — the job doc exists in 'pending' and will hang forever unless this is retried`,
+    );
+    throw err;
+  }
+
+  console.log(
+    `[ai/query] ✓ jobId=${jobId} → "${topic}"${fake ? " (fake)" : ""} (company=${companyId || "-"}` +
+    ` type=${effectiveType} subtype=${subtype || "-"} style=${genStyle})`,
+  );
   return reply.send({ jobId });
 }

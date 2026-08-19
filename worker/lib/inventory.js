@@ -75,14 +75,24 @@ const dietKey = (d) => String(d == null ? "" : d).trim();
 
 // Process a DAY'S recipes. All inputs are in `args` (model-copied); the tool does the math. The row
 // `id` is only LOCALLY unique (recipe:line) — the run/streamer already scopes the output by job/run.
+// A field the model sent as the wrong TYPE is not an empty field. `(x || []).forEach` only guards
+// null, so a truthy non-array threw a bare TypeError that was handed back as the retry feedback
+// verbatim — the model cannot fix "forEach is not a function", so it failed identically on attempt 2.
+// Name the field and the shape instead, so the rejection tells the model what to send.
+const list = (v, field) => {
+  if (v == null) return [];
+  if (!Array.isArray(v)) throw new Error(`\`${field}\` must be an array, got ${typeof v === "object" ? "an object" : `a ${typeof v}`}`);
+  return v;
+};
+
 export function processDay(args) {
   const residents = Math.max(0, parseFloat(String(args?.residents == null ? "" : args.residents).replace(/[^0-9.]/g, "")) || 0);
   const pctOf = {};
-  (args?.diets || []).forEach((d) => { if (d?.diet != null) pctOf[dietKey(d.diet)] = d.pct; });
+  list(args?.diets, "diets").forEach((d) => { if (d?.diet != null) pctOf[dietKey(d.diet)] = d.pct; });
   const rows = [];
-  (args?.recipes || []).forEach((rec, r) => {
+  list(args?.recipes, "recipes").forEach((rec, r) => {
     const count = servingCount(residents, pctOf[dietKey(rec?.diet)]); // people on this recipe's diet
-    (rec?.items || []).forEach((it, i) => {
+    list(rec?.items, `recipes[${r}].items`).forEach((it, i) => {
       const amount = parseAmount(it?.amount);
       const su = String(it?.unit == null ? "" : it.unit);
       rows.push({

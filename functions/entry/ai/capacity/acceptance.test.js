@@ -2,7 +2,8 @@
 // driven through the REAL message entry points (not the internal hooks directly):
 //   • boot path:    handleDetectMessage (decodes the Pub/Sub envelope EVERY app publisher sends) →
 //                   onMessageDetected → decide → REAL startBox (actuate.js)
-//   • release path: onOutcome → REAL releaseBox
+//   • release path: onOutcome records the ok and re-decides — teardown is reconcile.js's job, NOT a
+//                   per-job release (see reconcile.test.js for the idle-stop policy)
 //   • stockout:     onStockout (what handleStockoutLog forwards to) → REAL shrinkBox + cascade startBox
 //
 // "For ALL Pub/Sub messages the app sends": dispatch.js, start.js and query.js ALL publish to a model
@@ -46,9 +47,15 @@ function harness({ regions = ["us-west1", "us-central1", "us-east4", "us-east1"]
     async incFail() {},
     async bumpStockoutStreak(region, whenMs) {
       const cur = state.get(region) || { region };
-      state.set(region, { ...cur, consecutiveStockouts: (cur.consecutiveStockouts || 0) + 1, lastStockoutTs: whenMs });
+      const next = (cur.consecutiveStockouts || 0) + 1;
+      state.set(region, { ...cur, consecutiveStockouts: next, lastStockoutTs: whenMs });
+      return next;   // the real store returns the post-increment streak (atomic findOneAndUpdate)
     },
     async recordMessageDetected() {},
+    // The live boxes-vs-backlog gate is stubbed to "yes": the real one reads GCE + Cloud Monitoring, and
+    // these tests must make ZERO network calls. Its own policy is proved in reconcile.test.js; here we
+    // only need the detect chain to reach the REAL actuator.
+    async needsBox() { return { start: true, why: "acceptance: gate stubbed open", seen: {} }; },
     startBox: rec("start", startBox),      // REAL actuate.js
     shrinkBox: rec("shrink", shrinkBox),   // REAL
     releaseBox: rec("release", releaseBox),// REAL
@@ -182,9 +189,9 @@ test("AC4 (recovery via exploration): a parked region is re-probed and a success
 
   const out = await onOutcome("us-west1", "success", NOW, "llama3_1_8b_v1", "inst-x", h.deps, NEVER_SKIP);
   assert.equal(out.wouldOpen, "us-west1", "un-parked after the success");
-  const rel = h.acts.find((a) => a.name === "release");
-  assert.equal(rel.result.action, "delete-instance", "done → targeted delete of the finished box");
-  assert.equal(rel.result.instance, "inst-x");
+  // A finished job records the success and re-decides, but does NOT touch the box: it may still hold a
+  // second leased message, and killing it mid-flight orphaned that message. reconcile.js owns teardown.
+  assert.equal(h.acts.find((a) => a.name === "release"), undefined, "no release on a job outcome");
 });
 
 // ── Safety net that underpins every criterion: dev NEVER touches a live MIG ─────────────────────

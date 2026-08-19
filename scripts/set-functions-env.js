@@ -15,7 +15,6 @@ const {
   GCP_PROJECT_ID,
   GCP_REGION = "us-central1",
   ORCHESTRATE_TOPIC,
-  OLLAMA_HOST,
   MAX_GEN,
   ORCHESTRATOR_SOFT_DELETE,
 } = process.env;
@@ -28,7 +27,6 @@ const vars = {
   MONGO_DB,
   GCP_PROJECT_ID,
   ...(ORCHESTRATE_TOPIC && { ORCHESTRATE_TOPIC }),
-  ...(OLLAMA_HOST && { OLLAMA_HOST }),
   ...(MAX_GEN && { MAX_GEN }),
   ...(ORCHESTRATOR_SOFT_DELETE && { ORCHESTRATOR_SOFT_DELETE }),
 };

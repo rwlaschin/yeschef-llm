@@ -7,8 +7,8 @@
         v-slot="{ open }"
         class="w-full px-3 py-2 text-sm rounded-lg min-h-[2.5rem] surface-2 text-strong border-divider text-left flex items-center justify-between transition-colors hover:border-gray-400 dark:hover:border-gray-600 focus:outline-none focus:ring-2 focus:ring-amber-500/40 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-divider"
       >
-        <span :class="selectedLabel ? '' : 'text-muted'">{{ selectedLabel || placeholder }}</span>
-        <span class="text-xs opacity-60 ml-1 transition-transform" :class="open ? 'rotate-180' : ''">▼</span>
+        <span class="truncate min-w-0" :title="selectedLabel" :class="selectedLabel ? '' : 'text-muted'">{{ selectedLabel || placeholder }}</span>
+        <span class="text-xs opacity-60 ml-1 shrink-0 transition-transform" :class="open ? 'rotate-180' : ''">▼</span>
       </ListboxButton>
       <transition
         enter-active-class="transition duration-100 ease-out" enter-from-class="opacity-0 scale-95" enter-to-class="opacity-100 scale-100"

@@ -25,12 +25,14 @@ export const MENU_ENTRIES = [
   },
   {
     key: "diets", label: "Diets", group: "input", field: "chips", defaultEnabled: true,
-    default: ["regular", "diabetic", "low-sodium", "renal", "gluten-free", "vegetarian"],
-    options: ["regular", "diabetic", "low-sodium", "renal", "gluten-free", "vegetarian", "vegan", "low-fat", "lactose-free"],
-    // Default RELATIVE diet mix (regular-heavy, typical of senior care) — the form seeds the per-diet
+    // Diet keys match the app's own catalog (yeschef/src/lib/planOptions.ts DIETS) — the two feed the
+    // same steps, and a plan built here with a key the app doesn't know reads as a diet nobody serves.
+    default: ["standard", "diabetic", "low-sodium", "renal", "gluten-free", "vegetarian"],
+    options: ["standard", "diabetic", "low-sodium", "renal", "gluten-free", "vegetarian", "vegan", "low-fat", "lactose-free"],
+    // Default RELATIVE diet mix (standard-heavy, typical of senior care) — the form seeds the per-diet
     // weight inputs from this, the user can override, and the {{allocate}} helper normalizes whatever
     // weights the SELECTED diets carry to split residents into per-diet batch counts.
-    weights: { regular: 50, diabetic: 15, "low-sodium": 12, renal: 8, "gluten-free": 5, vegetarian: 8, vegan: 3, "low-fat": 4, "lactose-free": 3 },
+    weights: { standard: 50, diabetic: 15, "low-sodium": 12, renal: 8, "gluten-free": 5, vegetarian: 8, vegan: 3, "low-fat": 4, "lactose-free": 3 },
     subtype: "query", kind: "fanout", includeInResults: true, contextsFrom: [],
     roles: ["request"],
   },
@@ -63,10 +65,21 @@ export const MENU_ENTRIES = [
 
   // ── BODY entries — fixed pipeline; toggle to skip ──
   {
+    // Classifies each protein by the diets it suits. It had NO entry here, and dropReason only drops
+    // a step whose subtype maps to a toggle key — so `protein_dietary_categorization: false` was
+    // inert and this step (active at order "@", the FIRST slot) composed into every menu build. Its
+    // `Protein | Diets | Why` rows then reached the grid's positional parser as [day, mealtime,
+    // type, cut]. It needs a key of its own so callers that don't want it can actually drop it.
+    key: "protein_dietary_categorization", label: "Categorize Proteins", group: "body", defaultEnabled: true,
+    subtype: "protein_dietary_categorization", kind: "aggregation", includeInResults: true,
+    contextsFrom: [],
+    roles: ["request"],
+  },
+  {
     // Protein backbone — the first step of the new flow. Its own toggle key so a build can compose
     // JUST this step (enable protein_grid, disable the rest) → a one-step plan. defaultEnabled false
     // so normal menu builds don't pick it up. Fans out one unit per diet (mapOf "diets as |diet|").
-    key: "protein_grid", label: "Protein Grid", group: "body", defaultEnabled: false,
+    key: "protein_grid", label: "Protein Grid", group: "body", defaultEnabled: true,
     subtype: "protein_grid", kind: "fanout", includeInResults: true,
     contextsFrom: [],
     roles: ["request"],
@@ -74,15 +87,24 @@ export const MENU_ENTRIES = [
   {
     // Dish layer on the protein backbone. Own toggle key + contextsFrom:[] so a build can
     // compose JUST this step (enable recipes, disable the rest), exactly like protein_grid.
-    key: "recipes", label: "Recipes", group: "body", defaultEnabled: false,
+    key: "recipes", label: "Recipes", group: "body", defaultEnabled: true,
     subtype: "recipes", kind: "fanout", includeInResults: true,
+    contextsFrom: [],
+    roles: ["request"],
+  },
+  {
+    // Accompanying courses — runs AFTER recipes and authors every non-entrée position for a slot,
+    // choosing dishes by the plan's flavor profile against the entrée recipes already decided.
+    // Same fanout unit shape as recipes ((diet, day)), so run→slot resolution is unchanged.
+    key: "courses", label: "Courses", group: "body", defaultEnabled: true,
+    subtype: "courses", kind: "fanout", includeInResults: true,
     contextsFrom: [],
     roles: ["request"],
   },
   {
     // Per-meal nutrient totals. Own toggle key + contextsFrom:[] so a build can compose JUST
     // this step (enable nutrients, disable the rest), exactly like protein_grid.
-    key: "nutrients", label: "Nutrients", group: "body", defaultEnabled: false,
+    key: "nutrients", label: "Nutrients", group: "body", defaultEnabled: true,
     subtype: "nutrients", kind: "fanout", includeInResults: true,
     contextsFrom: [],
     roles: ["request"],
@@ -100,13 +122,13 @@ export const MENU_ENTRIES = [
     roles: ["request", "validation"],
   },
   {
-    key: "recipe", label: "Recipes", group: "body", defaultEnabled: true,
+    key: "recipe", label: "Daily Recipes", group: "body", defaultEnabled: true,
     subtype: "recipe", kind: "fanout", fanByDuration: true, includeInResults: true,
     contextsFrom: ["menu"],
     roles: ["request"],
   },
   {
-    key: "nutrition", label: "Nutrition", group: "body", defaultEnabled: false,
+    key: "nutrition", label: "Nutrition", group: "body", defaultEnabled: true,
     subtype: "nutrition", kind: "fanout", fanByDuration: true, includeInResults: true,
     contextsFrom: ["recipe"],
     roles: ["request"],

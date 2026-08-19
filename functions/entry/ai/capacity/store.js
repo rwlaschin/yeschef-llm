@@ -100,14 +100,19 @@ export async function setState(region, patch) {
 // 0 (folded into onOutcome's lastSuccessTs setState). select() parks a region once the streak reaches
 // maxStockouts — recovery is via exploration, not a timer (see score.js). lastStockoutTs is stamped in
 // the SAME upsert so a first-ever stockout creates the doc with both fields.
+// Returns the POST-increment streak, read atomically from the same write. Callers must NOT re-read it
+// with a separate getState(): the MIG retries a failed create about every 10s, so concurrent stockouts
+// each read the same value and every one of them re-runs the abandon+cascade.
 export async function bumpStockoutStreak(region, whenMs) {
   await ensureIndexes();
   const state = await getCollection(STATE_COLL);
-  await state.updateOne(
+  const r = await state.findOneAndUpdate(
     { region },
     { $inc: { consecutiveStockouts: 1 }, $set: { region, lastStockoutTs: whenMs } },
-    { upsert: true },
+    { upsert: true, returnDocument: "after" },
   );
+  // Driver v5 returns the doc directly; v4 wraps it in { value }.
+  return (r?.value ?? r)?.consecutiveStockouts ?? 0;
 }
 
 // ── region_capacity_queue ────────────────────────────────────────────────────────────────────────

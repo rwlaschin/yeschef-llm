@@ -71,7 +71,7 @@ test("shouldRun: slot owned by newer attempt → skip stale delivery (terminal o
 // ---- pure decision: completionWrite ----------------------------------------
 test("completionWrite: running slot, success this attempt → writes", () => {
   const w = completionWrite({ status: "running", attempt: 0 }, { attempt: 0, status: "success", response: "X" });
-  assert.deepEqual(w, { status: "success", attempt: 0, response: "X", outcome: null });
+  assert.deepEqual(w, { status: "success", attempt: 0, response: "X", outcome: null , thinking: "" });
 });
 test("completionWrite: already success → null (lost the race)", () => {
   assert.equal(completionWrite({ status: "success", attempt: 0 }, { attempt: 0, status: "success" }), null);
@@ -84,11 +84,11 @@ test("completionWrite: stale older-attempt completion vs running newer attempt �
 });
 test("completionWrite: no slot yet (undefined) → writes (attempt 0, not terminal)", () => {
   const w = completionWrite(undefined, { attempt: 0, status: "success", response: "Z" });
-  assert.deepEqual(w, { status: "success", attempt: 0, response: "Z", outcome: null });
+  assert.deepEqual(w, { status: "success", attempt: 0, response: "Z", outcome: null , thinking: "" });
 });
 test("completionWrite: retry (higher attempt) over an older terminal slot → writes", () => {
   const w = completionWrite({ status: "fail", attempt: 0 }, { attempt: 1, status: "success", response: "Y" });
-  assert.deepEqual(w, { status: "success", attempt: 1, response: "Y", outcome: null });
+  assert.deepEqual(w, { status: "success", attempt: 1, response: "Y", outcome: null , thinking: "" });
 });
 
 // ---- concurrency: async with multiple workers ------------------------------

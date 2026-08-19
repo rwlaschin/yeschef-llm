@@ -13,6 +13,14 @@ Distributed unit dispatch for the worker fleet — leaseless, idempotent, at-lea
 - **Ack timing.** A message must never be acked before the terminal Firestore write completes — acking early converts a real crash into silent data loss (Pub/Sub won't redeliver a message that's already been acked).
 - **`attempt` is bumped only by the orchestrator, on a genuine retry** — the worker never increments it itself, whether on instance loss, redelivery, or a duplicate concurrent run. Conflating "redelivered" with "retried" would let a healthy unit that lost its instance to scale-in or maintenance look like a new attempt when it's still the same one.
 
+## Invariant: only a worker calls Ollama
+
+**A function never talks to Ollama. It composes a plan, publishes a job, and returns a job id; a worker runs the inference.** Ollama lives on the worker VMs (and, in dev, in the worker container) — the `/ai` orchestrator is a Cloud Run function with no Ollama at any address, so any `OLLAMA_HOST`/`:11434`/`/api/chat` call from `functions/` can only fail once deployed.
+
+This is not hypothetical. `POST /ai/categorize` was written as a synchronous route that streamed `${OLLAMA_HOST}/api/chat` inline. It worked on a dev machine (where a native Ollama happens to listen on `localhost:11434`) and returned **500 for every request in production**, because the deployed function had nothing to connect to. It now publishes a 3-step plan to `orchestrate` and returns `202 {jobId}`, with `GET /ai/categorize/:jobId` for polling; only the deterministic, non-inference post-processing stayed in the function.
+
+Enforced mechanically by `functions/no-direct-ollama.test.js`, which walks every deployed `.js` under `functions/` and fails on `11434`, `OLLAMA_HOST`, `/api/chat`, or `/api/generate`.
+
 ## Design Constraints
 
 - Workers run on **autoscaled GCE instances** that can be removed by scale-in, host maintenance (`onHostMaintenance=TERMINATE`), or a process/VM crash; any worker is guaranteed to die before some units finish. No design may depend on a single process owning a unit start-to-finish.

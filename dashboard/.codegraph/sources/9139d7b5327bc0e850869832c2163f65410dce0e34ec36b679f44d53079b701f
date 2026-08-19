@@ -1,0 +1,16 @@
+import { spawn } from 'node:child_process'
+
+export default defineEventHandler(async () => {
+  try {
+    const env = { ...process.env, SSLKEYLOGFILE: '' }
+    const child = spawn('gcloud', ['auth', 'login', '--brief'], {
+      detached: true,
+      stdio: 'ignore',
+      env
+    })
+    child.unref()
+    return { ok: true, message: 'Google Cloud Sign In page opened in your default browser.' }
+  } catch (err: any) {
+    return { ok: false, error: err.message || String(err) }
+  }
+})

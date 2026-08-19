@@ -1,0 +1,12 @@
+import { MongoClient } from "mongodb";
+import dotenvFlow from "dotenv-flow";
+dotenvFlow.config({ node_env: "dev" });
+const c = new MongoClient(process.env.MONGO_URI);
+await c.connect();
+const db = c.db(process.env.MONGO_DB || "yeschef");
+const steps = await db.collection("plan_library").find({}).toArray();
+for (const s of steps) console.log(JSON.stringify({name:s.name,subtype:s.subtype,kind:s.kind,mapOf:s.mapOf,order:s.order,active:s.active,context:s.context,inputs:s.inputs,model:s.model,style:s.style,includeInOutput:s.includeInOutput,requiredFlags:s.requiredFlags}));
+console.log("---PROMPTS---");
+const ps = await db.collection("prompt_library").find({}).toArray();
+for (const p of ps) console.log(p.name, "| active:", p.active, "| mapping:", JSON.stringify(p.mapping));
+await c.close();

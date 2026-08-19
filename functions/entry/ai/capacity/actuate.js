@@ -71,32 +71,74 @@ function defaultGce() {
       if (!r.ok) throw new Error(`deleteInstances MIG ${mig} → ${r.status} ${(await r.text()).slice(0, 200)}`);
       return r.json().catch(() => ({}));
     },
+    // Live per-box inventory: self-link + currentAction (CREATING/NONE/DELETING) so a box mid-boot or
+    // mid-delete is VISIBLE instead of inferred. GCE is the only source of truth for what exists — we
+    // never persist a box count, so it can never go stale.
+    async listInstances({ region, mig }) {
+      const { token, project } = await ctx();
+      const r = await fetch(`${COMPUTE}/projects/${project}/regions/${region}/instanceGroupManagers/${mig}/listManagedInstances`, { method: "POST", ...auth(token) });
+      if (!r.ok) {
+        // Carry the status so callers can tell "this model has no MIG in this region" (404) from a
+        // real failure. A 404 is expected: not every model is provisioned in every region.
+        const err = new Error(`listManagedInstances ${mig} → ${r.status} ${(await r.text()).slice(0, 200)}`);
+        err.status = r.status;
+        throw err;
+      }
+      const j = await r.json().catch(() => ({}));
+      return (j.managedInstances ?? []).map((i) => ({
+        instance: i.instance, name: String(i.instance || "").split("/").pop(),
+        action: i.currentAction, status: i.instanceStatus ?? null,
+      }));
+    },
   };
 }
 
+// Every GCE call that FAILED, as its own structured event. These used to vanish into a bare
+// console.error, which is how a permanent 412 ("Resizing of autoscaled instance group is not
+// allowed") ran unnoticed on every shrink: the caller returned {error} and the controller carried on
+// as if it had acted. `actor` names WHO tried, so a log query can separate engine decisions from
+// worker self-service.
+function logFailed(action, model, region, error, extra = {}) {
+  console.error(JSON.stringify({
+    message: `[capacity] FAILED ${action} ${model} · ${region} — ${error}`,
+    capacityEvent: "actuate_failed", actor: "engine", action, model, region, error, ...extra,
+  }));
+}
+
 // One structured actuate line the dashboard/log-metric keys off. `would:true` = off-prod, NO GCE call
-// was made; `would:false` = prod, the real call ran.
+// was made; `would:false` = prod, the real call ran. `reason` carries WHY (the live numbers the caller
+// decided on) so a log query answers "who started this box and what did it see", not just "a box
+// appeared". Callers pass reason through; it is never derived here.
 function logActuate(action, model, region, would, extra = {}) {
   console.log(JSON.stringify({
-    message: `[capacity] ${would ? "WOULD " : ""}${action} ${model} · ${region}`,
-    capacityEvent: "actuate", would, action, model, region, ...extra,
+    message: `[capacity] ${would ? "WOULD " : ""}${action} ${model} · ${region}${extra.reason ? ` — ${extra.reason}` : ""}`,
+    capacityEvent: "actuate", actor: "engine", would, action, model, region, ...extra,
+  }));
+}
+
+// A decision NOT to act is as important as an action — an unexplained absence of a box is the thing
+// that took hours to diagnose. Every early return logs one of these.
+function logSkip(action, model, region, why, extra = {}) {
+  console.log(JSON.stringify({
+    message: `[capacity] SKIP ${action} ${model ?? "?"} · ${region ?? "?"} — ${why}`,
+    capacityEvent: "actuate_skip", actor: "engine", action, model: model ?? null, region: region ?? null, why, ...extra,
   }));
 }
 
 // need capacity → START a box in `region`: read the model's regional MIG size, resize +1. avail IS the
 // MIG target size (no separate counter). Off-prod → would-log + ZERO GCE calls. Never throws.
-export async function startBox(model, region, gce = defaultGce()) {
+export async function startBox(model, region, gce = defaultGce(), reason = "") {
   try {
-    if (!region) return { skipped: "no-region" };
+    if (!region) { logSkip("resize +1", model, region, "no-region", { reason }); return { skipped: "no-region" }; }
     const mig = migOf(model);
-    if (!mig) { console.warn(`[capacity] startBox: no MIG for model ${model} — skipping`); return { skipped: "no-mig" }; }
-    if (!isProdLike()) { logActuate("resize +1", model, region, true, { mig }); return { would: true, action: "resize +1", mig, region }; }
+    if (!mig) { logSkip("resize +1", model, region, `no MIG for model ${model}`, { reason }); return { skipped: "no-mig" }; }
+    if (!isProdLike()) { logActuate("resize +1", model, region, true, { mig, reason }); return { would: true, action: "resize +1", mig, region }; }
     const size = await gce.getSize({ region, mig });
     await gce.resize({ region, mig, size: size + 1 });
-    logActuate("resize +1", model, region, false, { mig, from: size, to: size + 1 });
+    logActuate("resize +1", model, region, false, { mig, from: size, to: size + 1, reason });
     return { action: "resize +1", mig, region, from: size, to: size + 1 };
   } catch (e) {
-    console.error(`[capacity] startBox(${model},${region}) swallowed: ${e?.message}`);
+    logFailed("resize +1", model, region, e?.message, { reason });
     return { error: e?.message };
   }
 }
@@ -104,19 +146,19 @@ export async function startBox(model, region, gce = defaultGce()) {
 // 3rd consecutive stockout for (model, region) → SHRINK: resize the model's regional MIG to size−1
 // (floor 0), giving up on the region. The ONLY resize-DOWN on the stockout path (stockouts 1–2 leave
 // the MIG to retry its own boot). Off-prod → would-log + ZERO GCE calls. Never throws.
-export async function shrinkBox(model, region, gce = defaultGce()) {
+export async function shrinkBox(model, region, gce = defaultGce(), reason = "") {
   try {
-    if (!region) return { skipped: "no-region" };
+    if (!region) { logSkip("resize -1", model, region, "no-region", { reason }); return { skipped: "no-region" }; }
     const mig = migOf(model);
-    if (!mig) { console.warn(`[capacity] shrinkBox: no MIG for model ${model} — skipping`); return { skipped: "no-mig" }; }
-    if (!isProdLike()) { logActuate("resize -1", model, region, true, { mig }); return { would: true, action: "resize -1", mig, region }; }
+    if (!mig) { logSkip("resize -1", model, region, `no MIG for model ${model}`, { reason }); return { skipped: "no-mig" }; }
+    if (!isProdLike()) { logActuate("resize -1", model, region, true, { mig, reason }); return { would: true, action: "resize -1", mig, region }; }
     const size = await gce.getSize({ region, mig });
     const next = Math.max(0, size - 1);
     await gce.resize({ region, mig, size: next });
-    logActuate("resize -1", model, region, false, { mig, from: size, to: next });
+    logActuate("resize -1", model, region, false, { mig, from: size, to: next, reason });
     return { action: "resize -1", mig, region, from: size, to: next };
   } catch (e) {
-    console.error(`[capacity] shrinkBox(${model},${region}) swallowed: ${e?.message}`);
+    logFailed("resize -1", model, region, e?.message, { reason });
     return { error: e?.message };
   }
 }
@@ -126,25 +168,35 @@ export async function shrinkBox(model, region, gce = defaultGce()) {
 // when the instance is unknown (off-GCE worker / old worker build with no instance on the event) —
 // RISK: GCE picks the victim, so a still-busy box can be evicted; it is logged as untargeted so the
 // gap is visible. Off-prod → would-log + ZERO GCE calls. Never throws.
-export async function releaseBox(model, region, instance, gce = defaultGce()) {
+export async function releaseBox(model, region, instance, gce = defaultGce(), reason = "") {
   try {
-    if (!region) return { skipped: "no-region" };
+    if (!region) { logSkip("delete-instance", model, region, "no-region", { reason }); return { skipped: "no-region" }; }
     const mig = migOf(model);
-    if (!mig) { console.warn(`[capacity] releaseBox: no MIG for model ${model} — skipping`); return { skipped: "no-mig" }; }
+    if (!mig) { logSkip("delete-instance", model, region, `no MIG for model ${model}`, { reason }); return { skipped: "no-mig" }; }
     const action = instance ? "delete-instance" : "resize -1 (untargeted release — may evict a busy box)";
-    if (!isProdLike()) { logActuate(action, model, region, true, { mig, instance: instance ?? null }); return { would: true, action: instance ? "delete-instance" : "resize -1", mig, region, instance: instance ?? null }; }
+    if (!isProdLike()) { logActuate(action, model, region, true, { mig, instance: instance ?? null, reason }); return { would: true, action: instance ? "delete-instance" : "resize -1", mig, region, instance: instance ?? null }; }
     if (instance) {
       await gce.deleteInstances({ region, mig, instances: [instance] });
-      logActuate(action, model, region, false, { mig, instance });
+      logActuate(action, model, region, false, { mig, instance, reason });
       return { action: "delete-instance", mig, region, instance };
     }
     const size = await gce.getSize({ region, mig });
     const next = Math.max(0, size - 1);
     await gce.resize({ region, mig, size: next });
-    logActuate(action, model, region, false, { mig, from: size, to: next });
+    logActuate(action, model, region, false, { mig, from: size, to: next, reason });
     return { action: "resize -1", mig, region, from: size, to: next, untargeted: true };
   } catch (e) {
-    console.error(`[capacity] releaseBox(${model},${region}) swallowed: ${e?.message}`);
+    logFailed(instance ? "delete-instance" : "resize -1", model, region, e?.message, { reason, instance: instance ?? null });
     return { error: e?.message };
   }
+}
+
+// Live box inventory for a (model, region), straight from GCE. Never persisted — the engine reads it
+// at decision time so it cannot act on a stale count. `busyUnknown` is deliberate: GCE knows a box
+// EXISTS, never whether it is working; that answer comes from Pub/Sub (see reconcile.js).
+export async function liveBoxes(model, region, gce = defaultGce()) {
+  const mig = migOf(model);
+  if (!mig) return { boxes: [], mig: null };
+  const boxes = await gce.listInstances({ region, mig });
+  return { mig, boxes, live: boxes.filter((b) => b.action !== "DELETING").length };
 }

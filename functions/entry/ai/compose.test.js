@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { composeFromDefs, renderUnit } from "./compose.js";
+import { MARKER_PATTERN } from "../../config/promptSections.js";
 
 const form = (extra = {}) => ({ model: "m", values: {}, duration: {}, residents: 1, flags: {}, costTier: "", ...extra });
 
@@ -159,4 +160,59 @@ test("includeInOutput drives includeInResults; a compliance step reverts to the 
   assert.equal(plan[2].includeInResults, true);            // aggregation order form → shown
   assert.equal(plan[1].failStep, 0);                       // compliance reverts to its context (menu)
   assert.equal(plan[2].kind, "aggregation");               // non-fanout kind passes through untouched
+});
+
+// --- keys / without: generic ctx shaping, no domain knowledge in code ---
+// The prompt names what to exclude, so changing it is a prompt edit, not a deploy.
+
+// renderUnit wraps the instruction in the section markers and appends "\n\nPass: …\nFail: …".
+// These tests are about the HELPERS ({{keys}}/{{without}}/{{join}}), so strip both wrappers and
+// compare the rendered instruction body alone. Markers stripped by the shared pattern rather than a
+// literal list, so a section added to config/promptSections.js does not silently break six tests
+// that have nothing to do with placement.
+const rendered = (instruction, extra = {}) =>
+  renderUnit(composeFromDefs([{ name: "S", subtype: "s", order: "a", active: true, instruction }],
+    form(extra), { isProd: false })[0], 0)
+    .split("\n\nPass:")[0]
+    .replace(new RegExp(MARKER_PATTERN, "g"), "")
+    .trim();
+
+test("keys + without + join: names only, excluded value named by the prompt", () => {
+  assert.equal(
+    rendered('{{join (without (keys courseCounts) "entree") ", "}}',
+      { courseCounts: { appetizer: 3, entree: 2, side: 3 } }),
+    "appetizer, side"
+  );
+});
+
+test("without: the excluded name is data — a different one excludes differently", () => {
+  assert.equal(
+    rendered('{{join (without (keys courseCounts) "side") ", "}}',
+      { courseCounts: { appetizer: 3, entree: 2, side: 3 } }),
+    "appetizer, entree"
+  );
+});
+
+test("without: several values at once", () => {
+  assert.equal(
+    rendered('{{join (without (keys courseCounts) "entree" "side") ", "}}',
+      { courseCounts: { appetizer: 3, entree: 2, side: 3 } }),
+    "appetizer"
+  );
+});
+
+test("keys: absent or non-object renders empty, never crashes the prompt", () => {
+  assert.equal(rendered('[{{join (keys courseCounts) ", "}}]'), "[]");
+  assert.equal(rendered('[{{join (keys residents) ", "}}]'), "[]");
+});
+
+test("entree-only counts render an empty position list", () => {
+  assert.equal(
+    rendered('[{{join (without (keys courseCounts) "entree") ", "}}]', { courseCounts: { entree: 2 } }),
+    "[]"
+  );
+});
+
+test("without: non-array input renders empty rather than throwing", () => {
+  assert.equal(rendered('[{{join (without residents "x") ", "}}]'), "[]");
 });

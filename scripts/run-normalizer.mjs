@@ -12,7 +12,7 @@ dotenvFlow.config({ node_env: "dev" });
 const uri = process.env.MONGO_URI;
 const dbName = process.env.MONGO_DB || "yeschef";
 const OLLAMA_HOST = process.env.CATEGORIZE_OLLAMA_HOST || "http://localhost:11434";
-const OLLAMA_MODEL = process.env.CATEGORIZE_OLLAMA_MODEL || "llama3.2:3b";
+const OLLAMA_MODEL = process.env.CATEGORIZE_OLLAMA_MODEL || "llama3.1:8b";
 if (!uri) { console.error("MONGO_URI not set (.env.dev)"); process.exit(1); }
 
 // product -> what a correct normalizer should return (for eyeballing the first blush)

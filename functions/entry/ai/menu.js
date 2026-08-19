@@ -16,6 +16,20 @@ import { resolveProteinSeed } from "../../lib/neo4j.js";
 import { stringify as yamlStringify } from "yaml";
 import tzdb from "@vvo/tzdb";
 
+// What a meal offers when nobody configured it — the regulatory minimum service. Mirrors
+// DEFAULT_COURSE_COUNTS in yeschef/src/lib/planOptions.ts; the two must move together, and
+// menu.test.js reads that file and fails if they drift.
+export const DEFAULT_COURSE_COUNTS = { appetizer: 3, entree: 2, side: 3 };
+
+// subtype → the label the dashboard already shows for that step, so a one-step job names itself with
+// the same words as its toggle rather than inventing a second vocabulary.
+const STEP_LABELS = Object.fromEntries(MENU_ENTRIES.map((e) => [e.subtype, e.label]));
+
+// Build trace — verbose, fires on every request, so it goes out at debug and logd drops it under the
+// default floor. logd splits an ingested body on "\n" and reads the level token at the START of each
+// physical line, so a multi-line payload has to carry the token on EVERY line, not just the first.
+const dbg = (s) => console.log(String(s).split("\n").map((l) => `DBG ${l}`).join("\n"));
+
 // Count of enabled diets from the comma-joined diets value — the summary shows a count, not the
 // raw list (users don't need the fan-out spelled out, and the list is long and unnormalized).
 function dietCount(diets) {
@@ -97,14 +111,14 @@ async function composeMenuPlan(form = {}) {
   const col = await getCollection("plan_library");
   const fromDb = (await col.find({ active: true }).toArray())
     .sort((a, b) => { const x = String(a.order ?? ""), y = String(b.order ?? ""); return x < y ? -1 : x > y ? 1 : 0; });
-  console.log(`[ai/menu DRY-RUN] ── FROM DB (plan_library, active=${fromDb.length}, lex order; ORIGINAL templates) ──`);
+  dbg(`[ai/menu] ── FROM DB (plan_library, active=${fromDb.length}, lex order; ORIGINAL templates) ──`);
   fromDb.forEach((d, i) => {
-    console.log(
+    dbg(
       `  ${i}. ${d.name}  order=${JSON.stringify(d.order)} subtype=${d.subtype ?? "(none)"} kind=${d.kind ?? "?"}` +
       ` inputs=[${(d.inputs || []).join(",")}] requiredFlags=[${(d.requiredFlags || []).join(",")}] mapOf=${JSON.stringify(d.mapOf ?? "")}`
     );
-    console.log(`     instruction: ${JSON.stringify(d.instruction ?? "")}`);
-    console.log(`     pass: ${JSON.stringify(d.pass ?? "")}  fail: ${JSON.stringify(d.fail ?? "")}`);
+    dbg(`     instruction: ${JSON.stringify(d.instruction ?? "")}`);
+    dbg(`     pass: ${JSON.stringify(d.pass ?? "")}  fail: ${JSON.stringify(d.fail ?? "")}`);
   });
 
   // ── FILTER: a step is dropped when its toggle is off, a required flag is unset, or any data input
@@ -118,28 +132,38 @@ async function composeMenuPlan(form = {}) {
   // Only the CHIP inputs can be empty/off, so only THEY gate a step. Always-present scalars a step may
   // also list (residents, days, costTier, date, …) live outside `values` and never gate (they're just
   // referenced in the template) — without this, selecting `residents` as an input would drop the step.
+  //
+  // An OPTIONAL input never gates either. `preferences` ships `defaultEnabled: false`, and Protein
+  // Grid / Recipes / Courses all list it — so gating on it dropped all three in the DEFAULT form
+  // state, making a recipes build impossible until someone happened to switch Preferences on. An
+  // optional field being off is the normal case, not a reason to delete the step that mentions it.
+  const OPTIONAL_INPUTS = new Set(
+    MENU_ENTRIES.filter((e) => e.group === "input" && e.defaultEnabled === false).map((e) => e.key)
+  );
   const dropReason = (def) => {
     const toggleKey = toggleKeyForSubtype[def.subtype];
     if (toggleKey && enabled[toggleKey] === false) return `'${toggleKey}' toggled off`;
     const missingFlag = (def.requiredFlags || []).find((f) => !flags[f]);
     if (missingFlag) return `required flag '${missingFlag}' not set`;
-    const disabledInput = (def.inputs || []).find((inp) => enabled[inp] === false);
+    const disabledInput = (def.inputs || []).find((inp) => enabled[inp] === false && !OPTIONAL_INPUTS.has(inp));
     if (disabledInput) return `input '${disabledInput}' disabled`;
     return null;
   };
-  console.log(`[ai/menu DRY-RUN] ── FILTER (DB order; disabling a data field drops its steps) ──`);
+  dbg(`[ai/menu] ── FILTER (DB order; disabling a data field drops its steps) ──`);
   const defs = [];
+  const dropped = [];
   for (const def of fromDb) {
     const reason = dropReason(def);
-    console.log(`  ${reason ? "✗ drop" : "✓ keep"}  ${def.name}${reason ? ` — ${reason}` : ""}`);
-    if (!reason) defs.push(def);
+    dbg(`  ${reason ? "✗ drop" : "✓ keep"}  ${def.name}${reason ? ` — ${reason}` : ""}`);
+    if (reason) dropped.push({ name: def.name, reason });
+    else defs.push(def);
   }
 
   // Cascade: drop a step whose Earlier Steps (context) were ALL skipped — e.g. a join/output task
   // that depends on compliance steps that didn't survive. Repeats to a fixpoint.
   const { defs: kept, removed } = pruneOrphans(defs);
   for (const r of removed) {
-    console.log(`  ✗ drop  ${r.name} — needs earlier step(s) [${r.context.join(", ")}], none kept`);
+    dbg(`  ✗ drop  ${r.name} — needs earlier step(s) [${r.context.join(", ")}], none kept`);
   }
 
   // Production runs each step's `modelProd` override (StepForm "Override"); dev/dry-runs use `model`.
@@ -147,7 +171,7 @@ async function composeMenuPlan(form = {}) {
 }
 
 export async function post(req, reply) {
-  const { userId, companyId, values, duration, residents, flags, costTier, location, enabled, dietWeights, proteins, jobId: reuseJobId, fake, planId, stepId, siteId } = req.body || {};
+  const { userId, companyId, values, duration, residents, flags, costTier, location, enabled, dietWeights, proteins, proteinWeights, addedProteins, courseCounts, jobId: reuseJobId, fake, planId, stepId, siteId } = req.body || {};
   const isFake = fake === true;   // dev/test: dispatch steps to the canned topic, not the model
 
   // Location is OPTIONAL and IS an IANA timezone — the single source of truth. When set, derive region
@@ -162,16 +186,12 @@ export async function post(req, reply) {
   const time = tz ? new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(now) : ""; // HH:MM
 
   // ── What is PASSED IN (these inputs are DATA fields + config — not steps/subtypes). ──
-  console.log(`[ai/menu DRY-RUN] ── PASSED IN ──`);
-  console.log(JSON.stringify({ userId, companyId, residents, duration, costTier, tz, region, hemisphere, date, time, values, flags, dietWeights }, null, 2));
-
-  if (!userId || !companyId) {
-    return reply.code(400).send({ error: "Missing required fields: userId, companyId" });
-  }
+  dbg(`[ai/menu] ── PASSED IN ──`);
+  dbg(JSON.stringify({ userId, companyId, residents, duration, costTier, tz, region, hemisphere, date, time, values, flags, dietWeights }, null, 2));
 
   // ── What is DISABLED (form toggles set to false → their steps get dropped in FILTER below). ──
   const disabled = Object.keys(enabled || {}).filter((k) => (enabled || {})[k] === false);
-  console.log(`[ai/menu DRY-RUN] ── DISABLED ──\n  ${disabled.length ? disabled.join(", ") : "(none)"}`);
+  dbg(`[ai/menu] ── DISABLED ──\n  ${disabled.length ? disabled.join(", ") : "(none)"}`);
 
   // Resolve the recipes step's protein seed FROM the committed grid (Neo4j Menu{planId}) at
   // build time — the source of truth the chef approved — instead of trusting the client to send it
@@ -197,32 +217,51 @@ export async function post(req, reply) {
     costTier: costTier || "",
     dietWeights: dietWeights || {}, // { <diet>: relative weight } for the {{allocate}} portion split
     proteins: resolvedProteins, // per-slot grid proteins (normDiet → day → mealtime → {type,cut}) — resolved server-side from the committed grid so recipes mirror it
+    // The chef's arranged list ([{ protein, cut, diets, weight }]) from the setup page. A different
+    // shape from `proteins` above and deliberately not merged into it, since a helper that guesses
+    // wrong on which it got renders nothing and the model silently invents its own list.
+    proteinWeights: Array.isArray(proteinWeights) ? proteinWeights : [],
+    addedProteins: Array.isArray(addedProteins) ? addedProteins : [], // chef-typed proteins the categorization step must also classify
+    // Course position → dishes per meal. Absent/empty falls back to the minimum service so a build
+    // from a caller that never sent it still produces a service rather than a lone entrée.
+    courseCounts: courseCounts && Object.keys(courseCounts).length ? courseCounts : DEFAULT_COURSE_COUNTS,
     tz, region, hemisphere, date, time,
   });
 
   // ── What is BUILT: plan in DB order; each step's NUMBER is its position, calculated here. ──
   const errCount = plan.filter((s) => s.error).length;
-  console.log(`[ai/menu DRY-RUN] ── BUILT PLAN (${plan.length} step(s); numbers = position${errCount ? `; ${errCount} with errors` : ""}) ──`);
-  plan.forEach((s, i) => console.log(
+  dbg(`[ai/menu] ── BUILT PLAN (${plan.length} step(s); numbers = position${errCount ? `; ${errCount} with errors` : ""}) ──`);
+  plan.forEach((s, i) => dbg(
     `  #${i} ${s.subtype ?? "(none)"}/${s.kind} model=${s.model} units=${Array.isArray(s.items) ? s.items.length : 1}` +
     ` contexts=[${(s.contexts || []).join(",")}] success=${s.successStep} fail=${s.failStep} inResults=${s.includeInResults}` +
     (s.error ? `\n     ⚠ TEMPLATE ERROR: ${s.error}` : "")
   ));
-  // Drop the bulky per-step renderCtx from the dry-run view (it's internal plumbing for renderUnit).
+  // Drop the bulky per-step renderCtx from the trace (it's internal plumbing for renderUnit).
   const shown = plan.map(({ renderCtx, ...rest }) => rest);
-  console.log(JSON.stringify(shown, null, 2));
+  dbg(JSON.stringify(shown, null, 2));
 
   if (!plan.length) {
-    return reply.code(400).send({ error: "No entries enabled — nothing to build" });
+    // Name what was dropped and why. "No entries enabled" sent people hunting through toggles that
+    // WERE on — the steps had been filtered out for a reason the caller never got to see.
+    const why = dropped.length
+      ? dropped.map((d) => `${d.name} (${d.reason})`).join("; ")
+      : "no active steps in plan_library";
+    return reply.code(400).send({ error: `Nothing to build — every step was filtered out: ${why}` });
   }
   const db = getFirestore();
   const jobId = reuseJobId || randomUUID();          // reuse → rerun THIS job in place; else a new job
   const jobRef = db.collection("llmResults").doc(jobId);
-  const summary =
-    `Menu plan · ${duration?.weeks ?? "?"}w${duration?.businessDaysOnly ? " (business days)" : ""}` +
-    ` · ${residents ?? 300} residents` +
-    (values?.institution ? ` · ${values.institution}` : "") +
-    (values?.diets ? ` · ${dietCount(values.diets)} diets` : "");
+  // A one-step job is a form-time lookup, not a plan — the setup page runs `protein_dietary_categorization`
+  // on its own to fill its protein list. Naming it "Menu plan" put it in the history looking exactly
+  // like a generated plan, so the label states the step it actually ran.
+  const single = plan.length === 1 ? plan[0] : null;
+  const summary = single
+    ? `${STEP_LABELS[single.subtype] ?? single.subtype}` +
+      (values?.diets ? ` · ${dietCount(values.diets)} diets` : "")
+    : `Menu plan · ${duration?.weeks ?? "?"}w${duration?.businessDaysOnly ? " (business days)" : ""}` +
+      ` · ${residents ?? 300} residents` +
+      (values?.institution ? ` · ${values.institution}` : "") +
+      (values?.diets ? ` · ${dietCount(values.diets)} diets` : "");
   // No run-level model: each step carries its own (def.model). Record the first step's for the summary.
   const jobModel = plan[0]?.model || "";
 

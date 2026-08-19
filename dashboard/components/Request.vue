@@ -626,7 +626,10 @@ const submitRequest = async () => {
     // The orchestrator REPLACES the old /api/llm/request: POST the request to /ai/plan,
     // which launches the planner and returns the jobId. Hard timeout so a stalled
     // publish/write can never hang the UI.
-    console.log(`[ui/request] → POST ${planUrl}`, { companyId: selectedCompanyId.value, userId: selectedUserId.value, model: selectedModel.value, promptLen: promptText.length })
+    // Minted HERE, before the POST: the jobId comes back only in the response, so it can't join a
+    // request to the orchestrator log line that recorded receiving it. This can.
+    const clientRequestId = crypto.randomUUID()
+    console.log(`[ui/request] → POST ${planUrl}`, { clientRequestId, companyId: selectedCompanyId.value, userId: selectedUserId.value, model: selectedModel.value, promptLen: promptText.length })
     const { jobId } = await $fetch(planUrl, {
       method: 'POST',
       timeout: 15000,
@@ -636,10 +639,10 @@ const submitRequest = async () => {
         companyId: selectedCompanyId.value,
         userPrompt: promptText,
         model: selectedModel.value,
-        metadata: {},
+        metadata: { clientRequestId },
       },
     })
-    console.log(`[ui/request] ✓ jobId=${jobId} (watch Firestore llmResults/${jobId})`)
+    console.log(`[ui/request] ✓ clientRequestId=${clientRequestId} jobId=${jobId} (watch Firestore llmResults/${jobId})`)
     success('Request submitted', `Job ID: ${jobId.slice(0, 8)}`)
 
     // Optimistic: persist to localStorage + show now; the Firestore snapshot

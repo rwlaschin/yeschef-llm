@@ -74,10 +74,69 @@ export async function setup(projectId, models = MODELS) {
     console.log(`  created: ${cfg.subscription} (ack ${cfg.ackDeadlineSeconds}s, dead-letter → ${cfg.deadLetter})`);
   }
 
+  // Dead-lettering is carried out by Pub/Sub's OWN service agent, and it needs two grants or it silently
+  // does nothing: publisher on the dead-letter topic, and subscriber on the source subscription. Neither
+  // was granted in this project — so a message that exhausted maxDeliveryAttempts was never forwarded,
+  // it just kept retrying, holding a lease and waking a box each time. dead_letter_message_count stayed
+  // flat because the forward never even attempted.
+  let agentMember;
+  async function pubsubServiceAgent() {
+    if (agentMember) return agentMember;
+    const authClient = await client.auth.getClient();
+    const token = await authClient.getAccessToken();
+    const res = await fetch(`https://cloudresourcemanager.googleapis.com/v1/projects/${projectId}`, {
+      headers: { Authorization: `Bearer ${token.token ?? token}` },
+    });
+    if (!res.ok) throw new Error(`resolve project number → ${res.status}`);
+    agentMember = `serviceAccount:service-${(await res.json()).projectNumber}@gcp-sa-pubsub.iam.gserviceaccount.com`;
+    return agentMember;
+  }
+
+  // Idempotent add-if-missing. The emulator has no IAM at all, so this is a no-op there.
+  async function grantToAgent(resource, role, label) {
+    if (process.env.PUBSUB_EMULATOR_HOST) return;
+    const member = await pubsubServiceAgent();
+    const [policy] = await resource.iam.getPolicy();
+    policy.bindings ||= [];
+    const binding = policy.bindings.find((b) => b.role === role);
+    if (binding?.members?.includes(member)) return;
+    if (binding) binding.members.push(member);
+    else policy.bindings.push({ role, members: [member] });
+    await resource.iam.setPolicy(policy);
+    console.log(`  granted: ${role} on ${label} → pubsub service agent (dead-lettering requires it)`);
+  }
+
+  // A dead-letter TOPIC with no subscription is a black hole: "messages published to a topic with no
+  // subscriptions are lost" (Google's own dead-letter guidance). All 8 dead-letter topics had zero
+  // subscribers, so every message that exhausted its delivery attempts was DISCARDED — indistinguishable
+  // from a job that silently never finished. This parks them instead, on a long retention, for offline
+  // analysis. Nothing consumes it automatically: a message here means the transport gave up, which is a
+  // human question, not something to auto-retry into the same failure.
+  async function ensureDeadLetterSink(name) {
+    const sink = `sub_${name}`;
+    if (await subscriptionExists(sink)) {
+      console.log(`  already exists: ${sink}`);
+      return;
+    }
+    await client.topic(name).createSubscription(sink, {
+      ackDeadlineSeconds: 60,
+      // 7 days: long enough to notice and investigate on a Monday. The main subs keep 4h.
+      messageRetentionDuration: { seconds: 7 * 24 * 3600 },
+    });
+    console.log(`  created: ${sink} — parks dead-lettered messages (was: silently discarded)`);
+  }
+
+  // Both halves of the dead-letter permission, applied every run so a new model tier is never missed.
+  async function ensureDeadLetterPermissions(deadLetter, subscription) {
+    await grantToAgent(client.topic(deadLetter), "roles/pubsub.publisher", deadLetter);
+    await grantToAgent(client.subscription(subscription), "roles/pubsub.subscriber", subscription);
+  }
+
   console.log(`\nPub/Sub setup [${projectId}] — ${models.length} model(s)\n`);
   for (const m of models) {
     console.log(`[${m.label}]`);
     await ensureTopic(deadLetterOf(m));
+    await ensureDeadLetterSink(deadLetterOf(m));
     await ensureTopic(m.topic);
     await ensureSubscription({
       ...DEFAULT_SUB_CONFIG,
@@ -85,11 +144,13 @@ export async function setup(projectId, models = MODELS) {
       subscription: subscriptionOf(m),
       deadLetter: deadLetterOf(m),
     });
+    await ensureDeadLetterPermissions(deadLetterOf(m), subscriptionOf(m));
     console.log();
   }
   // Fake/canned transport — one shared topic + subscription for dev/test canned responses.
   console.log(`[Fake canned]`);
   await ensureTopic(FAKE_DEAD_LETTER);
+  await ensureDeadLetterSink(FAKE_DEAD_LETTER);
   await ensureTopic(FAKE_TOPIC);
   await ensureSubscription({
     ...DEFAULT_SUB_CONFIG,
@@ -97,6 +158,7 @@ export async function setup(projectId, models = MODELS) {
     subscription: FAKE_SUBSCRIPTION,
     deadLetter: FAKE_DEAD_LETTER,
   });
+  await ensureDeadLetterPermissions(FAKE_DEAD_LETTER, FAKE_SUBSCRIPTION);
   console.log();
   console.log("Pub/Sub ready.\n");
 }

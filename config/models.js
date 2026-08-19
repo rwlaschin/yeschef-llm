@@ -34,7 +34,11 @@ export const MODELS = [
   // that fits a 16–20GB budget: the dense family jumps 8B → 70B with nothing in between, and
   // the smallest 70B quant (q2_K) is 26GB — over 20GB. Strong reasoning, fits any dev box; gpu:1.
   // diskGb = baker VM boot disk. DLVM base image is 50 GB minimum; add model layers on top.
-  { label: "Llama 3.1 8B",  model: "llama3.1:8b",                  topic: "llama3_1_8b_v1",  ctx: 131072, gpu: 1, dev: true,  diskGb: 60  },
+  // parallel: 3 — measured on a 1× L4 at the production context (9366): 2.14× the throughput of one
+  // at a time, 8.6 GB VRAM, nothing queued. `ctx` stays the model's real 128K ceiling; the MACHINE's
+  // ceiling is maxCtxFor() below, which caps what a request may ask for at the live slot count.
+  // kvBytesPerToken/weightsGb are measured, not estimated — see KV_BYTES_PER_TOKEN.
+  { label: "Llama 3.1 8B",  model: "llama3.1:8b",                  topic: "llama3_1_8b_v1",  ctx: 131072, gpu: 1, dev: true,  diskGb: 60, parallel: 3, kvBytesPerToken: 131072, weightsGb: 4.9 },
   { label: "Llama 3.3 70B", model: "llama3.3:70b-instruct-q4_K_M", topic: "llama3_3_70b_v1", ctx: 131072, gpu: 2, dev: false, diskGb: 200}, // 2× L4 — no dev GPU; q4_K_M ≈ 44 GB
   // Gemma 4 12B — Google's encoder-free multimodal model built for agentic workflows.
   // Use the QAT (quantization-aware trained) tag `gemma4:12b-it-qat`: it cuts the memory
@@ -64,6 +68,45 @@ export const MODELS = [
   { label: "OpenClaw (Llama 3.1 8B)",  model: "llama3.1:8b",                  topic: "openclaw_llama3_1_8b_v1",  ctx: 131072, gpu: 1, dev: true,  diskGb: 60,  gateway: "openclaw", tools: ["web_search", "web_fetch"] },
   { label: "OpenClaw (Llama 3.3 70B)", model: "llama3.3:70b-instruct-q4_K_M", topic: "openclaw_llama3_3_70b_v1", ctx: 131072, gpu: 2, dev: false, diskGb: 200, gateway: "openclaw", tools: ["web_search", "web_fetch"] },
 ];
+
+// How many generations one box runs at once — a property of the MODEL's machine fit, so it belongs here
+// with ctx/gpu rather than buried in the deploy script where nothing could import it. It sizes three
+// things that MUST agree: Ollama's OLLAMA_NUM_PARALLEL, the worker's Pub/Sub lease (worker/lease.js),
+// and the autoscaler's messages-per-box. They were separate numbers once, and a gate of 1 against a
+// lease of 2 stranded a message on every box.
+//
+// ONE, deliberately. Ollama splits num_ctx across parallel slots, so 2 slots halve every request's
+// context — and the 8B at ctx 131072 already needs ~21.8 GB of a 24 GB L4 for a single slot. Raising it
+// for a model is a capacity decision that must come with a matching `ctx`, never a default.
+export const DEFAULT_PARALLEL = 1;
+export const parallelOf = (m) => Math.max(1, parseInt(m?.parallel, 10) || DEFAULT_PARALLEL);
+
+// ── VRAM CAP: never ask for more context than the card can hold ───────────────────────────────
+// Ollama allocates num_ctx PER SLOT — server/sched.go effectiveLlamaServerContext multiplies the
+// window by numParallel — so the KV bill is ctx × slots, and a request sized only against the
+// model's capability can exceed the GPU. `ctx` is the model's ceiling; THIS is the machine's.
+//
+// KV per token = layers × kv-heads × head-dim × 2 (K and V) × 2 bytes (fp16). llama3.1-8B is GQA
+// 32 × 8 × 128 → 131072 B = 128 KiB/token, checked against the box (4 slots × 4096 tokens = 2.0 GB;
+// nvidia-smi read 7.00 GB total against 4.9 GB of weights). It is also the DEFAULT for a model that
+// hasn't been measured: guessing high clamps harder, which is the safe direction to be wrong in.
+export const KV_BYTES_PER_TOKEN = 131072;
+export const DEFAULT_WEIGHTS_GB = 5;
+
+// 300% headroom: for every byte of KV the cap allows, leave three spare. So the cap may claim a
+// QUARTER of the free VRAM, not all of it. Spending the whole budget is what put a load at 22.0 GB
+// of 22 and left nothing for the compute buffers.
+export const CTX_HEADROOM = 3;
+
+// Largest num_ctx that still fits `slots` copies of the KV cache alongside the weights, with
+// CTX_HEADROOM spare for every byte used. Never below 512 — a floor of zero would make every
+// request terminal, which is worse than a tight window.
+export const maxCtxFor = (m, slots, vramGb, headroom = CTX_HEADROOM) => {
+  const kv = m?.kvBytesPerToken || KV_BYTES_PER_TOKEN;
+  const weights = m?.weightsGb ?? DEFAULT_WEIGHTS_GB;
+  const budget = ((vramGb - weights) * 1e9) / (1 + headroom);
+  return Math.max(512, Math.floor(budget / (Math.max(1, slots) * kv)));
+};
 
 export const subscriptionOf = (m) => `sub_${m.topic}`;
 export const deadLetterOf   = (m) => `dead_letter_${m.topic}`;
@@ -98,9 +141,11 @@ export const byTopic        = (topic) => MODELS.find((m) => m.topic === topic);
 // the planner's subtypes list from this), the dashboard, pubsub/scripts all read from here.
 export const SUBTYPES = [
   { name: "menu_plan",   description: "Build a meal plan across the required diets, days, and meals." },
+  { name: "protein_dietary_categorization", description: "Map each supplied protein to the diets it is an appropriate routine choice for, and add a protein when a diet would otherwise have none. One unit for the whole list, so the judgement is consistent across proteins. Produces the protein-to-diet table later steps build on." },
   { name: "protein_grid", description: "Assign ONE protein (type + cut) per day and mealtime for a single diet, gated by cost tier and regional availability — the protein backbone the menu is built on. Fans out one unit per diet." },
   { name: "recipes", description: "Write a reduced recipe (protein, starch, vegetable, fruit) for each day and mealtime of a single diet — the dish layer built on the protein backbone. Fans out one unit per diet." },
   { name: "nutrients", description: "Produce per-meal nutrient totals (calories, protein g, sodium mg, carbs g) for each day and mealtime of a single diet. Fans out one unit per diet." },
+  { name: "recipe_detail", description: "Write the DETAIL of ONE already-named dish — measured components, seasonings, yield, portion size, and ordered method steps with their times and critical temperatures. Chained after `recipes`/`courses`, which name the dish but do not measure or method it. One unit per dish, so a small model holds one focused job." },
   { name: "recipe",      description: "Write a full recipe — ingredients and method — for a dish." },
   { name: "nutrition",   description: "Produce nutrition information for an item, recipe, or meal." },
   { name: "inventory",   description: "Determine storage, quantities, and inventory needs." },

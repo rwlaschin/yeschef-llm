@@ -6,7 +6,7 @@
 import { DEFAULT_TOOLS } from "../config/models.js";
 
 const HOST = process.env.OLLAMA_HOST || "http://localhost:11434";
-const MODEL = process.argv[2] || process.env.OLLAMA_MODEL || "llama3.2:3b";
+const MODEL = process.argv[2] || process.env.OLLAMA_MODEL || "llama3.1:8b";
 
 // Built EXACTLY like worker/index.js (TOOLS).
 const TOOLS = DEFAULT_TOOLS.map((t) => ({

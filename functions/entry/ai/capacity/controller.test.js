@@ -7,8 +7,8 @@ import { decide, onStockout, onEnqueue, onOutcome, handleOutcomeEvent, onMessage
 // call so the tests can assert what the controller wrote AND which boxes it actuated. The actuators are
 // injected as fakes here: their OWN prod-gating is proved in actuate.test.js; these tests only assert
 // the controller CALLS them (recording + deciding run everywhere, dev included).
-function fakeDeps({ regions = ["us-central1", "us-west1"], rows = {}, states = [], throwOn = null } = {}) {
-  const calls = { setState: [], incOk: [], incFail: [], bumpStockoutStreak: [], windowRows: [], recordMessageDetected: [], startBox: [], shrinkBox: [], releaseBox: [] };
+function fakeDeps({ regions = ["us-central1", "us-west1"], rows = {}, states = [], throwOn = null, needsBox = { start: true, why: "test: box needed", seen: {} } } = {}) {
+  const calls = { setState: [], incOk: [], incFail: [], bumpStockoutStreak: [], windowRows: [], recordMessageDetected: [], startBox: [], shrinkBox: [], releaseBox: [], needsBox: [] };
   const state = new Map(states.map((s) => [s.region, { ...s }]));
   const deps = {
     async discoverL4Regions() { if (throwOn === "discover") throw new Error("boom"); return regions; },
@@ -27,12 +27,16 @@ function fakeDeps({ regions = ["us-central1", "us-west1"], rows = {}, states = [
     async bumpStockoutStreak(region, whenMs) {
       calls.bumpStockoutStreak.push({ region, whenMs });
       const cur = state.get(region) || { region };
-      state.set(region, { ...cur, consecutiveStockouts: (cur.consecutiveStockouts || 0) + 1, lastStockoutTs: whenMs });
+      const next = (cur.consecutiveStockouts || 0) + 1;
+      state.set(region, { ...cur, consecutiveStockouts: next, lastStockoutTs: whenMs });
+      return next;   // the real store returns the post-increment streak (atomic findOneAndUpdate)
     },
     async recordMessageDetected(topic, ts) { calls.recordMessageDetected.push({ topic, ts }); },
-    async startBox(model, region) { calls.startBox.push({ model, region }); },
-    async shrinkBox(model, region) { calls.shrinkBox.push({ model, region }); },
-    async releaseBox(model, region, instance) { calls.releaseBox.push({ model, region, instance }); },
+    async startBox(model, region, _gce, reason) { calls.startBox.push({ model, region, reason }); },
+    async shrinkBox(model, region, _gce, reason) { calls.shrinkBox.push({ model, region, reason }); },
+    async releaseBox(model, region, instance, _gce, reason) { calls.releaseBox.push({ model, region, instance, reason }); },
+    // The live boxes-vs-backlog gate (real one reads GCE + Pub/Sub — see reconcile.js).
+    async needsBox(topic, region) { calls.needsBox.push({ topic, region }); return needsBox; },
   };
   return { deps, calls, state };
 }
@@ -104,8 +108,15 @@ test("onStockout at the 3rd in a row → shrinkBox(model, region) + cascade star
   assert.deepEqual(out.wouldPark, ["us-central1"]);
 
   // Abandon central1 (resize −1), then boot a box in the cascaded-to region.
-  assert.deepEqual(calls.shrinkBox, [{ model: "llama3_1_8b_v1", region: "us-central1" }]);
-  assert.deepEqual(calls.startBox, [{ model: "llama3_1_8b_v1", region: "us-west1" }]);
+  assert.deepEqual(
+    calls.shrinkBox.map(({ model, region }) => ({ model, region })),
+    [{ model: "llama3_1_8b_v1", region: "us-central1" }],
+  );
+  assert.match(calls.shrinkBox[0].reason, /stockout streak 3/, "the shrink records WHY it abandoned the region");
+  assert.deepEqual(
+    calls.startBox.map(({ model, region }) => ({ model, region })),
+    [{ model: "llama3_1_8b_v1", region: "us-west1" }],
+  );
 });
 
 test("onStockout at the 3rd in a row with NO other region → shrink but no cascade-start (nowhere to go)", async () => {
@@ -117,6 +128,33 @@ test("onStockout at the 3rd in a row with NO other region → shrink but no casc
   await onStockout("us-central1", NOW, "llama3_1_8b_v1", deps, () => 0.99);
   assert.equal(calls.shrinkBox.length, 1);
   assert.equal(calls.startBox.length, 0); // decide names central1 (all-parked veto-drop) — don't restart it
+});
+
+// The MIG retries a failed create about every 10s and every retry lands in onStockout. Before this,
+// `streak >= MAX` re-ran shrink + cascade on each one — observed reaching streak 27, which issued a
+// duplicate resize −1 and a duplicate resize +1 ten seconds apart and left one job with two boxes.
+test("onStockout actuates ONCE on the crossing, not on every retry past the threshold", async () => {
+  const { deps, calls } = fakeDeps({
+    states: [{ region: "us-central1", consecutiveStockouts: 0 }],
+    rows: { "us-central1": [{ ok: 0, fail: 0 }], "us-west1": [{ ok: 5, fail: 0 }] },
+  });
+  // Ten retries in a row, exactly as a stocked-out MIG produces them.
+  for (let i = 0; i < 10; i++) await onStockout("us-central1", NOW + i * 1000, "llama3_1_8b_v1", deps, () => 0.99);
+  assert.equal(calls.bumpStockoutStreak.length, 10, "every stockout is still recorded");
+  assert.equal(calls.shrinkBox.length, 1, "abandoned the region exactly once");
+  assert.equal(calls.startBox.length, 1, "cascaded exactly once");
+});
+
+test("a success re-arms the crossing, so a later stockout run abandons again", async () => {
+  const { deps, calls } = fakeDeps({
+    states: [{ region: "us-central1", consecutiveStockouts: 0 }],
+    rows: { "us-central1": [{ ok: 0, fail: 0 }], "us-west1": [{ ok: 5, fail: 0 }] },
+  });
+  for (let i = 0; i < 5; i++) await onStockout("us-central1", NOW + i * 1000, "llama3_1_8b_v1", deps, () => 0.99);
+  assert.equal(calls.shrinkBox.length, 1);
+  await onOutcome("us-central1", "success", NOW + 9000, "llama3_1_8b_v1", "inst-1", deps, () => 0.99); // resets the streak to 0
+  for (let i = 0; i < 5; i++) await onStockout("us-central1", NOW + 10000 + i * 1000, "llama3_1_8b_v1", deps, () => 0.99);
+  assert.equal(calls.shrinkBox.length, 2, "crossing fires again after the reset");
 });
 
 test("onStockout with no model → records + decides, but NO actuation (topic unresolved)", async () => {
@@ -136,8 +174,8 @@ test("onStockout swallows a thrown store error (never rethrows)", async () => {
   assert.ok(out.error, "returned an error marker instead of throwing");
 });
 
-// ---- onOutcome: records + logs + re-decides EVERYWHERE; releaseBox actuates (prod-gated inside) ----
-test("onOutcome success: incOk + stamps lastSuccessTs + re-decides + releaseBox(model, region, instance)", async () => {
+// ---- onOutcome: records + logs + re-decides EVERYWHERE; teardown belongs to reconcile.js ----
+test("onOutcome success: incOk + stamps lastSuccessTs + re-decides, and NEVER tears the box down", async () => {
   // west1 net success, central1 net fail → the re-decide should name west1.
   const { deps, calls } = fakeDeps({
     rows: { "us-central1": [{ ok: 0, fail: 5 }], "us-west1": [{ ok: 4, fail: 0 }] },
@@ -148,7 +186,9 @@ test("onOutcome success: incOk + stamps lastSuccessTs + re-decides + releaseBox(
   assert.equal(rec.patch.lastSuccessTs, NOW);
   assert.equal(rec.patch.consecutiveStockouts, 0, "success resets the stockout streak");
   assert.equal(out.wouldOpen, "us-west1"); // re-decided after the ok landed
-  assert.deepEqual(calls.releaseBox, [{ model: "llama3_1_8b_v1", region: "us-west1", instance: "inst-1" }]);
+  // A per-job outcome cannot prove the box is free — it may still hold a second leased message. Deleting
+  // here killed boxes mid-generation and orphaned the messages they held; reconcile.js owns teardown.
+  assert.deepEqual(calls.releaseBox, [], "a finished job must NOT delete its box");
 });
 
 test("onOutcome success un-parks a region: streak reset → eligible again in the re-decide", async () => {
@@ -163,14 +203,14 @@ test("onOutcome success un-parks a region: streak reset → eligible again in th
   assert.equal(out.wouldOpen, "us-central1"); // no longer parked → top score wins
 });
 
-test("onOutcome records + releases in DEV too (recording runs everywhere; the GCE gate is inside actuate)", async () => {
+test("onOutcome records in DEV too, and still never releases (recording runs everywhere)", async () => {
   const prev = { N: process.env.NODE_ENV, K: process.env.K_SERVICE };
   delete process.env.NODE_ENV; delete process.env.K_SERVICE; // off-prod
   try {
     const { deps, calls } = fakeDeps({ rows: { "us-central1": [{ ok: 1, fail: 0 }], "us-west1": [{ ok: 1, fail: 0 }] } });
     const out = await onOutcome("us-west1", "success", NOW, "llama3_1_8b_v1", "inst-3", deps, () => 0.99);
     assert.equal(calls.incOk.length, 1); // recorded even off-prod
-    assert.equal(calls.releaseBox.length, 1); // controller still calls releaseBox (it self-gates internally)
+    assert.equal(calls.releaseBox.length, 0); // teardown is the reconciler's job, in every env
     assert.ok(out.wouldOpen);
   } finally {
     if (prev.N !== undefined) process.env.NODE_ENV = prev.N;
@@ -246,7 +286,23 @@ test("onMessageDetected: records the detection, decides, and startBox(topic, win
   assert.equal(calls.recordMessageDetected[0].topic, "llama3_1_8b_v1");
   assert.equal(out.detected, "llama3_1_8b_v1");
   assert.equal(out.wouldOpen, "us-west1");
-  assert.deepEqual(calls.startBox, [{ model: "llama3_1_8b_v1", region: "us-west1" }]);
+  assert.equal(calls.startBox.length, 1);
+  assert.equal(calls.startBox[0].model, "llama3_1_8b_v1");
+  assert.equal(calls.startBox[0].region, "us-west1");
+  assert.match(calls.startBox[0].reason, /^detect: /, "the start must record WHY, for the log trail");
+  assert.deepEqual(calls.needsBox[0], { topic: "llama3_1_8b_v1", region: "us-west1" });
+});
+
+test("onMessageDetected: a detect with boxes already covering the backlog starts NOTHING", async () => {
+  // The 11-message burst case: one +1 per detected message fanned boxes across every region.
+  const { deps, calls } = fakeDeps({
+    rows: { "us-central1": [{ ok: 4, fail: 0 }] },
+    needsBox: { start: false, why: "3 waiting, 3 live — enough boxes", seen: { undelivered: 3, live: 3 } },
+  });
+  const out = await onMessageDetected("llama3_1_8b_v1", NOW, deps, () => 0.99);
+  assert.equal(calls.recordMessageDetected.length, 1, "the detection is still recorded");
+  assert.deepEqual(calls.startBox, [], "no extra box when the live ones already cover the queue");
+  assert.equal(out.started, false);
 });
 
 test("onMessageDetected: records + starts in DEV too (recording runs everywhere)", async () => {

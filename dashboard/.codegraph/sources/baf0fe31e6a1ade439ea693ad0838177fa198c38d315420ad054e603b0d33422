@@ -1,0 +1,23 @@
+import { spawn } from 'node:child_process'
+import { openSync, closeSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+// The sign-in window navigates here and we 302 it to Google: gcloud cannot open a browser from a
+// detached child, so the browser does it. Output goes to a file — piping to the parent is what
+// leaked handles, since this child outlives the request by design.
+const OUT = join(tmpdir(), 'yeschef-gcloud-auth.log')
+
+export default defineEventHandler(async (event) => {
+  const fd = openSync(OUT, 'w')
+  const child = spawn('gcloud', ['auth', 'login', '--brief'], { detached: true, stdio: ['ignore', fd, fd] })
+  closeSync(fd)
+  child.unref()
+
+  for (let i = 0; i < 100; i++) {
+    const m = readFileSync(OUT, 'utf8').match(/https:\/\/accounts\.google\.com\/\S+/)
+    if (m) return sendRedirect(event, m[0], 302)
+    await new Promise((r) => setTimeout(r, 200))
+  }
+  throw createError({ statusCode: 504, statusMessage: 'gcloud produced no sign-in URL.' })
+})

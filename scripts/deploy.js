@@ -28,7 +28,7 @@ import { AsyncLocalStorage } from "async_hooks";
 import { fileURLToPath } from "url";
 import { renderDockerfile } from "../docker/render.js";
 import { setup as setupPubSub } from "./setup-pubsub.js";
-import { MODELS, subscriptionOf, imageOf, FAKE_SUBSCRIPTION } from "../config/models.js";
+import { MODELS, subscriptionOf, imageOf, FAKE_SUBSCRIPTION, parallelOf } from "../config/models.js";
 import { getWorkerRegions } from "../functions/entry/ai/capacity/regions.js";
 
 dotenvFlow.config();
@@ -156,7 +156,9 @@ async function ensureBaseImage() {
 // gpu count → g2 machine type (L4s on a single box)
 const MACHINE_BY_GPU = { 1: "g2-standard-8", 2: "g2-standard-24" };
 
-const DEFAULTS = { parallel: 2, maxQueue: 5, gpu: 1, maxReplicas: 7 };
+// Generation slots come from config/models.js (parallelOf) — the same number the worker leases against
+// and the autoscaler sizes on. Not redefined here.
+const DEFAULTS = { maxQueue: 5, gpu: 1, maxReplicas: 7 };
 
 // Derived from the single source of truth (config/models.js).
 // gpu = the model's "machine description" (L4s on one VM).
@@ -170,7 +172,7 @@ const IMAGES_ALL = MODELS.map((m) => ({
   gateway: m.gateway || null,
   // ENV-sourced (dotenv-flow: .env.production → .env), DEFAULTS fallback. Feeds BOTH the baked
   // Dockerfile ENV (renderDockerfile) and the runtime `docker run -e` in the VM startup script.
-  parallel: process.env.OLLAMA_NUM_PARALLEL || DEFAULTS.parallel,
+  parallel: process.env.OLLAMA_NUM_PARALLEL || parallelOf(m),
   maxQueue: process.env.OLLAMA_MAX_QUEUE || DEFAULTS.maxQueue,
 }));
 // Deploy every GPU model except OpenClaw (Llama 3.3 70B) — held back for now. deployFake (the
@@ -750,12 +752,7 @@ async function deploy() {
   // Resolve the live worker-MIG topology from the DB/GCP (falls back to the seed off-GCE). Single
   // source shared with rollback.js — the hardcoded list is only a bootstrap seed now.
   const WORKER_REGIONS = await getWorkerRegions();
-  // Only this region autoscales; the rest are standby (see the provisioning loop). Default us-west1
-  // for now; override with PRIMARY_REGION to move the active tier elsewhere (manual failover during
-  // a stockout). Falls back to the first resolved region if us-west1 isn't in the L4 set.
-  const PRIMARY_REGION = process.env.PRIMARY_REGION
-    || (WORKER_REGIONS.some(([r]) => r === "us-west1") ? "us-west1" : WORKER_REGIONS[0]?.[0]);
-  console.log(`Worker regions: ${WORKER_REGIONS.map(([r]) => r).join(", ")} — PRIMARY: ${PRIMARY_REGION}\n`);
+  console.log(`Worker regions: ${WORKER_REGIONS.map(([r]) => r).join(", ")} — all size 0, steered by the capacity loop\n`);
 
   // 1. Pub/Sub topics + subscriptions
   if (APPLY) await setupPubSub(GCP_PROJECT_ID);
@@ -926,21 +923,16 @@ async function deploy() {
           skipMsg: `  ✓ ${mig} in ${region} already on ${template} — no roll.`,
         });
 
-        // Only the PRIMARY region autoscales. Siblings keep a ready size-0 MIG but NO active
-        // autoscaler — otherwise every region races the SHARED subscription and one message spawns
-        // MIGs in every region ("all over the place"). Failover to a sibling is manual for now
-        // (set PRIMARY_REGION, or scripts/restore-workers.sh) until capacity steering is wired.
-        if (region === PRIMARY_REGION) {
-          await setMigAutoscaling({ mig, region, subscription: img.subscription, maxReplicas: img.maxReplicas, singleInstanceAssignment: img.parallel });
-          console.log(`  ✓ ${img.name} MIG ${mig} in ${region} PRIMARY (0→${img.maxReplicas}, ${img.parallel} msg/box)`);
-        } else {
-          // Clear any autoscaler a prior deploy left on this sibling; leave it at size 0, standby.
-          // run() prints the plan under dry-run and no-ops; a missing autoscaler just rejects → ignore.
-          try {
-            await run(`gcloud compute instance-groups managed stop-autoscaling ${mig} --project=${GCP_PROJECT_ID} --region=${region}`);
-          } catch { /* no autoscaler to stop — fine */ }
-          console.log(`  ✓ ${img.name} MIG ${mig} in ${region} standby (no autoscaler)`);
-        }
+        // NO autoscaler in ANY region — the capacity control loop owns MIG sizing directly
+        // (functions/entry/ai/capacity/actuate.js: avail IS the MIG target size, start/shrink/release
+        // set it). GCE rejects resize with 412 on an autoscaled MIG, so an autoscaler here doesn't
+        // just duplicate the loop, it BLOCKS it: shrink can never drain the region, and every
+        // self-deleted worker gets recreated to meet the autoscaler's target.
+        // run() prints the plan under dry-run and no-ops; a missing autoscaler just rejects → ignore.
+        try {
+          await run(`gcloud compute instance-groups managed stop-autoscaling ${mig} --project=${GCP_PROJECT_ID} --region=${region}`);
+        } catch { /* no autoscaler to stop — fine */ }
+        console.log(`  ✓ ${img.name} MIG ${mig} in ${region} (size 0, no autoscaler — capacity loop steers)`);
       }
 
       console.log(`\nPrepared: ${img.name} → ${tagHash} across ${WORKER_REGIONS.length} region(s) (${img.gpu}× L4, 0→${img.maxReplicas})`);

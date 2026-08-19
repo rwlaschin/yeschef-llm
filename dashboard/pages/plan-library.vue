@@ -6,7 +6,16 @@
   <div class="glass p-6" :class="editing ? 'h-full flex flex-col min-h-0' : ''">
     <div v-if="!editing" class="flex items-center justify-between mb-6">
       <h1 class="text-2xl font-serif text-primary">Plan Library</h1>
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 transition-opacity" :class="previewId ? 'opacity-40 hover:opacity-100' : ''">
+        <button
+          type="button"
+          title="Reload steps and prompts"
+          :disabled="refreshing"
+          class="grid place-items-center w-8 h-8 shrink-0 rounded-lg text-secondary hover:text-primary hover:bg-amber-400/10 active:scale-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 transition disabled:opacity-40"
+          @click="refresh"
+        >
+          <ArrowPathIcon class="w-5 h-5" :class="refreshing ? 'animate-spin' : ''" />
+        </button>
         <button
           type="button"
           :title="filterOpen ? 'Hide filters' : 'Show filters'"
@@ -35,7 +44,7 @@
     <StepForm v-if="editing" :step="editing" :step-options="stepOptions" @save="saveStep" @cancel="editing = null" />
 
     <template v-else>
-      <div v-if="filterOpen" class="rounded-lg surface-2-soft border border-divider p-3 mb-4 space-y-3">
+      <div v-if="filterOpen" class="rounded-lg surface-2-soft border border-divider p-3 mb-4 space-y-3 transition-opacity" :class="previewId ? 'opacity-40 hover:opacity-100' : ''">
         <div class="grid grid-cols-[4rem_1fr] items-start gap-1.5" role="group" aria-label="Filter by step type">
           <span class="text-xs text-muted pt-1">type</span>
           <div class="flex flex-wrap gap-1.5">
@@ -83,51 +92,96 @@
         <button type="button" class="block mx-auto mt-2 text-primary hover:underline text-sm" @click="clearFilters">Clear filters</button>
       </div>
       <div class="space-y-2">
-        <div
-          v-for="s in visibleSteps"
-          :key="s.id"
-          :draggable="!filterActive"
-          class="group flex flex-col sm:flex-row sm:items-center gap-3 p-3 rounded-lg border transition"
-          :class="[
-            s.active ? '' : 'opacity-50',
-            dragId === s.id ? 'opacity-40' : '',
-            overId === s.id && dragId !== s.id ? 'border-amber-500 ring-1 ring-amber-500' : 'border-divider hover:bg-amber-500/5',
-          ]"
-          @dragstart="dragId = s.id"
-          @dragend="resetDrag"
-          @dragover.prevent
-          @dragenter="overId = s.id"
-          @drop="onDrop(s.id)"
-        >
-          <Bars2Icon
-            class="w-4 h-4 text-muted shrink-0"
-            :class="filterActive ? 'opacity-20 cursor-not-allowed' : 'opacity-40 group-hover:opacity-100 cursor-move'"
-            :title="filterActive ? 'Clear filters to reorder' : 'Drag to reorder'"
-          />
-          <div class="flex-1 min-w-0">
-            <div class="flex flex-wrap items-baseline gap-x-2">
-              <span class="text-sm font-medium text-strong truncate">{{ s.name }}</span>
-              <span class="text-xs text-muted shrink-0">{{ s.subtype }} · {{ s.kind }}{{ s.mapOf ? ` · per ${s.mapOf}` : '' }}</span>
-              <span
-                v-if="issuesById.get(s.id)?.length"
-                class="text-xs text-error shrink-0 cursor-help"
-                :title="'Fix these links:\n· ' + issuesById.get(s.id).join('\n· ')"
-              >⚠ {{ issuesById.get(s.id).length }} link issue{{ issuesById.get(s.id).length > 1 ? 's' : '' }}</span>
-              <span v-if="s.requiredFlags?.length" class="text-xs text-amber-400 shrink-0" :title="'requires: ' + s.requiredFlags.join(', ')">⚑ {{ s.requiredFlags.join(',') }}</span>
-              <span v-if="s.includeInOutput" class="text-xs text-success shrink-0 cursor-help" title="This step's result is included in the plan's final output">output</span>
+        <div v-for="s in visibleSteps" :key="s.id">
+          <div
+            :draggable="!filterActive"
+            class="group flex flex-col sm:flex-row sm:items-center gap-3 p-3 rounded-lg border transition"
+            :class="[
+              s.active ? '' : 'opacity-50',
+              dragId === s.id ? 'opacity-40' : '',
+              overId === s.id && dragId !== s.id ? 'border-amber-500 ring-1 ring-amber-500' : 'border-divider hover:bg-amber-500/5',
+            ]"
+            @dragstart="dragId = s.id"
+            @dragend="resetDrag"
+            @dragover.prevent
+            @dragenter="overId = s.id"
+            @drop="onDrop(s.id)"
+          >
+            <Bars2Icon
+              class="w-4 h-4 text-muted shrink-0"
+              :class="filterActive ? 'opacity-20 cursor-not-allowed' : 'opacity-40 group-hover:opacity-100 cursor-move'"
+              :title="filterActive ? 'Clear filters to reorder' : 'Drag to reorder'"
+            />
+            <div class="flex-1 min-w-0">
+              <div class="flex flex-wrap items-baseline gap-x-2">
+                <span class="text-sm font-medium truncate" :class="quiet(s) ? 'text-muted' : 'text-strong'">{{ s.name }}</span>
+                <template v-if="!quiet(s)">
+                  <span class="text-xs text-muted shrink-0">{{ s.subtype }} · {{ s.kind }}{{ s.mapOf ? ` · per ${s.mapOf}` : '' }}</span>
+                  <span
+                    v-if="issuesById.get(s.id)?.length"
+                    class="text-xs text-error shrink-0 cursor-help"
+                    :title="'Fix these links:\n· ' + issuesById.get(s.id).join('\n· ')"
+                  >⚠ {{ issuesById.get(s.id).length }} link issue{{ issuesById.get(s.id).length > 1 ? 's' : '' }}</span>
+                  <span v-if="s.requiredFlags?.length" class="text-xs text-amber-400 shrink-0" :title="'requires: ' + s.requiredFlags.join(', ')">⚑ {{ s.requiredFlags.join(',') }}</span>
+                  <span v-if="s.includeInOutput" class="text-xs text-success shrink-0 cursor-help" title="This step's result is included in the plan's final output">output</span>
+                </template>
+              </div>
+              <div v-if="!quiet(s)" class="text-sm text-secondary whitespace-pre-wrap break-words mt-1">{{ s.instruction || '(no instruction)' }}</div>
             </div>
-            <div class="text-sm text-secondary whitespace-pre-wrap break-words mt-1">{{ s.instruction || '(no instruction)' }}</div>
+            <div class="flex sm:flex-col items-center gap-3 sm:gap-4 self-end sm:self-auto shrink-0 transition-opacity" :class="quiet(s) ? 'opacity-40 hover:opacity-100' : ''">
+              <Toggle :model-value="s.active" @update:model-value="toggleActive(s)" />
+              <div class="flex items-center gap-1">
+                <button
+                  type="button"
+                  :title="previewId === s.id ? 'Hide the prompts the worker joins for this step' : 'Show the prompts the worker joins for this step'"
+                  :aria-expanded="previewId === s.id"
+                  class="grid place-items-center w-8 h-8 rounded-lg active:scale-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 transition shrink-0"
+                  :class="previewId === s.id ? 'text-primary bg-amber-400/10' : 'text-secondary hover:text-primary hover:bg-amber-400/10'"
+                  @click="togglePreview(s)"
+                >
+                  <EyeIcon class="w-5 h-5" />
+                </button>
+                <button type="button" title="Edit" class="grid place-items-center w-8 h-8 rounded-lg text-secondary hover:text-primary hover:bg-amber-400/10 active:scale-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 transition shrink-0" @click="editStep(s)">
+                  <PencilSquareIcon class="w-5 h-5" />
+                </button>
+                <button type="button" title="Delete" class="grid place-items-center w-8 h-8 rounded-lg text-error opacity-60 hover:opacity-100 hover:bg-red-500/10 active:scale-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 transition shrink-0" @click="removeStep(s)">
+                  <TrashIcon class="w-5 h-5" />
+                </button>
+              </div>
+            </div>
           </div>
-          <div class="flex sm:flex-col items-center gap-3 sm:gap-4 self-end sm:self-auto shrink-0">
-            <Toggle :model-value="s.active" @update:model-value="toggleActive(s)" />
-            <div class="flex items-center gap-1">
-              <button type="button" title="Edit" class="grid place-items-center w-8 h-8 rounded-lg text-secondary hover:text-primary hover:bg-amber-400/10 active:scale-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 transition shrink-0" @click="editStep(s)">
-                <PencilSquareIcon class="w-5 h-5" />
-              </button>
-              <button type="button" title="Delete" class="grid place-items-center w-8 h-8 rounded-lg text-error opacity-60 hover:opacity-100 hover:bg-red-500/10 active:scale-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40 transition shrink-0" @click="removeStep(s)">
-                <TrashIcon class="w-5 h-5" />
-              </button>
+
+          <!-- Pass/Fail are the step's own criteria, not part of its instruction — compose.js appends
+               them as their own labelled lines, so they read as their own block here too. -->
+          <div v-if="previewId === s.id && (s.pass || s.fail)" class="mt-1 ml-7 grid gap-1 text-sm">
+            <div v-if="s.pass" class="grid grid-cols-[3rem_1fr] gap-2">
+              <span class="text-xs font-mono text-success pt-0.5">Pass</span>
+              <span class="text-secondary whitespace-pre-wrap break-words">{{ s.pass }}</span>
             </div>
+            <div v-if="s.fail" class="grid grid-cols-[3rem_1fr] gap-2">
+              <span class="text-xs font-mono text-error pt-0.5">Fail</span>
+              <span class="text-secondary whitespace-pre-wrap break-words">{{ s.fail }}</span>
+            </div>
+          </div>
+
+          <div v-if="previewId === s.id" class="mt-2 ml-7 rounded-lg surface-2-soft border border-amber-500/40">
+            <div v-if="!prompts" class="text-muted text-sm p-3">Loading prompts…</div>
+            <template v-else>
+              <div class="p-3">
+                <div v-if="!parts.length" class="text-muted text-sm">
+                  No prompts are assigned to “{{ s.subtype }}” — the model gets no instructions for this step.
+                </div>
+                <div v-for="p in parts" v-else :key="p.prompt._id">
+                  <!-- `name` has no editor and most documents carry none, so the rule is the divider
+                       and the name is the exception that rides on it. -->
+                  <div class="flex items-center gap-2 text-[11px] font-mono text-secondary my-2">
+                    <span v-if="p.prompt.name" class="shrink-0">{{ p.prompt.name }}</span>
+                    <span class="h-px flex-1 bg-gray-400/30 dark:bg-white/10"></span>
+                  </div>
+                  <CollapsibleSections :text="p.content" />
+                </div>
+              </div>
+            </template>
           </div>
         </div>
       </div>
@@ -139,10 +193,12 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { PlusIcon, PencilSquareIcon, TrashIcon, Bars2Icon, FunnelIcon, XMarkIcon } from '@heroicons/vue/24/outline'
+import { PlusIcon, PencilSquareIcon, TrashIcon, Bars2Icon, FunnelIcon, XMarkIcon, EyeIcon, ArrowPathIcon } from '@heroicons/vue/24/outline'
 import { SUBTYPES } from '#models'
 import { lexBetween } from '~/utils/lexBetween'
+import { assemblePrompt } from '~/utils/assemblePrompt'
 import StepForm from '~/components/StepForm.vue'
+import CollapsibleSections from '~/components/CollapsibleSections.vue'
 import ConfirmDialog from '~/components/ConfirmDialog.vue'
 
 const steps = ref([])
@@ -167,6 +223,19 @@ const fetchSteps = async () => {
 
 // "Depends on" picker options: other steps shown as "name (subtype)" (value = the step name),
 // excluding the step currently being edited.
+// Re-read both collections in place. `prompts` is cached on first preview and never refetched, so a
+// refresh that skipped it would update the row text and leave the panel showing superseded prompts.
+// previewId and the filters are keyed off ids that survive the refetch, so the view holds its place.
+const refreshing = ref(false)
+const refresh = async () => {
+  refreshing.value = true
+  try {
+    await fetchSteps()
+    prompts.value = previewId.value ? await $fetch('/api/admin/prompts') : null
+  } catch (e) { toast.error('Failed to refresh', e.data?.error || e.message) }
+  finally { refreshing.value = false }
+}
+
 const stepOptions = computed(() => steps.value
   .filter((s) => s.id !== editing.value?.id)
   .map((s) => ({ value: s.name, label: `${s.name} (${s.subtype})` })))
@@ -206,6 +275,23 @@ const visibleSteps = computed(() => {
     && (!q || `${s.name || ''} ${s.instruction || ''}`.toLowerCase().includes(q)))
 })
 const issuesById = computed(() => new Map(steps.value.map((s, i) => [s.id, refIssues(s, i)])))
+
+// Prompt preview for one step. The library is fetched once, on first open, so the list itself stays
+// cheap. The join is the worker's own (utils/assemblePrompt), so what's listed is what the model reads.
+const prompts = ref(null) // null until the first preview opens
+const previewId = ref(null)
+const togglePreview = async (s) => {
+  previewId.value = previewId.value === s.id ? null : s.id
+  if (!previewId.value || prompts.value) return
+  try { prompts.value = await $fetch('/api/admin/prompts') }
+  catch (e) { prompts.value = []; toast.error('Failed to load prompts', e.data?.error || e.message) }
+}
+const previewStep = computed(() => steps.value.find((s) => s.id === previewId.value) || null)
+const assembled = computed(() => (previewStep.value && prompts.value
+  ? assemblePrompt(prompts.value, previewStep.value.subtype, { includeInactive: env.value !== 'production' })
+  : { parts: [], text: '' }))
+const parts = computed(() => assembled.value.parts)
+const quiet = (s) => previewId.value != null && previewId.value !== s.id
 
 const refIssues = (s, i) => {
   const names = steps.value.map((x) => x.name)

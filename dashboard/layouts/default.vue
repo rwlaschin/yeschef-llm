@@ -209,6 +209,7 @@ const groups = [
     { to: '/model-config', label: 'Sampling' },
   ] },
   { label: 'Tools', items: [
+    { to: '/servers', label: 'Servers' },
     { to: '/store', label: 'Store' },
     { to: '/capacity', label: 'Capacity' },
     { to: '/logs', label: 'Logs' },

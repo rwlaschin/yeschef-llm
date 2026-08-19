@@ -1,0 +1,4 @@
+{
+  "_id": "6a7e6f6adff6312de744477a",
+  "instruction": "# REQUIRED POSITIONS\n\n{{courseList}}\n\nThe ENTRÉE positions on that list are written by an earlier step. They are NOT required here and a row with Kind `entree` is NOT ALLOWED in this table.\n\n# TABLE TO CHECK"
+}

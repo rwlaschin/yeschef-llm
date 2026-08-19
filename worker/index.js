@@ -7,6 +7,12 @@
 // - Acks on success, nacks on failure (job returns to queue)
 // ============================================================
 
+// FIRST, before anything can log: stamp Cloud Logging severity onto console.error/warn. Without it
+// the COS ops agent labels every worker line INFO, so real failures are invisible in the console
+// and cannot drive an alert. Shared with the orchestrator via config/ (symlinked into functions/).
+import { installSeverityLogging } from "../config/log-severity.js";
+installSeverityLogging();
+
 import { PubSub } from "@google-cloud/pubsub";
 import { MongoClient } from "mongodb";
 import { initializeApp, getApps } from "firebase-admin/app";
@@ -14,7 +20,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { processDay } from "./lib/inventory.js";
 // Single source of truth (config/models.js, copied into the image + mounted in dev) — the
 // planner's subtype list and default tools live here, NOT hardcoded in the worker.
-import { SUBTYPES, DEFAULT_TOOLS, MODELS, unitDocId, defaultSampler, temperatureForStyle, DEFAULT_STYLE, STYLE_TEMPS, FAKE_SUBSCRIPTION } from "../config/models.js";
+import { SUBTYPES, DEFAULT_TOOLS, MODELS, unitDocId, defaultSampler, temperatureForStyle, DEFAULT_STYLE, STYLE_TEMPS, FAKE_SUBSCRIPTION, maxCtxFor } from "../config/models.js";
 import { parseYamlBlock } from "../config/yaml.js";
 import { cannedResponse } from "./cannedResponses.js";
 // Step builders live under steps/ — one file per step kind (see docs/plans/worker-refactor/plan.md).
@@ -36,6 +42,11 @@ import { createSemaphore } from "./semaphore.js";
 import { searchPool, fetchPage } from "./tools/search-pool.js";
 // Idle self-shutdown — turns the VM off within IDLE_SHUTDOWN_MS of going idle (see idle-shutdown.js).
 import { makeIdleShutdown, selfDeleteFromMig, workerRegion, workerInstance } from "./idle-shutdown.js";
+// Lease bound: never hold more messages than we can generate (see lease.js — this is the P1 fix for a
+// backlog stranding a message and for an idle box holding a lease it can't act on).
+import { generationSlots } from "./lease.js";
+// Subscriber lifecycle + reopen-on-close (testable with a fake subscription — see reopen.test.js).
+import { makeSubscriberLoop } from "./reopen.js";
 
 // ---- Worker version stamp ----------------------------------
 // Printed the instant the worker starts, so you can SEE which code is running. The version is
@@ -86,7 +97,12 @@ const {
 
 // This worker serves ONE model (OLLAMA_MODEL). Its max context window — the cap we must not
 // exceed — comes from the single source of truth (config/models.js). null if not found → no cap.
-const MODEL_MAX_CTX = MODELS.find((m) => m.model === OLLAMA_MODEL)?.ctx ?? null;
+const MODEL_DEF = MODELS.find((m) => m.model === OLLAMA_MODEL) ?? null;
+const MODEL_MAX_CTX = MODEL_DEF?.ctx ?? null;
+// Usable VRAM on the box this worker talks to, for the KV-cache cap (maxCtxFor). Not the card's
+// nameplate: the CUDA context, compute buffers and fragmentation take a cut, so an L4 (24 GB,
+// 23034 MiB visible) budgets 20 — clamping at 22 aimed a load at 22.0 of 22 and left no headroom.
+const GPU_VRAM_GB = parseFloat(process.env.GPU_VRAM_GB) || 20;
 
 // A fake/canned worker drains ONLY the fake subscription (deploy.js deployFake sets SUBSCRIPTION_NAME
 // to it) and returns canned output — it never talks to Ollama, so it needs no model and no
@@ -242,7 +258,7 @@ const INCLUDE_INACTIVE = !IS_PROD;
 // lease keeps extending. It is NOT a lease and NOT cross-server correctness — duplicate concurrent
 // runs of one unit remain harmless via the first-writer-wins CAS (completionWrite). See
 // docs/design/worker-dispatch.md.
-const GEN_LIMIT = Math.max(1, parseInt(process.env.OLLAMA_NUM_PARALLEL, 10) || (IS_PROD ? 2 : 1));
+const GEN_LIMIT = generationSlots(process.env);
 const genGate = createSemaphore(GEN_LIMIT);
 console.log(`[worker] generation gate: max ${GEN_LIMIT} concurrent (OLLAMA_NUM_PARALLEL=${process.env.OLLAMA_NUM_PARALLEL ?? "unset"})`);
 
@@ -439,7 +455,11 @@ function toolLine(t) {
 // files stay pure + unit-tested (steps/*.test.js). subtypeBuilders routes a step by its `subtype`
 // (e.g. compliance) inside the generic step path.
 const stepDeps = {
-  systemPromptFor, getTools, getSubtypes, retrieveContext, getFirestoreClient,
+  // getPrompts (not just systemPromptFor) because fragment placement needs the RECORDS, not the
+  // joined string: `relatesTo` decides whether a fragment belongs in the system message or inside
+  // the instruction. Without it, step.js falls back to the joined system prompt and the section
+  // markers reach the model verbatim.
+  systemPromptFor, getPrompts, getTools, getSubtypes, retrieveContext, getFirestoreClient,
   subtypeBuilders: { compliance: buildComplianceMessages },
 };
 
@@ -743,8 +763,17 @@ async function handleMessage(message) {
   try {
     payload = JSON.parse(message.data.toString());
   } catch {
-    console.error("Invalid message payload — nacking");
-    message.nack();
+    // ACK, do not nack. Nack means "redeliver, a different attempt may succeed" — but JSON.parse fails
+    // identically every time, so nacking burned all 50 delivery attempts waking a box per redelivery,
+    // and (with dead-lettering unable to forward) looped forever. A deterministic failure must be
+    // recorded and dropped, never retried. The payload prefix is logged so the publisher is findable.
+    console.error(JSON.stringify({
+      message: "[worker] unparseable payload — ACKED and dropped (retrying cannot help)",
+      workerEvent: "payload-invalid", messageId: message.id,
+      deliveryAttempt: message.deliveryAttempt ?? null,
+      payloadPrefix: message.data?.toString?.().slice(0, 200) ?? null,
+    }));
+    message.ack();
     return;
   }
 
@@ -867,13 +896,19 @@ async function handleMessage(message) {
     // Size the context window to THIS prompt (+ output reserve), capped by the model's max.
     // Too big → TerminalError → fail WITHOUT retrying (see the catch). The gateway path ignores
     // num_ctx (OpenClaw manages it), but we still size first to fail-fast on impossible requests.
+    // TWO ceilings, and the request may not exceed either. `ctx` is what the MODEL supports;
+    // maxCtxFor is what THIS CARD holds once the KV cache is multiplied by the slot count (Ollama
+    // allocates num_ctx per slot). Without the machine ceiling a big prompt at 3 slots asks for more
+    // VRAM than exists and the load OOMs — so cap here, before the window is ever requested.
+    const vramCap = maxCtxFor(MODEL_DEF, GEN_LIMIT, GPU_VRAM_GB);
+    const hardCap = MODEL_MAX_CTX ? Math.min(MODEL_MAX_CTX, vramCap) : vramCap;
     const numCtx = sizeNumCtx({
       messages,
-      modelMaxCtx: MODEL_MAX_CTX,
+      modelMaxCtx: hardCap,
       outputReserve: parseInt(OUTPUT_RESERVE_TOKENS, 10),
       floor: parseInt(OLLAMA_NUM_CTX, 10),
     });
-    console.log(`  num_ctx=${numCtx} (model cap ${MODEL_MAX_CTX ?? "unknown"}, output reserve ${OUTPUT_RESERVE_TOKENS})`);
+    console.log(`  num_ctx=${numCtx} (cap ${hardCap} = min(model ${MODEL_MAX_CTX ?? "unknown"}, vram ${vramCap} @ ${GEN_LIMIT} slot(s) of ${GPU_VRAM_GB}GB), output reserve ${OUTPUT_RESERVE_TOKENS})`);
 
     // The PLANNER never gets executable tools (it ASSIGNS tools to steps; giving it web_search/
     // web_fetch makes it run tools instead of emitting the plan). A domain step gets ONLY the tools
@@ -954,7 +989,7 @@ async function handleMessage(message) {
     // the marker out of the visible `response`. Terminal status is one of just two: PASS → success,
     // FAIL → fail. The FAIL reason goes in `outcome` (success has no reason → null). The orchestrator
     // gets the status + outcome in the report below so it can decide success → advance / fail → stop.
-    const { status: blockStatus, reason, clean } = splitOutcome(fullResponse);
+    const { status: blockStatus, reason, clean, thinking } = splitOutcome(fullResponse);
     let runStatus = blockStatus === "FAIL" ? "fail" : "success"; // PASS or no block → success
     let outcome = runStatus === "fail" ? reason : null;          // outcome carries the failure reason only
 
@@ -965,7 +1000,17 @@ async function handleMessage(message) {
 
     payload.runStatus = runStatus;                                 // carried into the orchestrate report
     payload.outcome = outcome;
-    console.log(`[worker]   ${jobId} → ${runStatus}${outcome ? ` (${outcome})` : ""}`);
+    // P1: NAME THE MARKER, not just the verdict. `PASS` and NO BLOCK AT ALL both map to success
+    // (line 978), so a model that answered correctly and one that stopped mid-sentence logged the
+    // identical "→ success". That equivalence is a deliberate contract, but silently applying it
+    // makes a truncated or non-conforming answer indistinguishable from a good one — which is how a
+    // courses unit shipped a 9-cell row as "success" and only surfaced two steps later. Say which
+    // it was, and say which step/unit it was, so a bad unit is identifiable from the log alone.
+    const markerNote = blockStatus === null ? "NO STATUS BLOCK → treated as success" : `marker=${blockStatus}`;
+    console.log(
+      `[worker]   ${jobId} step=${payload.step ?? "?"} unit=${payload.unit ?? "?"} ` +
+      `→ ${runStatus} (${markerNote}, ${String(finalResponse ?? "").length}c)${outcome ? ` reason="${outcome}"` : ""}`,
+    );
 
     // Completion = first-writer-wins CAS (docs/design/worker-dispatch.md). In a transaction,
     // completionWrite returns null if this slot is already terminal for this/a newer attempt, or
@@ -976,11 +1021,11 @@ async function handleMessage(message) {
     let wrote = false;
     await fsWrite("result", () => db.runTransaction(async (tx) => {
       const slot = (await tx.get(jobRef)).data();
-      const w = completionWrite(slot, { attempt, status: runStatus, response: finalResponse, outcome });
+      const w = completionWrite(slot, { attempt, status: runStatus, response: finalResponse, outcome, thinking });
       wrote = !!w;
       if (!w) return;
       tx.set(jobRef, {
-        status: w.status, response: w.response, outcome: w.outcome ?? null, attempt: w.attempt,
+        status: w.status, response: w.response, outcome: w.outcome ?? null, thinking: w.thinking ?? "", attempt: w.attempt,
         updatedAt: FieldValue.serverTimestamp(), completedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
     }));
@@ -1039,36 +1084,50 @@ async function handleMessage(message) {
 // ---- Main --------------------------------------------------
 async function main() {
   // Startup ENV dump → Cloud Logging (this container runs with --log-driver=gcplogs). We keep
-  // hitting config drift between dev and prod (NODE_ENV, MAX_CONCURRENCY, SUBSCRIPTION_NAME,
+  // hitting config drift between dev and prod (NODE_ENV, OLLAMA_NUM_PARALLEL, SUBSCRIPTION_NAME,
   // OLLAMA_NUM_PARALLEL), so log the full env at boot — but REDACT secret-looking values
   // (URI/KEY/TOKEN/SECRET/PASS/CRED/AUTH/MONGO) to their length so credentials never hit the logs.
+  // One line per var, each prefixed `DBG `: logd splits an ingest body on newlines, so one
+  // multi-line log became ~200 INFO records. The head token puts the whole dump below logd's
+  // default floor until LOGD_MIN_LEVEL=debug.
   const SECRET_RE = /(KEY|TOKEN|SECRET|PASS|CRED|AUTH|MONGO|URI|PASSWORD)/i;
-  console.log(
-    `[worker] ENV dump (IS_PROD=${IS_PROD}):\n` +
-      Object.keys(process.env).sort()
-        .map((k) => `  ${k}=${SECRET_RE.test(k) ? (process.env[k] ? `<redacted:${process.env[k].length}>` : "") : process.env[k]}`)
-        .join("\n")
-  );
+  console.log(`DBG [worker] ENV dump (IS_PROD=${IS_PROD}):`);
+  for (const k of Object.keys(process.env).sort()) {
+    console.log(`DBG   ${k}=${SECRET_RE.test(k) ? (process.env[k] ? `<redacted:${process.env[k].length}>` : "") : process.env[k]}`);
+  }
 
   await connectMongo();
 
   const pubsub = new PubSub({ projectId: GCP_PROJECT_ID });
 
-  // Per-worker concurrency: how many messages THIS worker leases at once. dev → 1 (a CPU box
-  // can't run two generations without them fighting for cores/RAM — that caused the competing
-  // slots), prod → 2 by default and tunable via MAX_CONCURRENCY. maxExtensionMinutes keeps the
-  // Pub/Sub lease auto-refreshed (up to 60 min) so a long generation isn't redelivered mid-run.
-  const maxMessages = parseInt(process.env.MAX_CONCURRENCY || (IS_PROD ? "2" : "1"), 10);
-  console.log(`  Flow control: maxMessages=${maxMessages} (env=${NODE_ENV}), maxExtensionMinutes=60`);
+  // The lease size IS the generation slot count — see worker/lease.js for why these were ever two
+  // numbers and what it cost. maxExtensionMinutes keeps the lease auto-refreshed (up to 60 min) so a
+  // long generation is never redelivered mid-run.
+  // NEVER lease more messages than we can actually GENERATE. maxMessages defaulted to 2 in prod while
+  // GEN_LIMIT (OLLAMA_NUM_PARALLEL) is 1, so a box leased a second message it could not start. That
+  // message was then: invisible to every other box (leased, with the deadline auto-extended up to 60
+  // min), and lost the moment this box was torn down — which is how a backlog of >1 left a message
+  // sitting in the queue that nothing ever picked up. It also made an idle box look busy to Pub/Sub,
+  // holding a lease while generating nothing.
+  const maxMessages = GEN_LIMIT;   // one number, one source of truth (worker/lease.js)
+  console.log(`  Flow control: maxMessages=${maxMessages} (= generation slots, OLLAMA_NUM_PARALLEL=${process.env.OLLAMA_NUM_PARALLEL ?? "unset"}), maxExtensionMinutes=60`);
+  if (process.env.MAX_CONCURRENCY) {
+    console.warn(`  \u26a0 MAX_CONCURRENCY=${process.env.MAX_CONCURRENCY} is IGNORED — lease size is OLLAMA_NUM_PARALLEL (${GEN_LIMIT}); a second knob is how the two drifted apart`);
+  }
 
   // Split a comma list into individual names, but do NOT trim/normalize: each name is a
   // SUBSCRIPTION_NAME is a single subscription id — one model, one sub. The split keeps the
   // loop uniform so the fake sub (appended below in non-prod) uses the same path without a
   // special case. Pass the value verbatim; "cleaning" it would mask upstream config bugs.
   const subscriptionNames = SUBSCRIPTION_NAME.split(',');
-  // Every non-prod worker also drains the shared fake/canned subscription so a fake job's
-  // steps get canned responses without a dedicated worker. (Prod never sets fake:true.)
-  if (!IS_PROD && !subscriptionNames.includes(FAKE_SUBSCRIPTION)) subscriptionNames.push(FAKE_SUBSCRIPTION);
+  // A real worker joins the shared fake/canned subscription ONLY when asked (DRAIN_FAKE=1), for a
+  // dev box running no dedicated fake worker. It must never be the default: with the dedicated fake
+  // worker up, every real worker was a second subscriber on the same subscription, so one message
+  // got delivered to two workers — two models answering it, the loser logged as
+  // "completion no-op (superseded/duplicate)".
+  if (!IS_PROD && process.env.DRAIN_FAKE === '1' && !subscriptionNames.includes(FAKE_SUBSCRIPTION)) {
+    subscriptionNames.push(FAKE_SUBSCRIPTION);
+  }
 
   // Idle self-shutdown: in prod the worker deletes its own MIG instance after IDLE_SHUTDOWN_MS with
   // no in-flight jobs (default 60s), so an idle GPU box stops billing without waiting on the
@@ -1077,35 +1136,56 @@ async function main() {
   const idleMs = parseInt(process.env.IDLE_SHUTDOWN_MS, 10) || 60000;
   const idle = IS_PROD
     ? makeIdleShutdown({ idleMs, onIdle: () => selfDeleteFromMig(console) })
-    : { onStart: () => Date.now(), onFinish: () => {}, armInitial: () => {} };
+    : { onStart: () => Date.now(), onFinish: () => {}, armInitial: () => {}, isShuttingDown: () => false, inFlight: () => 0 };
   console.log(`  Idle shutdown: ${IS_PROD ? `${idleMs}ms` : "disabled (dev)"}`);
 
-  for (const subName of subscriptionNames) {
-    const subscription = pubsub.subscription(subName, {
-      flowControl: { maxMessages, maxExtensionMinutes: 60 },
-    });
-    // A Pub/Sub Subscription emits: message | error | close | debug — there is NO "success"
-    // event (a received `message` IS the success path; handleMessage logs "[worker] ← job …").
-    // The wrapper brackets every delivery with the idle-shutdown timer: onStart clears it (work
-    // arrived), and onFinish in `finally` re-arms it on EVERY exit path (ack, nack, or a thrown
-    // handler) so a failed job can never leave the worker alive-but-idle forever.
-    subscription.on("message", (m) => {
+  // One structured line per transport event so "why did this box stop working" is answerable from the
+  // log stream instead of inferred. `workerEvent` is the field to filter on.
+  // The console method name is not a log level: logd reads severity from the payload, and once logship
+  // merges stdout and stderr there is nothing else left to recover it from.
+  const tlog = (event, subName, extra = {}, level = "log") => console[level](JSON.stringify({
+    level: level === "log" ? "info" : level,
+    message: `[worker/transport] ${event} ${subName}${extra.detail ? ` — ${extra.detail}` : ""}`,
+    workerEvent: event, subscription: subName, ...extra,
+  }));
+
+  // Reopen-on-close lives in worker/reopen.js so a fake subscription can drive it in a test — the
+  // emulator cannot force a stream closed, so this behaviour was otherwise only observable in prod.
+  const loop = makeSubscriberLoop({
+    open: (name) => pubsub.subscription(name, { flowControl: { maxMessages, maxExtensionMinutes: 60 } }),
+    log: (event, name, extra, level) => tlog(event, name, extra, level),
+    onGiveUp: (name, attempt) => {
+      // The container runs with `--restart=always` (deploy.js), so exiting restarts the worker in place
+      // within seconds — a fresh process on the same warm VM, not a ~90s MIG replacement. That is why
+      // giving up is cheap. inFlight is logged because exiting drops whatever was generating; those
+      // messages come back by redelivery rather than being lost.
+      tlog("exiting", name, { attempt, inFlight: idle.inFlight?.() ?? null,
+        detail: "--restart=always brings the worker straight back" }, "error");
+      process.exit(1);
+    },
+    // A received `message` IS the success path (handleMessage logs "[worker] ← job …"). The wrapper
+    // brackets every delivery with the idle-shutdown timer: onStart clears it (work arrived), and
+    // onFinish in `finally` re-arms it on EVERY exit path (ack, nack, or a thrown handler) so a failed
+    // job can never leave the worker alive-but-idle forever.
+    onMessage: (m, subName) => {
       let jobId = m.id;
       try { jobId = JSON.parse(m.data.toString())?.jobId ?? m.id; } catch { /* keep m.id */ }
+      // The self-delete is already requested — taking this job would destroy it mid-flight. Hand it
+      // straight back so a live box gets it now, instead of after an ack-deadline timeout.
+      if (idle.isShuttingDown?.()) {
+        tlog("declined-shutting-down", subName, { jobId, detail: "self-delete already requested; nacked for another box" }, "warn");
+        m.nack();
+        return;
+      }
       const startedAt = idle.onStart(jobId);
       Promise.resolve()
         .then(() => handleMessage(m))
         .catch((e) => console.error(`[worker] handler threw (kept alive): ${e?.stack || e?.message || e}`))
         .finally(() => idle.onFinish(jobId, startedAt));
-    });
-    subscription.on("error", (err) => console.error(`[worker] subscription ERROR (${subName}):`, err?.message || err));
-    // close: the subscriber stopped receiving (stream torn down / fatal error). Without this it
-    // goes silent and just looks like "no jobs arriving" with no clue why.
-    subscription.on("close", () => console.warn(`[worker] subscription CLOSED (${subName}) — no longer receiving messages`));
-    // debug: gRPC/stream internals (reconnects, deadline exceeded). Quiet unless something's off.
-    subscription.on("debug", (msg) => console.debug(`[worker] subscription debug (${subName}):`, msg?.message || msg));
-    console.log(`  Listening: ${subName}`);
-  }
+    },
+  });
+
+  for (const subName of subscriptionNames) loop.listen(subName);
 
   idle.armInitial(); // a worker that boots and never receives a job still shuts down after idleMs
   console.log(`Model: ${OLLAMA_MODEL} @ ${OLLAMA_HOST}\n`);

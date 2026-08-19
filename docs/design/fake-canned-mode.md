@@ -13,7 +13,7 @@ The fake/canned-response transport — deterministic, no-Ollama output for dev a
 - **Canned output must match the real parser contracts byte-for-byte where a parser exists.** `nutrients` must emit the exact `Day | Mealtime | Calories | Protein g | Sodium mg | Carbs g` header (the `plan_library` + `seed-recipes-nutrients.mjs` contract); `protein_grid` must emit `Day | Mealtime | Type | Cut` rows; `recipe_suggestion` must emit a plain JSON array (no fences, no wrapping object). Drift here makes fake runs pass while real runs fail, or vice versa.
 - **`compliance` must emit the terminal `@@::PASS::@@` block** — the worker's `splitOutcome` reads it to mark the run `success`, exactly like a real compliance step. Removing the block changes the run's terminal status semantics.
 - **The canned `planner` must return a valid YAML step list** routed back to `FAKE_TOPIC`, or `build.js` rejects it and the fake pipeline never dispatches step 0. The planner carries no `subtype` (type `"planner"`), which is why the worker's key resolution falls back to `payload.type`.
-- **Diet pools are a data-integrity guard, not decoration.** Canned data must never put meat on a vegan grid — `PROTEIN_POOLS`/`RECIPE_POOLS` exist so the fake output respects the unit's diet (`payload.item`). A new canned function that ignores the diet reintroduces that bug.
+- **A dish exists once and declares the diets it satisfies.** Canned data must never put meat on a vegan grid, and it must never carry the same dish under a per-diet rewording — the entrée catalogue (`MAIN_ENTREES`/`BREAKFAST_ENTREES`) is SHARED, and a diet selects from it by declaration (`entreePoolFor`). Keying a pool by diet is what put "Egg scramble", "Egg & veggie scramble" and "Plain egg scramble" in one cell as three dishes. `PROTEIN_POOLS` stays keyed by diet: it answers which raw protein a diet may be assigned, not which dish it is served.
 
 ## Design Constraints
 
@@ -58,10 +58,11 @@ Routing happens at the orchestrator (`/ai` Firebase Function), which is the sing
 | `cannedMenuPlan` | `worker/cannedResponses.js` | YAML week of days; echoes the unit's rendered prompt (`payload.query`) as a comment. |
 | `cannedRecipe` | `worker/cannedResponses.js` | Single-recipe YAML detail matching the `recipe:` output template in `prompt_library`; diet-aware via `recipePoolForDiet`. |
 | `cannedProteinGrid` | `worker/cannedResponses.js` | `Day \| Mealtime \| Type \| Cut` rows per the unit's diet/meals/days; FNV-1a-seeded per slot. |
-| `cannedRecipes` | `worker/cannedResponses.js` | `Day \| Mealtime \| Dish \| Protein \| Starch \| Vegetable \| Fruit` rows. Each slot's protein comes from the committed grid (`ctx.proteins`, seeded server-side at the `/ai` plan-build) so recipes MIRROR the grid; only slots with no grid protein fall back to the rotating `RECIPE_POOLS`. The recipes step fans out per `(diet, day)`, so `payload.item` is a `{diet, day}` slot → emits ONLY that day (a diet-string `item` still emits all days for back-compat). |
+| `cannedRecipes` | `worker/cannedResponses.js` | `Day \| Mealtime \| Dish \| Protein \| Starch \| Vegetable \| Fruit` rows. Each slot's protein comes from the committed grid (`ctx.proteins`, seeded server-side at the `/ai` plan-build) so recipes MIRROR the grid; only slots with no grid protein fall back to the rotating entrée catalogue. The recipes step fans out per `(diet, day)`, so `payload.item` is a `{diet, day}` slot → emits ONLY that day (a diet-string `item` still emits all days for back-compat). |
 | `cannedNutrients` | `worker/cannedResponses.js` | Exact 4-column nutrients pipe table; diet-shaped coefficients + per-slot jitter so every diet's table is distinct. |
 | `cannedRecipeSuggestion` | `worker/cannedResponses.js` | Strict JSON array of `{proteinType, name, components[], nutrition{}}` (see worked example above). |
-| `poolForDiet` / `recipePoolForDiet` | `worker/cannedResponses.js` | Map a diet string to its protein/recipe pool; default omnivore. |
+| `poolForDiet` | `worker/cannedResponses.js` | Map a diet string to its raw-protein pool; default omnivore. |
+| `entreePoolFor` / `recipePoolForDiet` | `worker/cannedResponses.js` | Narrow the ONE entrée catalogue for this daypart to the dishes declaring this diet, minus what a halal/kosher restriction forbids. |
 | `fnv1a` | `worker/cannedResponses.js` | Deterministic hash seeding per-slot selection/jitter. |
 
 ## Models
@@ -89,7 +90,7 @@ Routing happens at the orchestrator (`/ai` Firebase Function), which is the sing
 
 Any other key → the string `` `Canned ${subtype || "step"} response.` ``.
 
-**Pools:** `PROTEIN_POOLS` — `[type, cut]` pairs keyed by diet (vegan/vegetarian/renal/halal/kosher/omnivore). `RECIPE_POOLS` — `[dish, protein, starch, vegetable, fruit]` tuples keyed the same, plus `diabetic` (low-glycemic starches) and `low_sodium` (unsalted preparations); unmatched diets fall back to omnivore.
+**Pools:** `PROTEIN_POOLS` — `[type, cut]` pairs keyed by diet (vegan/vegetarian/renal/halal/kosher/omnivore). **Entrées are NOT keyed by diet:** `MAIN_ENTREES` and `BREAKFAST_ENTREES` are one shared catalogue per daypart of `[dish, protein, cookedIn, diets]`, where `cookedIn` is only what is cooked INTO the dish (never an accompaniment — those are dishes at their own course positions) and `diets` is the dish's own declaration. Catalogue ORDER is the menu: a slot takes a contiguous slice, so protein families are interleaved.
 
 ## Use Cases
 
@@ -105,7 +106,7 @@ Any other key → the string `` `Canned ${subtype || "step"} response.` ``.
   2. `query.js` selects `topic = FAKE_TOPIC`, writes the `llmResults` doc (`subtype`, `fake: true`), and publishes the message with `subtype` and `fake` alongside `type`/`style`.
   3. The fake worker receives the message; `FAKE_ONLY || payload.fake` is true.
   4. The worker resolves `cannedKey = payload.subtype || payload.type` → `"recipe_suggestion"`.
-  5. `cannedResponse("recipe_suggestion", payload)` calls `cannedRecipeSuggestion`, which picks two dishes from `recipePoolForDiet(payload.item)`, stamps each with the proteinType echoed from the prompt's target lines, and returns the JSON array string.
+  5. `cannedResponse("recipe_suggestion", payload)` calls `cannedRecipeSuggestion`, which picks two dishes from `recipePoolForDiet(payload.item)` (the shared entrée catalogue, narrowed to that diet), stamps each with the proteinType echoed from the prompt's target lines, and returns the JSON array string.
   6. The worker pushes the string through the chunk flusher, then runs the standard completion transaction — the doc goes `success` with the canned `response`.
   7. The client's `onSnapshot` listener sees the completed doc and parses the array.
 - **Alternate Flows:** The message carries `item: "vegan"` (or any diet) → the pool switches and the suggestions contain no meat; parsing and rendering are otherwise identical.

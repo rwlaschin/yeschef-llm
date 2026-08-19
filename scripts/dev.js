@@ -1,16 +1,21 @@
 // ============================================================
 // Dev - local emulation of the PROD execution model, for the dev-capable models.
 //
-//   Pub/Sub emulator  +  a "waker" that docker-starts each model's pre-baked image.
-//   Prod equivalent: GCE MIG autoscalers waking GPU VMs from baked images.
+//   Pub/Sub emulator + the /ai orchestrator. The model workers are the baremetal pm2
+//   apps (`b-*`, ecosystem.devbox.config.cjs), each already draining its own subscription.
 //
-// Worker + Ollama + model run INSIDE each Docker image (model baked at build time
-// → no runtime pull), matching prod. No native Ollama here.
+//   The Docker path — a "waker" that docker-starts each model's pre-baked image, mirroring
+//   the GCE MIG autoscaler — is still here behind `--only=workers`. It is NOT part of the
+//   default because a container and a `b-*` listener on the SAME subscription are two
+//   subscribers on one queue: Pub/Sub splits messages between them, so a job lands on
+//   whichever grabbed it first. Start one or the other, never both.
 //
-// Dev runs the models that fit a dev box: slim (2B) and openclaw. The 70B/large
-// model is omitted — it needs 2× L4 GPUs not present on a typical dev machine.
+// On the Docker path, worker + Ollama + model run INSIDE each image (model baked at build
+// time → no runtime pull), matching prod. Dev runs the models that fit a dev box: slim (2B)
+// and openclaw. The 70B/large model is omitted — it needs 2× L4 GPUs not present on a
+// typical dev machine.
 //
-// Requires: Firebase CLI (Pub/Sub emulator) + Docker.
+// Requires: Firebase CLI (Pub/Sub emulator). Docker only for `--only=workers`.
 //
 // Usage: npm run dev
 // ============================================================
@@ -27,7 +32,8 @@ import { devModels, subscriptionOf, imageOf, containerOf, FAKE_SUBSCRIPTION } fr
 
 dotenvFlow.config();
 
-// Which part to run. Default "all" leaves `npm run dev` exactly as it was.
+// Which part to run.
+//   --only=all      (default) the /ai orchestrator + Pub/Sub emulator + the canned worker. No Docker.
 //   --only=ai       the /ai orchestrator + Pub/Sub emulator. No Docker.
 //   --only=fake     ONLY the canned worker — the test-data generator. No Docker, no Ollama, no
 //                   image builds. This is what E2E and UI work should run against.
@@ -41,7 +47,11 @@ if (!["all", "ai", "workers", "fake"].includes(ONLY)) {
   throw new Error(`--only must be ai|fake|workers|all, got "${ONLY}"`);
 }
 const RUN_AI = ONLY === "all" || ONLY === "ai";
-const RUN_WORKERS = ONLY === "all" || ONLY === "workers";
+// Docker workers are OPT-IN, never part of the default: the `b-*` pm2 apps
+// (ecosystem.devbox.config.cjs) already drain every dev model's subscription. A container
+// and a `b-*` listener on one subscription are two subscribers on one queue — Pub/Sub
+// splits the messages between them, so each job lands on whichever grabbed it first.
+const RUN_WORKERS = ONLY === "workers";
 
 const { MONGO_URI, MONGO_DB, MONGO_COLLECTION, OLLAMA_API_KEY } = process.env;
 const OPENCLAW_GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "openclaw-dev-token";
@@ -68,10 +78,11 @@ for (const [k, v] of Object.entries({ MONGO_URI, MONGO_DB, MONGO_COLLECTION })) 
   if (!v) throw new Error(`${k} env var is required — check .env or .env.dev`);
 }
 
-// `npm run dev:quick` (DEV_QUICK=1) → run ONLY the single smallest dev model + the fake worker,
-// for a fast, low-resource boot when you're just exercising the pipeline. "Smallest" = the raw
-// (non-gateway) dev model with the least baker/disk footprint, i.e. llama3.1:8b. The fake worker
-// is unaffected — it always starts below.
+// DEV_QUICK=1 (`npm run dev:quick`, `npm run dev:workers:8b`) → narrow every model-driven step to
+// the single smallest dev model, for a fast, low-resource boot when you're just exercising the
+// pipeline: it provisions only that model's topics, and on the Docker path builds/wakes only it.
+// "Smallest" = the raw (non-gateway) dev model with the least baker/disk footprint, i.e.
+// llama3.1:8b. The fake worker is unaffected — it always starts below.
 const QUICK = process.env.DEV_QUICK === "1" || process.env.DEV_QUICK === "true";
 function selectedModels() {
   const dev = devModels();
@@ -230,7 +241,7 @@ function buildDockerfileVars(m) {
     model: m.model,
     gpu: 1,
     // ENV-sourced (dotenv-flow: .env.dev → .env), not hard-coded. Changing the value in
-    // .env.dev changes the recipe hash → the image auto-rebuilds on next `npm run dev`.
+    // .env.dev changes the recipe hash → the image auto-rebuilds on next `npm run dev:workers`.
     parallel: process.env.OLLAMA_NUM_PARALLEL || 2,
     maxQueue: process.env.OLLAMA_MAX_QUEUE || 5,
     subscription: m.subscription,
@@ -312,7 +323,7 @@ async function startFakeWorker() {
 }
 
 async function main() {
-  console.log(`\n=== Starting Dev Environment (${ONLY === "all" ? "Docker" : ONLY}) ===\n`);
+  console.log(`\n=== Starting Dev Environment (${ONLY}) ===\n`);
 
   // The canned worker is CPU-only — no Docker, no Ollama, no model images (fake-canned-mode.md).
   // Running it alone is what makes E2E and UI work fast, so it must not be gated behind any of that.
@@ -324,7 +335,8 @@ async function main() {
     return;
   }
 
-  // Only the worker half touches Docker, so --only=ai must not require Docker Desktop.
+  // Only --only=workers touches Docker, so no other mode — the default included — may require
+  // Docker Desktop to be running.
   if (RUN_WORKERS) {
     try {
       sh("docker info");
@@ -367,12 +379,17 @@ async function main() {
     ], {
       GCP_PROJECT_ID,
       FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID,
+      // WITHOUT THIS THE /ai FUNCTION TALKS TO REAL GCP PUB/SUB. We start the Pub/Sub emulator two
+      // lines up and then have to TELL the function to use it — the client library only switches on
+      // this env var. Omitting it made configurePubSub() create `sub_orchestrate_push` in the real
+      // project, pushing every LOCAL job's completion to the DEPLOYED /ai/events instead of
+      // localhost. Nothing advanced the cursor, so jobs sat at status "running" forever with no
+      // error — the exact symptom pubsub.js:19-23 warns about. The guard there refuses to CREATE a
+      // prod-pointing sub, but it cannot delete one that already exists, so this must not regress.
+      PUBSUB_EMULATOR_HOST,
       AI_BASE_URL, // point the orchestrate push sub at the local /ai/events
       MONGO_URI, // the /ai function reads/writes the Step Library (plan_library) in Mongo
       MONGO_DB,
-      // /ai/categorize uses the HOST's native Ollama (small model, always up).
-      CATEGORIZE_OLLAMA_HOST: process.env.CATEGORIZE_OLLAMA_HOST || "http://localhost:11434",
-      CATEGORIZE_OLLAMA_MODEL: process.env.CATEGORIZE_OLLAMA_MODEL || "llama3.2:3b",
     });
     console.log("Waiting for emulators (Pub/Sub + functions)...");
     await sleep(8000);
@@ -386,12 +403,17 @@ async function main() {
   process.env.PUBSUB_EMULATOR_HOST = PUBSUB_EMULATOR_HOST;
   if (RUN_AI) await setupPubSub(GCP_PROJECT_ID, selectedModels());
 
+  // The canned worker is not a model worker — nothing else drains its subscription, so it keeps
+  // starting on the default path exactly as it always has. `--only=ai` still leaves it out.
+  if (ONLY === "all") await startFakeWorker();
+
   if (!RUN_WORKERS) {
     console.log("\n=== /ai orchestrator ready ===");
     console.log(`  Pub/Sub Emulator : ${PUBSUB_EMULATOR_HOST}`);
     console.log(`  Orchestrator /ai : ${AI_BASE_URL}`);
     console.log(`  Firestore        : PROD (${process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID})`);
-    console.log("  (workers run separately — `npm run dev:workers`)\n");
+    console.log("  Model workers    : the baremetal pm2 apps (`pm2 ls` → the `b-*` entries).");
+    console.log("  (Docker workers are opt-in — `npm run dev:workers` — and must not run alongside them.)\n");
     return;
   }
 
@@ -423,8 +445,8 @@ async function main() {
     OPENCLAW_GATEWAY_TOKEN, // shared token for the OpenClaw gateway (gateway tiers)
   });
 
-  // 4b. Fake/canned worker — see startFakeWorker(). Runs here too so plain `npm run dev` is
-  //     unchanged; `--only=fake` runs it alone, with no Docker and no model builds.
+  // 4b. Fake/canned worker — see startFakeWorker(). Runs on this path too, so `--only=workers`
+  //     still covers the canned path; `--only=fake` runs it alone, with no Docker and no builds.
   await startFakeWorker();
 
   // 4. Build each dev model image if MISSING or STALE, sequentially (one `docker build` at a time —

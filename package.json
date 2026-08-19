@@ -1,10 +1,14 @@
 {
   "name": "ollama-infra",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "GCP infrastructure scripts for Ollama LLM deployment",
   "type": "module",
   "engines": {
     "node": ">=22"
+  },
+  "//imports": "Node subpath imports. '#prompt-sections' resolves here AND in Nuxt (aliased in dashboard/nuxt.config.ts to the same file), so one specifier works in the worker, in node --test, and inside the Nitro bundle. A relative '../../config/…' from dashboard/ resolves on disk but Nitro rewrites it into .nuxt/dev and fails at runtime.",
+  "imports": {
+    "#prompt-sections": "./config/promptSections.js"
   },
   "scripts": {
     "setup": "node scripts/setup.js",
@@ -16,7 +20,7 @@
     "dev:workers": "cross-env NODE_ENV=dev node scripts/dev.js --only=workers",
     "dev:workers:8b": "cross-env NODE_ENV=dev DEV_QUICK=1 node scripts/dev.js --only=workers",
     "kill:emulators": "node scripts/kill-emulators.js",
-    "test": "node --test \"worker/**/*.test.js\" \"functions/**/*.test.js\"",
+    "test": "node --test \"worker/**/*.test.js\" \"functions/**/*.test.js\" \"scripts/**/*.test.js\" \"config/**/*.test.js\"",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-exclude=\"**/*.test.js\" --test-coverage-lines=90 --test-coverage-functions=80 --test-coverage-branches=60 \"worker/**/*.test.js\"",
     "deploy": "node scripts/deploy-all.js",
     "deploy:workers": "cross-env NODE_ENV=production node scripts/deploy.js",
@@ -27,7 +31,20 @@
     "deploy:status": "bash scripts/deploy-status.sh",
     "rollback": "cross-env NODE_ENV=production node scripts/rollback.js",
     "kill:workers": "bash scripts/kill-workers.sh",
-    "restore:workers": "bash scripts/restore-workers.sh"
+    "restore:workers": "bash scripts/restore-workers.sh",
+    "smoke": "node scripts/smoke.mjs",
+    "box": "node scripts/devbox.js list",
+    "box:create": "node scripts/devbox.js create",
+    "box:status": "node scripts/devbox.js status",
+    "box:models": "node scripts/devbox.js models",
+    "box:use": "node scripts/devbox.js use",
+    "box:chat": "node scripts/devbox.js chat",
+    "box:pull": "node scripts/devbox.js pull",
+    "box:allow": "node scripts/devbox.js allow",
+    "box:allowlist": "node scripts/devbox.js allowlist",
+    "box:delete": "node scripts/devbox.js delete",
+    "box:hosts": "node scripts/devbox.js hosts",
+    "dev:worker:native": "cross-env NODE_ENV=dev node scripts/worker-native.mjs"
   },
   "dependencies": {
     "@google-cloud/pubsub": "^4.0.0",
@@ -38,5 +55,8 @@
     "firebase-admin": "^13.10.0",
     "mongodb": "^6.0.0",
     "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@clack/prompts": "^1.7.0"
   }
 }

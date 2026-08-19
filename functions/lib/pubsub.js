@@ -16,8 +16,19 @@ export async function configurePubSub() {
   // Default to this function's deterministic public URL (the `ai` function in
   // us-central1), derived from the project; override with AI_BASE_URL if needed.
   const project = process.env.GCP_PROJECT_ID || process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
-  const base = process.env.AI_BASE_URL || (project && `https://us-central1-${project}.cloudfunctions.net/ai`);
-  if (!base) throw new Error("Cannot resolve the /ai base URL — set AI_BASE_URL or GCP_PROJECT_ID");
+  // The cloudfunctions.net fallback is PRODUCTION-ONLY. Outside production it must never apply:
+  // a dev emulator that falls back points the LOCAL orchestrate subscription at the DEPLOYED
+  // function, so every local job is pushed to prod and no local worker ever sees it — the failure
+  // looks identical to "jobs stuck Running forever". Fail loudly instead of routing off-box.
+  const isProd = process.env.NODE_ENV === "production";
+  const base = process.env.AI_BASE_URL || (isProd && project && `https://us-central1-${project}.cloudfunctions.net/ai`);
+  if (!base) {
+    throw new Error(
+      isProd
+        ? "Cannot resolve the /ai base URL — set AI_BASE_URL or GCP_PROJECT_ID"
+        : `AI_BASE_URL is required outside production (NODE_ENV=${process.env.NODE_ENV ?? "unset"}) — refusing to point the local orchestrate push subscription at the deployed function`,
+    );
+  }
   const pushEndpoint = `${base.replace(/\/$/, "")}/events`;
 
   const pubsub = new PubSub({ projectId: process.env.GCP_PROJECT_ID });
@@ -52,6 +63,10 @@ export async function configurePubSub() {
 // startup/deploy, so a new model is covered on its own deploy — no separate listeners, no per-model
 // wiring. This is the "shim": one endpoint fed by every model topic, publisher-agnostic.
 export async function configureCapacityDetect() {
+  // PRODUCTION ONLY. These push subscriptions drive /ai/capacity-detect, which starts model workers
+  // — on a dev machine that means spinning GPU-tier containers up locally, which takes the machine
+  // down. Dev must never have a detect_* subscription; absent is the correct state, not a gap.
+  if (!/prod(uction)?/i.test(process.env.NODE_ENV || "")) return;
   const project = process.env.GCP_PROJECT_ID || process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
   const base = process.env.AI_BASE_URL || (project && `https://us-central1-${project}.cloudfunctions.net/ai`);
   if (!base) return;
@@ -73,7 +88,11 @@ export async function configureCapacityDetect() {
         if (meta.pushConfig?.pushEndpoint !== pushEndpoint) await existing.modifyPushConfig({ pushEndpoint });
       }
     } catch (e) {
-      console.error(`[orchestrator] capacity detect sub ${subName} failed: ${e.message}`);
+      // Not an error: nothing here acts on it. Dev never provisions these topics on purpose
+      // (capacity/autoscale must not spin workers up on a dev machine), so NOT_FOUND is the
+      // expected state every boot. Logging-and-continuing at ERROR only labelled a swallowed
+      // failure; if this ever needs to be actionable it needs a handler, not a louder level.
+      console.log(`DBG [orchestrator] capacity detect sub ${subName} skipped: ${e.message}`);
     }
   }
 }

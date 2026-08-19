@@ -9,6 +9,10 @@ const OBJ = { type: "object" };
 export const menuSchema = {
   type: "object",
   additionalProperties: false,
+  // A build with no caller or company is not a build. Enforced HERE so the route handler never
+  // re-checks: an empty body used to validate, and the handler's own guard was the only thing
+  // standing between it and a composed plan attributed to nobody.
+  required: ["userId", "companyId"],
   properties: {
     userId:              { type: "string", maxLength: 128 },
     companyId:           { type: "string", maxLength: 128 },
@@ -21,11 +25,43 @@ export const menuSchema = {
     proteins:            OBJ,  // per-slot grid proteins (normDiet → day → mealtime → {type,cut}) — seeds the recipes build so recipes mirror the grid
     costTier:            { type: "string", maxLength: 100 },
     costTierDescription: { type: "string", maxLength: 4000 },
+    addedProteins:       { type: "array", maxItems: 100, items: { type: "string", maxLength: 120 } },  // chef-typed proteins the categorization step must also classify
+    // The chef's arranged protein list from the setup page. The CUT is what decides the diet
+    // ("Pork | bacon" is not "Pork | loin"), so it rides beside the protein rather than fused into it.
+    proteinWeights: {
+      type: "array",
+      maxItems: 200,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["protein"],
+        properties: {
+          protein: { type: "string", maxLength: 120 },
+          cut:     { type: "string", maxLength: 120 },
+          diets:   { type: "array", maxItems: 50, items: { type: "string", maxLength: 120 } },
+          weight:  { type: "number", minimum: 0, maximum: 100 },
+        },
+      },
+    },
     location:            { type: "string", maxLength: 200 },
     jobId:               { type: "string", maxLength: 128 },
     fake:                { type: "boolean" },
+    // Course position → dishes per meal ({ appetizer: 3, entree: 2, side: 3 }). Keys are :CourseType
+    // slugs, so the vocabulary is data: validate the shape, not an enum that would need a deploy per
+    // new course. A count is 0 (course not served at all — how the UI removes one) or 2–7 (the chef's
+    // selectable range); 1 is not a menu, so it is not expressible.
+    courseCounts:        { type: "object", additionalProperties: { type: "integer", anyOf: [{ const: 0 }, { minimum: 2, maximum: 7 }] } },
     planId:              { type: "string", maxLength: 128 },  // ← reverse link to the Mongo meal_plan
     stepId:              { type: "string", maxLength: 128 },  // ← which plan step this build is for
+    // Client-minted correlation id, so a request can be joined browser → orchestrator → worker.
+    // The jobId is minted server-side and only reaches the browser in the response, so it cannot
+    // correlate the request going IN. Hardened to the leaf (not a bare object) — this is the only
+    // key callers may send, per the boundary-validation rule.
+    metadata:            {
+      type: "object",
+      additionalProperties: false,
+      properties: { clientRequestId: { type: "string", maxLength: 128 } },
+    },
   },
 };
 

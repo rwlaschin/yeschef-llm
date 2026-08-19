@@ -12,10 +12,28 @@
       >
         + New plan
       </button>
+      <!-- Status filter. Dots only — the colors are the same ones the rows use for status, so the
+           legend is the list itself. 'In flight' covers pending AND running: both mean not finished. -->
+      <div class="flex items-center gap-1.5 mb-3">
+        <button
+          v-for="f in FILTERS"
+          :key="f.key"
+          type="button"
+          :title="f.title"
+          @click="filter = f.key"
+          class="w-6 h-6 rounded flex items-center justify-center transition"
+          :class="filter === f.key ? 'bg-amber-500/20 ring-1 ring-amber-500' : 'hover:bg-amber-500/10'"
+        >
+          <span v-if="f.key === 'all'" class="text-[10px] text-muted leading-none">All</span>
+          <span v-else class="inline-block w-2 h-2 rounded-full" :class="f.dot"></span>
+        </button>
+      </div>
       <div class="space-y-2">
-        <div v-if="!history.length" class="text-muted text-xs text-center py-4">No menu plans</div>
+        <div v-if="!shown.length" class="text-muted text-xs text-center py-4">
+          {{ history.length ? 'None match' : 'No menu plans' }}
+        </div>
         <div
-          v-for="h in history"
+          v-for="h in shown"
           :key="h.id"
           class="group relative p-2 rounded-lg cursor-pointer transition text-xs border"
           :class="selected === h.id ? 'bg-amber-500/20 border-amber-500' : 'hover:bg-amber-500/10 border-transparent'"
@@ -85,7 +103,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { collection, query, orderBy, limit, onSnapshot, doc, getDoc } from 'firebase/firestore'
 import { getDb } from '~/lib/firebase'
 import MenuForm from '~/components/MenuForm.vue'
@@ -96,6 +114,23 @@ import { ClipboardDocumentIcon } from '@heroicons/vue/24/outline'
 const tab = ref('form')
 const selected = ref('')
 const history = ref([])
+
+// Status filter. 'inflight' deliberately matches BOTH pending and running — a job the worker never
+// picked up sits on one or the other, and from the chef's side they are the same "not done yet".
+const FILTERS = [
+  { key: 'all',      dot: '',              title: 'All plans' },
+  { key: 'inflight', dot: 'bg-amber-400',  title: 'Running / pending' },
+  { key: 'success',  dot: 'bg-green-400',  title: 'Succeeded' },
+  { key: 'fail',     dot: 'bg-red-400',    title: 'Failed' },
+]
+const filter = ref('all')
+const shown = computed(() => (
+  filter.value === 'all'
+    ? history.value
+    : history.value.filter((h) => (
+        filter.value === 'inflight' ? h.status === 'running' || h.status === 'pending' : h.status === filter.value
+      ))
+))
 let unsub = null
 const coll = useRuntimeConfig().public.firestoreCollectionResults || 'llmResults'
 
