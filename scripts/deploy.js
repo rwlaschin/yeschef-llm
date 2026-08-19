@@ -721,7 +721,9 @@ async function deployFake() {
   await ensureTemplate({
     template,
     createCmd:
-      `gcloud compute instance-templates create ${template} --project=${GCP_PROJECT_ID} ` +
+      // --verbosity=error: the 20GB boot disk is intentional (tiny canned image, e2-micro) —
+      // silence gcloud's <200GB I/O-performance WARNING on every new template.
+      `gcloud compute instance-templates create ${template} --project=${GCP_PROJECT_ID} --verbosity=error ` +
       `--machine-type=e2-micro --image-family=cos-stable --image-project=cos-cloud ` +
       `--boot-disk-size=20GB ${VM_NET_FLAGS} ` +
       vmMetadataFlag(startup),
