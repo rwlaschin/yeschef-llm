@@ -14,7 +14,7 @@
 // FIRST, before anything can log: Cloud Run does NOT map console.error to ERROR here — measured
 // 139 INFO / 111 blank / 0 ERROR over 90 minutes — so reconcile_failed, actuate_failed and every
 // swallowed exception were indistinguishable from routine output. Same shim the worker uses.
-import { installSeverityLogging } from "../config/log-severity.js";
+import { installSeverityLogging } from "./config/log-severity.js";
 installSeverityLogging();
 
 import { onRequest } from "firebase-functions/v2/https";
