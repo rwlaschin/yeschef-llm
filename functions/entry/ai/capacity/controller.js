@@ -83,8 +83,8 @@ export async function decide(nowMs, deps = defaultDeps, rand = Math.random) {
 // /ai/capacity-detect → handleDetectMessage), so EVERY enqueue is caught regardless of publisher.
 // Records the detection + runs decide(), then ACTUATES: startBox(topic, winner) boots a box in the
 // chosen region (resize +1) — but ONLY if the live box count is short of the waiting work. This exists
-// for latency (a box starts the moment work arrives, not on the next reconcile tick); the boxes-vs-
-// backlog test is what keeps a burst from fanning out one +1 per message across every region.
+// for latency (a box starts the moment work arrives, not on the next reconcile tick); the reconciler's
+// model-aware ceil(backlog / parallel) test keeps a burst from provisioning one box per message.
 // Recording + deciding run EVERYWHERE (dev + prod); startBox self-gates on prod inside actuate.js
 // (dev → would-log, no GCE call). Never throws into the detect path.
 export async function onMessageDetected(topic, nowMs = Date.now(), deps = defaultDeps, rand = Math.random) {
@@ -188,7 +188,7 @@ export async function onOutcome(region, status, nowMs = Date.now(), model = null
     // Every success registers a structured log, matching detect / stockout / job_fail.
     console.log(JSON.stringify({ message: `[capacity] job DONE → ok ${region}`, capacityEvent: "ok", actor: "engine", region, model: model ?? null, instance: instance ?? null }));
     // NO teardown here. A per-job outcome cannot tell whether the box is free: the worker leases up to
-    // MAX_CONCURRENCY messages, so releasing on the FIRST completion killed boxes mid-generation and
+    // the model's configured parallel message count, so releasing on the FIRST completion killed boxes mid-generation and
     // left the messages they still held to redelivery with nothing to request capacity for them. Box
     // lifecycle belongs to reconcile.js, which stops a box only after the whole queue has been idle
     // for IDLE_GRACE_MS — the 1-minute delay that also lets a free box take the next message.

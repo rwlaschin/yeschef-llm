@@ -161,8 +161,35 @@
           <PlayIcon class="w-4 h-4" :class="busy && 'opacity-50'" />
         </button>
       </div>
+      <!-- The model's answer IS the chart. Rendered in a sandboxed frame so its own <script> runs
+           (that is what makes the sliders work) without reaching the dashboard's session. The exact
+           same string is what gets stored and what a .svg download contains. -->
+      <iframe
+        v-if="stepOpen(s) && svgOf(s)"
+        :srcdoc="chartFrame(s)"
+        sandbox="allow-scripts"
+        class="w-1/3 rounded-lg surface-2 mb-2"
+        style="aspect-ratio: 720 / 420; border: 0"
+        :title="`step ${s.index} chart`"
+      ></iframe>
+      <!-- A shortfall is the ANSWER, not a failure: the form asked for needs data this request does
+           not carry, and the step says which. Shown as guidance, never as an error. -->
+      <div v-else-if="stepOpen(s) && shortfallOf(s?.response)"
+        class="text-xs surface-2 rounded-lg p-3 mb-2 whitespace-pre-wrap">{{ shortfallOf(s.response) }}</div>
+      <div v-else-if="stepOpen(s) && svgDefects(s).length" class="text-xs text-error mb-2">
+        Chart rejected — {{ svgDefects(s).join('; ') }}
+      </div>
+      <button
+        v-if="stepOpen(s) && showsChart(s)"
+        type="button"
+        @click="toggleSrc(s)"
+        class="flex items-center gap-1.5 text-[11px] text-muted hover:text-amber-400 transition"
+      >
+        <ChevronRightIcon class="w-3 h-3 transition-transform" :class="srcOpen[s.index] ? 'rotate-90' : ''" />
+        SVG source
+      </button>
       <pre
-        v-show="stepOpen(s)"
+        v-show="stepOpen(s) && (!showsChart(s) || srcOpen[s.index])"
         class="text-xs whitespace-pre-wrap break-words font-mono"
         :class="s.displayAs === 'output' ? '' : 'text-muted opacity-80'"
       >{{ s.response || '…' }}</pre>
@@ -205,10 +232,28 @@ import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { ChevronRightIcon, PlayIcon, ClipboardDocumentIcon, CheckIcon } from '@heroicons/vue/24/outline'
 import { StopIcon } from '@heroicons/vue/24/solid'
 import { useJob } from '~/composables/useJob'
+import { extractSvg, unsafeSvgReasons, shortfallOf } from '#svg-chart'
 
 const props = defineProps({ jobId: { type: String, default: '' } })
 
 const { job, plan, output, investigating, jobStatus, runtimeOf, bind } = useJob()
+
+// A chart is rendered unless it is UNSAFE to inject — its script runs in this page. Whether the
+// chart is any GOOD is the chart_check step's verdict, which shows as that step's PASS/FAIL like
+// every other step. Refusals show their reason rather than vanishing.
+const svgDefects = (s) => (extractSvg(s?.response) ? unsafeSvgReasons(s.response) : [])
+const svgOf = (s) => (svgDefects(s).length === 0 ? extractSvg(s?.response) : null)
+
+// The chart is the ANSWER, so it gets the room: the frame holds the document's own 720×420 shape at
+// full card width instead of a fixed 320px letterbox that cropped it. The stored string is untouched
+// — the shell only drops the frame's default body margin, which otherwise insets and shrinks it.
+const chartFrame = (s) => `<body style="margin:0;display:grid;place-items:center">${svgOf(s)}</body>`
+
+// The SVG SOURCE is not the answer — it is 4KB of markup that buried the chart above it. Collapsed
+// by default on any step that rendered; every other step's text still shows as it always did.
+const srcOpen = reactive({})
+const toggleSrc = (s) => { srcOpen[s.index] = !srcOpen[s.index] }
+const showsChart = (s) => !!svgOf(s)
 
 // Executed steps (those with a run), in plan order — one collapsible card each.
 const executed = computed(() =>

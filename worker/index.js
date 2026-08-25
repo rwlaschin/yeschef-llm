@@ -22,6 +22,7 @@ import { processDay } from "./lib/inventory.js";
 // planner's subtype list and default tools live here, NOT hardcoded in the worker.
 import { SUBTYPES, DEFAULT_TOOLS, MODELS, unitDocId, defaultSampler, temperatureForStyle, DEFAULT_STYLE, STYLE_TEMPS, FAKE_SUBSCRIPTION, maxCtxFor } from "../config/models.js";
 import { parseYamlBlock } from "../config/yaml.js";
+import { inScope } from "./lib/assemble.js";
 import { cannedResponse } from "./cannedResponses.js";
 // Step builders live under steps/ — one file per step kind (see docs/plans/worker-refactor/plan.md).
 // Pure / dependency-injected modules, unit-tested in steps/*.test.js.
@@ -368,15 +369,25 @@ async function getStyleTemps() {
 // Subtypes: no `subtypes` collection yet, so the defaults (with definitions) are the source.
 // (When one exists, fetch+cache here the same way as tools and fall back to SUBTYPES.)
 async function getSubtypes() {
-  return SUBTYPES.map((s) => `- ${s.name}: ${s.description}`).join("\n");  // RETURN the formatted string
+  // This string IS the planner's menu of assignable steps. A one-shot subtype (a UI action on a
+  // single slot) still needs a prompt, so it stays in SUBTYPES/MESSAGE_TYPES — but offering it here
+  // would let the planner schedule it as a step inside a plan. Opt-out, so anything unflagged is
+  // still offered exactly as before.
+  return SUBTYPES.filter((s) => !s.excludePlan).map((s) => `- ${s.name}: ${s.description}`).join("\n");
 }
 
 // System prompt for a message TYPE (e.g. "query") = matching prompts joined,
 // sorted ascending by priority. `mapping` is keyed by message type, not the model.
-async function systemPromptFor(type) {
+//
+// `scope` narrows to one PIPELINE (menu_plan | task_list — see config/promptSections.js inScope), so
+// one subtype can carry different prompt text in a meal-plan build than in a task list without
+// forking the subtype. Undefined = no scope filter, which is what every non-step caller passes
+// (buildStandardMessages for a direct /ai/query, planner.js) — their behaviour is unchanged.
+async function systemPromptFor(type, scope) {
   const prompts = await getPrompts();
   return prompts
     .filter((p) => p.mapping && p.mapping[type] != null)
+    .filter((p) => scope === undefined || inScope(p, scope))
     // plain code-unit sort — must match the dashboard's lexBetween ordering, NOT localeCompare
     .sort((a, b) => {
       const x = String(a.mapping[type]), y = String(b.mapping[type]);

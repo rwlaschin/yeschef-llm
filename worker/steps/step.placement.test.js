@@ -79,3 +79,70 @@ test("an instruction with no markers is unchanged — every frozen plan", async 
   assert.ok(all.includes("SYSTEM FRAGMENT"), "all fragments fall back to the system message");
   assert.ok(all.includes("STATUS CONTRACT"), "including anchored ones");
 });
+
+// ---- Prompt SCOPE, at the seam ----------------------------------------------------------------
+// The unit tests in config/promptSections.test.js prove inScope/fragmentsFor. This proves the wiring
+// that makes them matter: the worker learns the pipeline from the JOB DOC's `type` (no new Pub/Sub
+// field), and narrows the prompt library with it. If this is not wired, every scope test still
+// passes and the worker still sends every prompt to every job — the exact failure mode this file
+// was created for.
+const SCOPED_PROMPTS = [
+  { mapping: { recipes: "a" }, content: "LEGACY UNSCOPED PROMPT", active: true },
+  { mapping: { recipes: "b" }, content: "TASK LIST ONLY PROMPT", scopes: ["task_list"], active: true },
+  { mapping: { recipes: "c" }, content: "MENU PLAN ONLY PROMPT", scopes: ["menu_plan"], active: true },
+];
+
+const scopedDb = (jobType) => ({
+  collection: () => ({
+    doc: () => ({
+      get: async () => ({ exists: true, data: () => ({ type: jobType, plan: [{ subtype: "recipes", instructions: "DO IT" }] }) }),
+      collection: () => ({
+        doc: () => ({ get: async () => ({ exists: false }) }),
+        where: () => ({ get: async () => ({ docs: [] }) }),
+      }),
+    }),
+  }),
+});
+
+const buildScoped = async (jobType, deps = {}) =>
+  textOf(await buildStepMessages({ jobId: "j1", step: 0, unit: 0, subtype: "recipes" }, "", {
+    getPrompts: async () => SCOPED_PROMPTS,
+    systemPromptFor: async () => { throw new Error("unused when getPrompts is injected"); },
+    getFirestoreClient: () => scopedDb(jobType),
+    ...deps,
+  }));
+
+test("BACKWARD COMPAT at the seam: a meal-plan job still gets the unscoped prompts", async () => {
+  for (const jobType of ["plan", "meal_plan", undefined]) {
+    const all = await buildScoped(jobType);
+    assert.ok(all.includes("LEGACY UNSCOPED PROMPT"), `job type ${jobType} lost the unscoped prompt`);
+    assert.ok(all.includes("MENU PLAN ONLY PROMPT"), `job type ${jobType} lost its menu_plan prompt`);
+    assert.ok(!all.includes("TASK LIST ONLY PROMPT"), `job type ${jobType} picked up a task-list prompt`);
+  }
+});
+
+test("a tquery job gets ONLY the task_list prompts — same subtype, different prompt text", async () => {
+  const all = await buildScoped("tquery");
+  assert.ok(all.includes("TASK LIST ONLY PROMPT"), "the task-list prompt was not applied");
+  assert.ok(!all.includes("MENU PLAN ONLY PROMPT"), "a menu_plan prompt leaked into a task list");
+  assert.ok(!all.includes("LEGACY UNSCOPED PROMPT"), "an unscoped (legacy meal-plan) prompt leaked into a task list");
+});
+
+test("the no-getPrompts fallback path is scoped too — systemPromptFor receives the scope", async () => {
+  const seen = [];
+  await buildStepMessages({ jobId: "j1", step: 0, unit: 0, subtype: "recipes" }, "", {
+    systemPromptFor: async (type, scope) => { seen.push([type, scope]); return ""; },
+    getFirestoreClient: () => scopedDb("tquery"),
+  });
+  assert.deepEqual(seen, [["recipes", "task_list"]]);
+});
+
+test("a subtype builder is handed the scope, so compliance resolves per pipeline", async () => {
+  const seen = [];
+  await buildStepMessages({ jobId: "j1", step: 0, unit: 0, subtype: "recipes" }, "", {
+    getPrompts: async () => SCOPED_PROMPTS,
+    getFirestoreClient: () => scopedDb("tquery"),
+    subtypeBuilders: { recipes: async ({ scope }) => { seen.push(scope); return []; } },
+  });
+  assert.deepEqual(seen, ["task_list"]);
+});

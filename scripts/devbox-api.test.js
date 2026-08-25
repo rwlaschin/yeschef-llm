@@ -1,10 +1,32 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const DEVBOX_PATH = join(ROOT, "devbox.js");
+const DEVBOX_PATH = join(ROOT, "..", "dashboard", "server", "utils", "devbox.js");
+const DASHBOARD_ROOT = join(ROOT, "..", "dashboard");
+process.env.DEVBOX_STARTUP_DIR = mkdtempSync(join(tmpdir(), "devbox-startup-test-"));
+
+test("Equivalence Partitioning: dashboard devbox utility resolves in the dashboard package context without losing its Nuxt-compatible imports", () => {
+  const result = spawnSync(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    "const mod = await import('./server/utils/devbox.js'); process.stdout.write(typeof mod.runCli)",
+  ], {
+    cwd: DASHBOARD_ROOT,
+    encoding: "utf8",
+    env: { ...process.env, DEVBOX_STARTUP_DIR: mkdtempSync(join(tmpdir(), "devbox-dashboard-import-test-")) },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "function");
+  assert.doesNotMatch(result.stderr, /ERR_PACKAGE_IMPORT_NOT_DEFINED|Package import specifier/);
+});
 
 test("Rule 1: File Loading & Dynamic Import — devbox.js can be imported safely as a module without process.exit", async () => {
   const mod = await import(DEVBOX_PATH);
@@ -46,9 +68,8 @@ test("Rule 2: Function Execution — buildStartupScript injects auto-shutdown wa
   assert.match(script2m, /TIMEOUT_MINUTES=2/, "contains 2m watchdog timeout");
   assert.match(script2m, /poweroff|shutdown/, "contains self-shutdown command");
 
-  const scriptOff = buildStartupScript({ timeoutMinutes: 0, parallel: 2 });
-  assert.match(scriptOff, /OLLAMA_NUM_PARALLEL=2/, "contains parallel setting");
-  assert.doesNotMatch(scriptOff, /TIMEOUT_MINUTES=[1-9]/, "no active watchdog when timeout is 0");
+  const scriptDefault = buildStartupScript();
+  assert.match(scriptDefault, /TIMEOUT_MINUTES=5/, "defaults to 5m watchdog timeout");
 });
 
 test("Rule 2: Function Execution — getFleetStatus parses GCE and Ollama responses without throwing ReferenceErrors", async () => {
@@ -144,20 +165,29 @@ test("Rule 2: Function Execution — startDevbox accepts rounds: 0 for infinite 
 
   const logs = [];
   let probeCount = 0;
+  const compute = {
+    async checkAuth() { return { ok: true, account: "service-account" }; },
+    async listInstances() {
+      return probeCount >= 3
+        ? [{ vm: "yc-ollama-004", name: "004", zone: "us-west1-c", status: "RUNNING", machine: "g2-standard-8", ip: "34.168.12.94", createdAt: "2026-08-17T00:00:00Z" }]
+        : [];
+    },
+    async getInstance({ zone }) {
+      return probeCount >= 3
+        ? { vm: "yc-ollama-004", name: "004", zone, status: "RUNNING", machine: "g2-standard-8", ip: "34.168.12.94", createdAt: "2026-08-17T00:00:00Z" }
+        : null;
+    },
+    async ensureFirewall() {},
+    async createInstance() {
+      probeCount++;
+      if (probeCount < 3) throw new Error("ZONE_RESOURCE_POOL_EXHAUSTED");
+    },
+  };
   const mockExec = (cmd) => {
     logs.push(cmd);
     if (cmd.includes("sleep")) return "";
-    if (cmd.includes("print-access-token")) return "ya29.fake-token";
-    if (cmd.includes("auth list")) return "dev@yeschef.life";
+    if (cmd.includes("checkip.amazonaws.com")) return "73.189.42.10";
     if (cmd.includes("firewall-rules describe")) return "73.189.42.10/32";
-    if (cmd.includes("instances create")) {
-      probeCount++;
-      // Simulate capacity acquired on probe #3
-      if (probeCount >= 3) {
-        return "Created instance.";
-      }
-      return "ERROR: ZONE_RESOURCE_POOL_EXHAUSTED";
-    }
     if (cmd.includes("instances describe")) {
       if (cmd.includes("status")) return probeCount >= 3 ? "RUNNING" : "";
       if (cmd.includes("networkInterfaces")) return "34.168.12.94";
@@ -172,7 +202,7 @@ test("Rule 2: Function Execution — startDevbox accepts rounds: 0 for infinite 
     return "";
   };
 
-  const startRes = await startDevbox("004", { exec: mockExec, rounds: 0, model: "llama3.1:8b" });
+  const startRes = await startDevbox("004", { compute, exec: mockExec, rounds: 0, model: "llama3.1:8b" });
   assert.equal(startRes.ok, true);
   assert.equal(startRes.status, "RUNNING");
   assert.equal(probeCount >= 3, true, "probed capacity until created");
@@ -186,23 +216,25 @@ test("Rule 2: Function Execution — stopDevbox cancels an ongoing mid-flight in
   const { startDevbox, stopDevbox, startupTracker } = await import(DEVBOX_PATH);
 
   let probeCount = 0;
+  const compute = {
+    async checkAuth() { return { ok: true, account: "service-account" }; },
+    async listInstances() { return []; },
+    async getInstance() { return null; },
+    async ensureFirewall() {},
+    async createInstance() {
+      probeCount++;
+      if (probeCount === 5) void stopDevbox("003", { exec: mockExec });
+      throw new Error("ZONE_RESOURCE_POOL_EXHAUSTED");
+    },
+  };
   const mockExec = (cmd) => {
     if (cmd.includes("sleep")) return "";
-    if (cmd.includes("print-access-token")) return "ya29.fake-token";
-    if (cmd.includes("auth list")) return "dev@yeschef.life";
+    if (cmd.includes("checkip.amazonaws.com")) return "73.189.42.10";
     if (cmd.includes("firewall-rules describe")) return "73.189.42.10/32";
-    if (cmd.includes("instances create")) {
-      probeCount++;
-      // Trigger stopDevbox mid-flight on 5th zone probe
-      if (probeCount === 5) {
-        stopDevbox("003", { exec: mockExec });
-      }
-      return "ERROR: ZONE_RESOURCE_POOL_EXHAUSTED";
-    }
     return "";
   };
 
-  const startRes = await startDevbox("003", { exec: mockExec, rounds: 0 });
+  const startRes = await startDevbox("003", { compute, exec: mockExec, rounds: 0 });
   assert.equal(startRes.ok, true);
   assert.equal(startRes.zone, "", "returns empty zone because capacity search was cancelled");
   assert.equal(probeCount, 5, "cancelled infinite search loop after 5 probes");

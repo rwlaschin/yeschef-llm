@@ -1,14 +1,15 @@
-import { watch, readFileSync, existsSync, type FSWatcher } from 'node:fs'
+import { watch, readFileSync, existsSync, mkdirSync, type FSWatcher } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { dirname, basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { readAllStartupStates } from '#devbox'
 
 // Event-based fleet + startup-progress delivery: fs.watch on the two state files the
 // detached devbox processes write — every change is pushed to every open page. The client
 // never polls. While a stream is open AND the fleet has active boxes, this also keeps the
 // snapshot fresh by kicking the detached refresher (a box deleted remotely — e.g. by its
 // own idle watchdog — emits no local event otherwise).
-const STARTUP_FILE = process.env.DEVBOX_STARTUP_FILE || join(process.env.HOME || '', '.yeschef-devbox-startup.json')
+const STARTUP_DIR = process.env.DEVBOX_STARTUP_DIR || join(process.env.HOME || '', '.yeschef-devbox-startup')
 const FLEET_FILE = process.env.DEVBOX_FLEET_FILE || join(process.env.HOME || '', '.yeschef-devbox-fleet.json')
 const REFRESH_MS = 20000
 
@@ -40,7 +41,7 @@ export default defineEventHandler((event) => {
   const stream = createEventStream(event)
 
   const pushProgress = () => {
-    const state: Record<string, any> = readJson(STARTUP_FILE)
+    const state: Record<string, any> = readAllStartupStates()
     // Staleness means "writer died". hunting/installing write every few seconds, so 3 min
     // of silence is a dead writer; the model pull is ONE blocking exec for up to ~30 min,
     // so 'pulling' gets a TTL sized to the pull, not to the heartbeat.
@@ -56,8 +57,11 @@ export default defineEventHandler((event) => {
 
   const watchers: FSWatcher[] = []
   try {
-    watchers.push(watch(dirname(STARTUP_FILE), (_e, fn) => {
-      if (fn === basename(STARTUP_FILE)) pushProgress()
+    mkdirSync(STARTUP_DIR, { recursive: true })
+    watchers.push(watch(STARTUP_DIR, (_e, fn) => {
+      if (fn?.endsWith('.json')) pushProgress()
+    }))
+    watchers.push(watch(dirname(FLEET_FILE), (_e, fn) => {
       if (fn === basename(FLEET_FILE)) pushFleet()
     }))
   } catch { /* home dir unwatchable — the initial push below still serves current state */ }
@@ -68,7 +72,7 @@ export default defineEventHandler((event) => {
   const refresher = setInterval(() => {
     const fleet = readJson(FLEET_FILE)
     const active = (fleet?.boxes || []).some((b: any) => b.status && b.status !== 'STOPPED')
-      || Object.keys(readJson(STARTUP_FILE)).length > 0
+      || Object.keys(readAllStartupStates()).length > 0
     if (active) kickRefresh()
   }, REFRESH_MS)
 

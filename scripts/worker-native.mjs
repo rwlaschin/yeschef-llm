@@ -3,13 +3,13 @@
 //
 // This replaces a hand-typed `node -e '…process.env.OLLAMA_HOST="http://localhost:11434"…'` that
 // had its target BAKED INTO THE LAUNCH ARGS. That is the bug this file exists to prevent: editing
-// .env.dev or running `pm2 restart` changed nothing, because the value never came from the
+// .env.dev or restarting the process changed nothing, because the value never came from the
 // environment in the first place. Everything here is read at boot from .env / .env.dev, so the
 // target moves when the config moves.
 //
 // Ollama runs wherever WORKER_OLLAMA_HOST points — the Mac's own Ollama.app
 // (http://host.docker.internal:11434 / http://localhost:11434) or a GCE devbox
-// (http://ollama-001.dev.yeschef.life:11434, see scripts/devbox.js). Same worker either way.
+// (http://ollama-001.dev.yeschef.life:11434, see dashboard/server/utils/devbox.js). Same worker either way.
 import dotenvFlow from "dotenv-flow";
 dotenvFlow.config({ node_env: process.env.NODE_ENV || "dev" });
 

@@ -374,10 +374,10 @@ test("delete removes the instance", () => {
   assert.equal(r.calls.some((c) => c.includes("instances delete yc-ollama-001")), true);
 });
 
-test("delete of the last box removes the shared firewall rule", () => {
+test("delete of the last box preserves the free shared firewall rule", () => {
   const sb = sandbox();
   const r = devbox(sb, ["delete", "001"], { status: "RUNNING", zone: "us-central1-a", sources: "1.2.3.4/32" });
-  assert.equal(r.calls.some((c) => c.includes("firewall-rules delete yc-ollama-allow")), true);
+  assert.equal(r.calls.some((c) => c.includes("firewall-rules delete")), false);
 });
 
 test("delete keeps the shared firewall rule while another box still exists", () => {
@@ -661,7 +661,7 @@ test("a box name that is actually a flag is refused with usage", () => {
 });
 
 // ── list ─────────────────────────────────────────────────────────────────────────────────────
-test("list with no boxes says so", () => {
+test("standalone Node CLI list resolves shared config before reporting no boxes", () => {
   const sb = sandbox();
   const r = devbox(sb, ["list"], { list: "" });
   assert.match(r.out, /^No devboxes\. Create one: node scripts\/devbox\.js create <name>$/m);

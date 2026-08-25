@@ -6,7 +6,8 @@
   "imports": {
     "#prompt-sections": "./config/promptSections.js",
     "#models": "./config/models.js",
-    "#devbox": "./scripts/devbox.js"
+    "#devboxes": "./config/devboxes.js",
+    "#devbox": "./server/utils/devbox.js"
   },
   "scripts": {
     "dev": "nuxt dev --port 3200 --host",

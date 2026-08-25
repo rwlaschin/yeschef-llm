@@ -30,3 +30,8 @@ functions/.env.*
 .scratch
 
 # NOTE: .env files are intentionally NOT ignored (private repo).
+
+# Local-only dumps and generated indexes — never source control.
+.backups/
+.backup/
+.codegraph/

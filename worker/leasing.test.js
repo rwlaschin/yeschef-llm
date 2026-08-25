@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { PubSub } from "@google-cloud/pubsub";
 import { generationSlots, leaseBound } from "./lease.js";
 import { createSemaphore } from "./semaphore.js";
-import { MODELS, DEFAULT_PARALLEL, parallelOf, maxCtxFor } from "../config/models.js";
+import { MODELS, parallelOf, maxCtxFor } from "../config/models.js";
 
 const HOST = process.env.PUBSUB_EMULATOR_HOST || "localhost:8185";
 const PROJECT = "leasing-test";
@@ -103,15 +103,44 @@ test("a burst larger than the slot count never runs more generations than there 
 // flowControl.maxMessages and delivers a burst regardless (measured — it handed 4 messages to a
 // maxMessages:1 subscriber), so an emulator test here would fail for a reason that does not exist in
 // prod. What the emulator CAN prove is below: the backlog drains, and an idle subscriber still gets work.
-test("P1-1: the lease bound IS the generation slot count — one knob, cannot drift", () => {
-  // The prod configuration that caused the bug: gate 1, lease 2. There is now no way to express it.
-  assert.equal(generationSlots({ OLLAMA_NUM_PARALLEL: "1" }), 1);
-  assert.equal(leaseBound({ OLLAMA_NUM_PARALLEL: "1" }), 1, "lease must equal the gate, not 2");
-  assert.equal(leaseBound({ OLLAMA_NUM_PARALLEL: "2" }), 2, "raising the gate raises the lease together");
-  assert.equal(leaseBound({}), 1, "unset defaults to ONE in every environment — a prod-only 2 halves ctx");
-  assert.equal(leaseBound({ OLLAMA_NUM_PARALLEL: "0" }), 1, "0 is not a valid slot count");
-  assert.equal(leaseBound({ OLLAMA_NUM_PARALLEL: "junk" }), 1, "garbage must not yield NaN");
-  assert.equal(leaseBound, generationSlots, "same function — a second definition is how they drifted");
+test("P1-1 domain analysis: the lease and generation gate are the same runtime function", () => {
+  assert.equal(leaseBound, generationSlots);
+});
+
+test("P1-1 combinatorial pairing: a one-slot runtime gates one generation and leases one message", () => {
+  assert.deepEqual(
+    { gate: generationSlots({ OLLAMA_NUM_PARALLEL: "1" }), lease: leaseBound({ OLLAMA_NUM_PARALLEL: "1" }) },
+    { gate: 1, lease: 1 },
+  );
+});
+
+test("P1-1 combinatorial pairing: a three-slot runtime gates three generations and leases three messages", () => {
+  assert.deepEqual(
+    { gate: generationSlots({ OLLAMA_NUM_PARALLEL: "3" }), lease: leaseBound({ OLLAMA_NUM_PARALLEL: "3" }) },
+    { gate: 3, lease: 3 },
+  );
+});
+
+test("runtime transport equivalence partition: missing OLLAMA_NUM_PARALLEL defaults to 1", () => {
+  assert.equal(generationSlots({}), 1);
+  assert.equal(generationSlots({ OLLAMA_NUM_PARALLEL: "" }), 1);
+  assert.equal(leaseBound({}), 1, "the lease defaults with the gate — never lease what you cannot run");
+});
+
+test("runtime transport boundary analysis: zero OLLAMA_NUM_PARALLEL fails fast", () => {
+  assert.throws(() => generationSlots({ OLLAMA_NUM_PARALLEL: "0" }), /OLLAMA_NUM_PARALLEL|parallel/i);
+});
+
+test("runtime transport equivalence partition: negative OLLAMA_NUM_PARALLEL fails fast", () => {
+  assert.throws(() => generationSlots({ OLLAMA_NUM_PARALLEL: "-1" }), /OLLAMA_NUM_PARALLEL|parallel/i);
+});
+
+test("runtime transport equivalence partition: fractional OLLAMA_NUM_PARALLEL fails fast", () => {
+  assert.throws(() => generationSlots({ OLLAMA_NUM_PARALLEL: "1.5" }), /OLLAMA_NUM_PARALLEL|parallel/i);
+});
+
+test("runtime transport equivalence partition: non-numeric OLLAMA_NUM_PARALLEL fails fast", () => {
+  assert.throws(() => generationSlots({ OLLAMA_NUM_PARALLEL: "junk" }), /OLLAMA_NUM_PARALLEL|parallel/i);
 });
 
 test("P1-1: the whole backlog drains — nothing is left behind", async (t) => {
@@ -182,19 +211,8 @@ test("no model's slot count starves its context below the worker's floor", () =>
   }
 });
 
-test("generation slots: one imported value drives every model", {
-  skip: SLOTS !== 1 && `fleet runs ${SLOTS} slots — the one-slot contract does not apply`,
-}, () => {
-  assert.equal(DEFAULT_PARALLEL, 1, "2 slots halve num_ctx per request on a single L4");
-  for (const m of MODELS) {
-    assert.equal(parallelOf(m), 1, `${m.topic} must run one generation per box unless ctx is reduced with it`);
-  }
-});
-
-test("generation slots: at 3, the card still holds a real window and the lease follows", {
-  skip: SLOTS !== 3 && `fleet runs ${SLOTS} slots — the three-slot contract does not apply`,
-}, () => {
-  assert.equal(DEFAULT_PARALLEL, 1, "an unset env must still mean ONE — 3 is opt-in per model, never a default");
+test("generation slots: the configured three-slot model still holds a real window and the lease follows", () => {
+  assert.equal(SLOTS, 3, "the measured Llama tier owns three slots explicitly");
   assert.equal(LLAMA.ctx, LLAMA_WINDOW, "ctx is the model's CAPABILITY ceiling and does not move with parallel");
   // Measured on a 1× L4: 3 slots at the production context (9366) used 8.6 GB and gave 2.14× the
   // throughput of one at a time. The cap must leave room for that request, not merely for the floor.
@@ -208,13 +226,6 @@ test("generation slots: at 3, the card still holds a real window and the lease f
   }
 });
 
-test("generation slots: a per-model override is honoured, and garbage is not", () => {
+test("generation slots: an explicit per-model value is honoured", () => {
   assert.equal(parallelOf({ topic: "x", parallel: 2 }), 2, "an explicit capacity decision must be possible");
-  assert.equal(parallelOf({ topic: "x", parallel: 0 }), 1, "0 would consume nothing");
-  assert.equal(parallelOf({ topic: "x", parallel: "junk" }), 1, "must not yield NaN");
-  assert.equal(parallelOf(undefined), 1, "missing model must not throw");
-});
-
-test("the worker lease falls back to that same value, not its own copy", () => {
-  assert.equal(leaseBound({}), DEFAULT_PARALLEL, "the lease default IS the config default — no second source");
 });

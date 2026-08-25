@@ -14,7 +14,7 @@ function devboxScript() {
 }
 
 // Starter/stopper output ships into logd (component `script`, tagged per box) like every
-// pm2 service — the Device Logs view streams it back out. Same sibling-repo walk as pm2-dev.mjs.
+// The Device Logs view streams this back out. Resolve the sibling log shipper at runtime.
 function logshipScript(from: string) {
   for (let dir = from, i = 0; i < 6; i++, dir = resolve(dir, '..')) {
     const guess = resolve(dir, '..', 'yeschef', 'tools', 'logd', 'logship.mjs')
@@ -25,12 +25,13 @@ function logshipScript(from: string) {
 
 function spawnDevbox(script: string, args: string[], tag: string) {
   const ship = logshipScript(resolve(script, '..'))
+  const cwd = resolve(script, '..')
   const child = ship
     ? spawn('bash', ['-c',
         `${JSON.stringify(process.execPath)} ${args.map(a => JSON.stringify(a)).join(' ')} 2>&1 | ` +
         `${JSON.stringify(process.execPath)} ${JSON.stringify(ship)} script ${tag}`,
-      ], { stdio: 'ignore', detached: true })
-    : spawn(process.execPath, args, { stdio: 'ignore', detached: true })
+      ], { cwd, stdio: 'ignore', detached: true })
+    : spawn(process.execPath, args, { cwd, stdio: 'ignore', detached: true })
   child.unref()
 }
 
@@ -40,7 +41,7 @@ export default defineEventHandler(async (event) => {
     const action = body?.action
     const box = body?.box
     const model = body?.model
-    const timeoutMinutes = Number(body?.timeoutMinutes || 0)
+    const timeoutMinutes = Number(body?.timeoutMinutes || 5)
     const clientIp = body?.ip || getHeader(event, 'x-forwarded-for')?.split(',')[0]?.trim() || ''
 
     if (!action) {
@@ -57,7 +58,7 @@ export default defineEventHandler(async (event) => {
         if (!script) throw createError({ statusCode: 500, statusMessage: 'devbox.js not found' })
         const args = [script, 'start', box, '--rounds=5']
         if (model) args.push(`--model=${model}`)
-        if (timeoutMinutes) args.push(`--timeout=${timeoutMinutes}`)
+        args.push(`--timeout=${timeoutMinutes}`)
         spawnDevbox(script, args, `devbox-${box}`)
         return { ok: true, status: 'STARTING', message: `Capacity search for ${box} started (up to 5 rounds).` }
       }

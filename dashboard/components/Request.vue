@@ -2,19 +2,31 @@
   <div class="flex gap-4 h-screen">
     <!-- Left Panel: Request History -->
     <div class="w-64 panel backdrop-blur-md p-4 overflow-y-auto flex flex-col min-h-0">
-      <button
-        type="button"
-        @click="newRequest"
-        class="mb-3 w-full px-3 py-2 rounded bg-amber-500 text-gray-900 hover:bg-amber-600 text-sm font-medium"
-      >
-        + New request
-      </button>
+      <!-- New request + the plan/not-plan filter share ONE row — the filter gets no row of its own. -->
+      <div class="mb-3 flex items-center gap-1.5">
+        <button
+          type="button"
+          @click="newRequest"
+          class="flex-1 min-w-0 px-2 py-2 rounded bg-amber-500 text-gray-900 hover:bg-amber-600 text-sm font-medium truncate"
+        >
+          + New request
+        </button>
+        <button
+          v-for="k in KIND_FILTERS"
+          :key="k.key"
+          type="button"
+          :title="k.title"
+          @click="kindFilter = k.key"
+          class="shrink-0 px-1.5 h-8 rounded text-[10px] leading-none text-muted hover:text-primary transition"
+          :class="kindFilter === k.key ? 'bg-amber-500/20 ring-1 ring-amber-500 text-primary' : 'hover:bg-amber-500/10'"
+        >{{ k.label }}</button>
+      </div>
       <div class="space-y-2">
-        <div v-if="activeRequests.length === 0" class="text-muted text-xs text-center py-4">
-          No requests
+        <div v-if="shownRequests.length === 0" class="text-muted text-xs text-center py-4">
+          {{ activeRequests.length ? 'None match' : 'No requests' }}
         </div>
         <div
-          v-for="req in activeRequests"
+          v-for="req in shownRequests"
           :key="req.jobId"
           @click="selectRequest(req.jobId)"
           :class="[
@@ -386,6 +398,23 @@ const showCreateCompany = ref(false)
 const showCreateUser = ref(false)
 
 const activeRequests = ref([])
+
+// Plan / not-plan filter. Meal-plan builds, task lists and one-off requests all live in the SAME
+// llmResults collection; the job doc's own `type` is the discriminator ("menu" = a meal-plan build,
+// written by /ai/menu). `jobType` is that raw field — deliberately NOT `type`, which the local
+// optimistic record overrides with the UI's Type selection.
+const KIND_FILTERS = [
+  { key: 'all',   label: 'All',   title: 'All requests' },
+  { key: 'plan',  label: 'Plan',  title: 'Meal plan builds only' },
+  { key: 'other', label: 'Other', title: 'Everything except meal plan builds' },
+]
+const kindFilter = ref('all')
+const shownRequests = computed(() => (
+  kindFilter.value === 'all'
+    ? activeRequests.value
+    : activeRequests.value.filter((r) => (kindFilter.value === 'plan' ? r.jobType === 'menu' : r.jobType !== 'menu'))
+))
+
 const selectedRequestId = ref('')
 const selectedRequestData = ref(null)
 const activeTab = ref('request')
@@ -593,6 +622,8 @@ const startHistory = () => {
         return {
           jobId,
           type: localByJobId.get(jobId)?.type || x.type || 'query',
+          jobType: x.type || '',   // the doc's own type — drives the plan/not-plan filter
+
           userPrompt: x.userPrompt || '',
           model: x.model || '',
           companyId: x.companyId || '',

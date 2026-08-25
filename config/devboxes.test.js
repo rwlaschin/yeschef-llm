@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { validate, BOX_NAMES, ALL_BOX_NAMES, boxDef, boxDefaults, vmOf, hostOf, rateFor, L4_ZONES } from "./devboxes.js";
 
 // The declared set is what makes a name legal. A box created under an undeclared name is invisible to
-// pm2 and bills unattended, so every one of these throws is a bill that does not happen.
+// the dashboard and bills unattended, so every one of these throws is a bill that does not happen.
 test("boxDef throws for a letter name, naming the declared set", () => {
   assert.throws(() => boxDef("a"), /Unknown devbox "a".*001/s);
 });

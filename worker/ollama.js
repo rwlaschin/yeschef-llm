@@ -8,13 +8,14 @@
 // node:http has no such built-in timeout; the AbortController (firstChunkMs / idleMs) is the ONLY one.
 import http from "node:http";
 import https from "node:https";
+import { generationSlots } from "./lease.js";
 
 // Keep-alive connection pool. A single unit makes SEVERAL /api/chat round-trips (chat → tool → chat →
 // …); keep-alive reuses one socket across them instead of a fresh TCP+handshake each round. maxSockets
 // defaults to OLLAMA_NUM_PARALLEL + 1 — match what THIS box runs in parallel, +1 for socket handoff.
 // NOT a scaling ceiling (scale by adding boxes); override with OLLAMA_MAX_SOCKETS for a shared box.
 const _override = parseInt(process.env.OLLAMA_MAX_SOCKETS, 10);
-const _numParallel = parseInt(process.env.OLLAMA_NUM_PARALLEL, 10) || 1;
+const _numParallel = generationSlots();
 const _agentOpts = { keepAlive: true, keepAliveMsecs: 30000, maxSockets: _override > 0 ? _override : _numParallel + 1 };
 export const ollamaHttpAgent = new http.Agent(_agentOpts);
 export const ollamaHttpsAgent = new https.Agent(_agentOpts);

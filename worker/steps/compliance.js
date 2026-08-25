@@ -16,14 +16,16 @@
 //
 // Signature matches the subtype-builder contract used by steps/step.js (it passes the loaded
 // plan `def`, not raw payload fields):
-//   buildComplianceMessages({ payload, def, ctxBlocks, context, deps }) -> Promise<ChatMessage[]>
+//   buildComplianceMessages({ payload, def, ctxBlocks, context, deps, scope }) -> Promise<ChatMessage[]>
 // ============================================================
 
 import { buildMessages } from "./step.js";
 import { section, joinSections } from "./prompt.js";
 
-export async function buildComplianceMessages({ payload, def, ctxBlocks, context, deps }) {
-  const system = await deps.systemPromptFor(def.subtype || "compliance");
+export async function buildComplianceMessages({ payload, def, ctxBlocks, context, deps, scope }) {
+  // `scope` = the job's pipeline (menu_plan | task_list), passed through by steps/step.js so a
+  // `compliance` prompt authored for task lists is not used inside a meal-plan build, and vice versa.
+  const system = await deps.systemPromptFor(def.subtype || "compliance", scope);
   const instructions = def.instructions || payload.query || "";
 
   // Optionally supplement with Mongo `regulations` RAG on the instructions, unless the handler

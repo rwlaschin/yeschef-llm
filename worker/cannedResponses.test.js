@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cannedResponse } from "./cannedResponses.js";
+import { parseWidgetSpec, validateWidget } from "./analyticsWidget.js";
 
 const CTX = { meals: ["breakfast", "lunch", "dinner"], days: 3 };
 // The exact nutrients contract — plan_library instruction + seed-recipes-nutrients.mjs.
@@ -648,4 +649,27 @@ test("nuts, dry beans, lentils and chickpeas are tagged protein", () => {
     .filter(([name, category]) => /\b(almonds?|walnuts?|pecans?|lentils?|chickpeas?|(?:black|kidney|pinto|navy|white|dry)\s+beans?)\b/i.test(name) && category !== "protein")
     .map(([name, category]) => `${name}:${category}`);
   assert.deepEqual(offenders, []);
+});
+
+// ── analytics_widget: one chart spec for one question, or an explicit refusal ────────────────
+test("analytics_widget emits a spec the validator accepts, matching the question's metric", () => {
+  const spec = parseWidgetSpec(cannedResponse("analytics_widget", { query: "How is take rate trending by site?" }));
+  assert.deepEqual(validateWidget(spec), []);
+  assert.equal(spec.metric, "takeRate");
+  assert.equal(spec.kind, "line");
+  assert.equal(spec.title, "How is take rate trending by site?");
+});
+
+test("analytics_widget refuses a question none of the metrics answer — no chart, no default", () => {
+  const out = cannedResponse("analytics_widget", { query: "who is on shift tomorrow" });
+  assert.equal(out.trim(), "CANNOT ANSWER");
+  assert.equal(parseWidgetSpec(out), null);
+  assert.notDeepEqual(validateWidget(parseWidgetSpec(out)), []);
+});
+
+test("analytics_widget is deterministic and truncates a long title to 60 chars", () => {
+  const q = `take rate ${"x".repeat(80)}`;
+  const a = cannedResponse("analytics_widget", { query: q });
+  assert.equal(a, cannedResponse("analytics_widget", { query: q }));
+  assert.equal(parseWidgetSpec(a).title.length, 60);
 });

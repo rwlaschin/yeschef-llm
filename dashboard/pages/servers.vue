@@ -482,7 +482,7 @@
             class="flex-1 min-h-0 overflow-y-auto p-3.5 font-mono text-xs surface-solid text-secondary rounded-lg space-y-1.5 select-text border border-divider"
           >
             <div v-for="(log, idx) in visibleDeviceLogs" :key="idx" class="leading-relaxed flex items-start gap-2.5">
-              <span class="text-muted text-[11px] shrink-0 tabular-nums">{{ log.time }}</span>
+              <span class="text-muted text-[11px] shrink-0 tabular-nums">{{ formatLogTimestamp(log.timestamp) }}</span>
               <span class="text-primary font-semibold text-[11px] shrink-0">[{{ log.device }}]</span>
               <span
                 class="text-[10px] px-1.5 py-0.2 rounded font-bold uppercase shrink-0"
@@ -573,7 +573,19 @@ const updateScreenSize = () => {
   }
 }
 
-const boxes = ref([])
+const DEFAULT_BOXES = ['001', '002', '003', '004'].map((name) => ({
+  name,
+  vm: `yc-ollama-${name}`,
+  status: 'STOPPED',
+  gpuPercent: null,
+  todayCost: 0,
+  todayCostFormatted: '$0.00',
+  vram: { usedGb: '0', percent: 0 },
+  models: [],
+  loadedModels: [],
+}))
+
+const boxes = ref(DEFAULT_BOXES)
 const auth = ref({ ok: true, account: null })
 const loading = ref(false)
 const stoppingAll = ref(false)
@@ -596,9 +608,24 @@ const deviceLogs = ref([])
 // Cloud Logging lines are kept apart from locally-emitted events; the cloud fetch used to
 // overwrite deviceLogs wholesale, silently erasing every start/progress line we had added.
 const cloudLogs = ref([])
+let logArrivalSequence = 0
+
+function normalizeLogTimestamp(value) {
+  const timestamp = typeof value === 'number' ? value : new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : Date.now()
+}
+
+function formatLogTimestamp(timestamp) {
+  const date = new Date(timestamp)
+  const today = new Date()
+  const time = date.toLocaleTimeString('en-US', { hour12: false })
+  if (date.toDateString() === today.toDateString()) return time
+  return `${date.toLocaleDateString('en-US')} ${time}`
+}
 
 // devbox.js phase names, in the user's words rather than the script's.
 const PHASE_LABEL = {
+  preflight: 'Checking access',
   hunting: 'Searching',
   created: 'Allocated',
   booting: 'Booting',
@@ -617,11 +644,10 @@ const modelOptions = computed(() => [...new Set((workers.value || []).map(w => w
 const defaultModel = computed(() =>
   modelOptions.value.find(m => m === 'llama3.1:8b') || modelOptions.value[0] || 'llama3.1:8b')
 const autoShutdown = ref({
-  'small': 15,
-  '001': 2,
+  '001': 5,
   '002': 5,
-  '003': 15,
-  '004': 0,
+  '003': 5,
+  '004': 5,
 })
 
 // STOPPING counts as active: the instance still exists and still bills until the delete lands, so
@@ -629,7 +655,8 @@ const autoShutdown = ref({
 const activeBoxes = computed(() => boxes.value.filter(b => b.status === 'RUNNING' || b.status === 'STARTING' || b.status === 'STOPPING' || actionState.value[b.name] === 'starting' || actionState.value[b.name] === 'stopping'))
 // Active rows always sort above stopped ones; ties keep name order.
 const sortedBoxes = computed(() => {
-  const isActive = (b) => activeBoxes.value.includes(b) ? 0 : 1
+  const activeNames = new Set(activeBoxes.value.map(b => b.name))
+  const isActive = (b) => activeNames.has(b.name) ? 0 : 1
   return [...boxes.value].sort((a, b) => isActive(a) - isActive(b) || a.name.localeCompare(b.name))
 })
 const activeCount = computed(() => activeBoxes.value.length)
@@ -637,6 +664,9 @@ const todayTotalFormatted = computed(() => {
   const sum = boxes.value.reduce((acc, b) => acc + (b.todayCost || 0), 0)
   return `$${sum.toFixed(2)}`
 })
+
+const timestamp_sequence_order = (a, b) =>
+  a.timestamp - b.timestamp || a.sequence - b.sequence
 
 const visibleDeviceLogs = computed(() => {
   return [...cloudLogs.value, ...deviceLogs.value].filter(l => {
@@ -646,7 +676,7 @@ const visibleDeviceLogs = computed(() => {
     if (logLevel.value === 'ERR' && l.level !== 'ERR') return false
     if (logFilter.value && !l.msg.toLowerCase().includes(logFilter.value.toLowerCase())) return false
     return true
-  })
+  }).sort(timestamp_sequence_order)
 })
 
 watch([visibleDeviceLogs, tailing, activeView], async () => {
@@ -660,12 +690,19 @@ watch([visibleDeviceLogs, tailing, activeView], async () => {
 let logStream = null
 
 function appendCloudLines(lines) {
+  const boxesByName = new Map(boxes.value.map(b => [String(b.name).padStart(3, '0'), b]))
   const parsed = lines
     .filter(l => l.module?.includes('gce') || l.msg?.includes('ollama') || l.msg?.includes('devbox') || l.msg?.includes('001') || l.msg?.includes('002'))
     .map(l => {
-      const matchedBox = boxes.value.find(b => l.msg.includes(b.name) || l.raw?.includes(b.name))
+      const boxMatch = `${l.msg || ''} ${l.raw || ''}`.match(/yc-ollama-\d{1,3}|devbox-\d{1,3}|\[\d{1,3}\]/)
+      const normalizedName = boxMatch?.[0]?.replace(/\D/g, '').padStart(3, '0')
+      const matchedBox = normalizedName ? boxesByName.get(normalizedName) : null
+      const timestamp = normalizeLogTimestamp(l.ts)
       return {
-        time: l.ts ? new Date(l.ts).toLocaleTimeString() : 'now',
+        ts: l.ts,
+        timestamp,
+        sequence: logArrivalSequence++,
+        time: new Date(timestamp).toLocaleTimeString('en-US', { hour12: false }),
         device: matchedBox ? matchedBox.name : '001',
         level: l.level >= 50 ? 'ERR' : l.level >= 40 ? 'WRN' : 'INF',
         msg: l.msg
@@ -705,7 +742,7 @@ function addScriptLine(l) {
   if (seenScriptLines.has(key)) return
   seenScriptLines.add(key)
   const lvl = /err|fatal|50|60/.test(String(l.level)) ? 'ERR' : /warn|40/.test(String(l.level)) ? 'WRN' : 'INF'
-  addDeviceLog(tag.slice(7), lvl, l.msg)
+  addDeviceLog(tag.slice(7), lvl, l.msg, l.ts)
 }
 
 async function openScriptStream() {
@@ -723,12 +760,13 @@ function closeScriptStream() {
   if (scriptStream) { scriptStream.close(); scriptStream = null }
 }
 
-function addDeviceLog(device, level, msg) {
-  const time = new Date().toLocaleTimeString('en-US', { hour12: false })
+function addDeviceLog(device, level, msg, sourceTimestamp = Date.now()) {
+  const timestamp = normalizeLogTimestamp(sourceTimestamp)
+  const time = new Date(timestamp).toLocaleTimeString('en-US', { hour12: false })
   // Avoid duplicate adjacent log entries
   const last = deviceLogs.value[deviceLogs.value.length - 1]
   if (last && last.device === device && last.msg === msg) return
-  deviceLogs.value.push({ time, device, level, msg })
+  deviceLogs.value.push({ time, timestamp: timestamp, sequence: logArrivalSequence++, device, level, msg })
   if (deviceLogs.value.length > 250) {
     deviceLogs.value.shift()
   }
@@ -736,6 +774,7 @@ function addDeviceLog(device, level, msg) {
 
 const lastProgressMsg = ref({})
 let inFlightFetch = false
+let queued = false
 
 // Live startup progress, pushed over SSE whenever the starter writes its state file.
 // Every open page gets the same events: zone rotation, stockouts, phase changes.
@@ -764,7 +803,8 @@ function applyProgress(state) {
         lastProgressMsg.value[box.name] = p.msg
         addDeviceLog(box.name, p.phase === 'failed' ? 'ERR' : 'INF', `[watchdog] ${p.msg}`)
       }
-      if (box.startupProgress) { box.startupProgress = null; fetchFleet() }
+      if (box.startupProgress) { box.startupProgress = null }
+      fetchFleet()
       continue
     }
     // 'pulling' is one blocking multi-minute exec with no writes — its TTL matches the pull.
@@ -808,7 +848,10 @@ function closeProgressStream() {
 let staleChase = null
 
 async function fetchFleet() {
-  if (inFlightFetch) return
+  if (inFlightFetch) {
+    queued = true
+    return
+  }
   inFlightFetch = true
   loading.value = true
   try {
@@ -819,12 +862,20 @@ async function fetchFleet() {
     if (res && res.ok) {
       if (res.workers) workers.value = res.workers
       if (res.boxes && res.boxes.length > 0) {
-        boxes.value = res.boxes.map(b => ({
-          ...b,
-          gpuPercent: b.gpuPercent ?? null,
-          todayCost: b.todayCost ?? 0,
-          todayCostFormatted: b.todayCostFormatted || ('$' + (b.todayCost ?? 0).toFixed(2))
-        }))
+        const previousByName = new Map(boxes.value.map(b => [b.name, b]))
+        boxes.value = res.boxes.map(b => {
+          const progress = previousByName.get(b.name)?.startupProgress
+          const ttl = progress?.phase === 'pulling' ? 35 * 60000 : 180000
+          const fresh = progress && !progress.cancelled && Date.now() - (progress.timestamp || 0) <= ttl
+          return {
+            ...b,
+            status: fresh && b.status === 'STOPPED' ? 'STARTING' : b.status,
+            startupProgress: fresh ? progress : null,
+            gpuPercent: b.gpuPercent ?? null,
+            todayCost: b.todayCost ?? 0,
+            todayCostFormatted: b.todayCostFormatted || ('$' + (b.todayCost ?? 0).toFixed(2))
+          }
+        })
         // Release the optimistic local 'starting' flag once server state has taken over, or after
         // 3 min (the same window readStartupState treats as stale) so a dead search can't stick.
         res.boxes.forEach(b => {
@@ -855,6 +906,10 @@ async function fetchFleet() {
   } finally {
     loading.value = false
     inFlightFetch = false
+    if (queued) {
+      queued = false
+      fetchFleet()
+    }
   }
 }
 
@@ -867,7 +922,7 @@ async function startBox(name) {
   }
   try {
     // Never 0 — that is the "Off" the dropdown no longer offers, and it ships a box with no watchdog.
-    const timeoutMinutes = autoShutdown.value[name] || 15
+    const timeoutMinutes = autoShutdown.value[name] || 5
     const model = selectedModel.value[name] ?? defaultModel.value
     addDeviceLog(name, 'INF', `[gcloud] Dispatched capacity search request for ${name} (${model}) to GCP backend…`)
     const res = await $fetch('/api/devbox', {

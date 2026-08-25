@@ -23,6 +23,37 @@ test("does NOT start when live boxes already cover the waiting work", () => {
   assert.match(d.why, /enough boxes/);
 });
 
+test("boundary analysis: a one-slot model starts a second box when two messages wait behind one live box", () => {
+  const d = decideForModel({ undelivered: 2, outstanding: 0, acked: 0, live: 1, parallel: 1, region: "us-central1" });
+  assert.equal(d.action, "start");
+});
+
+test("boundary analysis: a three-slot model does not start a second box for exactly three waiting messages", () => {
+  const d = decideForModel({ undelivered: 3, outstanding: 0, acked: 0, live: 1, parallel: 3, region: "us-central1" });
+  assert.equal(d.action, "none");
+});
+
+test("boundary analysis: a three-slot model starts a second box when a fourth message waits", () => {
+  const d = decideForModel({ undelivered: 4, outstanding: 0, acked: 0, live: 1, parallel: 3, region: "us-central1" });
+  assert.equal(d.action, "start");
+});
+
+test("domain analysis: reconcile passes each model's own capacity into its box decision", async () => {
+  const restore = silence();
+  try {
+    const started = [];
+    await reconcile({
+      models: [{ topic: "one_slot", parallel: 1 }, { topic: "three_slots", parallel: 3 }],
+      pickRegion: async () => "us-central1",
+      queue: async () => ({ sub: "sub_x", undelivered: 3, outstanding: 0, acked: 0 }),
+      boxes: async () => ({ live: 1, boxes: [{ instance: "url/live", action: "NONE" }] }),
+      start: async (model) => started.push(model),
+      stop: async () => { throw new Error("must not stop"); },
+    });
+    assert.deepEqual(started, ["one_slot"]);
+  } finally { restore(); }
+});
+
 test("caps concurrent boxes per model regardless of burst size", () => {
   const d = decideForModel({ undelivered: 50, outstanding: 0, acked: 0, live: MAX_BOXES_PER_MODEL, region: "us-west1" });
   assert.equal(d.action, "none", "a 50-message burst must not fan out past the cap");

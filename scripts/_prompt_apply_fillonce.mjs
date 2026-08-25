@@ -24,7 +24,7 @@ console.log(`--- CURRENT (len ${cur.content.length}) ---\n${cur.content}\n\n--- 
 
 if (!APPLY) { console.log("(dry run — pass --apply)"); await client.close(); process.exit(0); }
 
-writeFileSync(`db-backups/prompt_library.backup.pre-fillonce-20260615.json`, JSON.stringify(await coll.find({}).toArray(), null, 2));
+writeFileSync(`.backups/prompt_library.backup.pre-fillonce-20260615.json`, JSON.stringify(await coll.find({}).toArray(), null, 2));
 const res = await coll.updateOne({ _id: ID }, { $set: { content: NEW } });
 console.log(`backed up; updated matched=${res.matchedCount} modified=${res.modifiedCount}`);
 await client.close();

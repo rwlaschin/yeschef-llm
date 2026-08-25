@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { readFleetSnapshot } from '#devbox'
 import { devModels, subscriptionOf, parallelOf } from '#models'
-import { handleAuthGet } from './devbox/auth.get'
+import { handleAuthGet } from './devbox/auth.get.ts'
 
 // getFleetStatus makes ~6 blocking execSync gcloud calls. Running it in this handler saturates the
 // single Nitro worker and wedges the whole dashboard, so this route only ever READS a snapshot and
@@ -50,8 +50,24 @@ export default defineEventHandler(async () => {
   }))
 
   if (!snap) {
-    // First load before any snapshot exists: say so rather than pretending the fleet is empty.
-    return { ok: true, pending: true, auth, firewall: null, boxes: [], workers, ageMs: null }
+    const defaultBoxes = ['001', '002', '003', '004'].map((name) => ({
+      name,
+      vm: `yc-ollama-${name}`,
+      status: 'STOPPED',
+      machine: 'g2-standard-8',
+      gpuPercent: null,
+      vram: { usedGb: '0.0', totalGb: 24, percent: 0, formatted: '0.0 / 24 GB (0%)' },
+      todayCost: 0,
+      todayCostFormatted: '$0.00',
+      runCost: 0,
+      runCostFormatted: '$0.00',
+      upSeconds: 0,
+      serving: false,
+      startupProgress: null,
+      models: [],
+      loadedModels: [],
+    }))
+    return { ok: true, pending: true, auth, firewall: null, boxes: defaultBoxes, workers, ageMs: null }
   }
 
   return {

@@ -21,7 +21,7 @@
 // own idle self-delete (worker/idle-shutdown.js, same 60s, and it KNOWS its inFlight count) is what
 // clears the box. This reaper covers the case the worker cannot: a wedged or unreachable worker whose
 // queue is provably empty.
-import { MODELS, subscriptionOf, byTopic } from "../../../config/models.js";
+import { MODELS, subscriptionOf, byTopic, parallelOf } from "../../../config/models.js";
 import { startBox, releaseBox, liveBoxes, isProdLike } from "./actuate.js";
 import { adcToken, projectId } from "./regions.js";
 
@@ -108,8 +108,9 @@ export async function queueState(topic, windowMs = IDLE_GRACE_MS, read = metric,
 
 // Decide for ONE model. Pure given its inputs (injectable) so the policy is unit-testable without GCE
 // or Monitoring. Returns the action plus the numbers it saw, which the caller logs verbatim.
-export function decideForModel({ undelivered, outstanding, acked, waiting, live, region }) {
-  const seen = { undelivered, outstanding, acked, waiting, live };
+export function decideForModel({ undelivered, outstanding, acked, waiting, live, parallel = 1, region }) {
+  const requiredBoxes = undelivered == null ? null : Math.ceil(undelivered / parallel);
+  const seen = { undelivered, outstanding, acked, waiting, live, parallel, requiredBoxes };
   // Metric blind → fall back to the lag-free pull probe. Monitoring is 60–180s behind, so a just-published
   // message reads as `undelivered: null`, and declining to act there stranded exactly the message this
   // reconciler is meant to rescue.
@@ -127,8 +128,8 @@ export function decideForModel({ undelivered, outstanding, acked, waiting, live,
       seen,
     };
   }
-  if (undelivered > 0 && live < Math.min(undelivered, MAX_BOXES_PER_MODEL)) {
-    return { action: "start", why: `${undelivered} waiting, ${live} live`, seen, region };
+  if (undelivered > 0 && live < Math.min(requiredBoxes, MAX_BOXES_PER_MODEL)) {
+    return { action: "start", why: `${undelivered} waiting, ${live} live (${parallel}/box)`, seen, region };
   }
   if (undelivered > 0) return { action: "none", why: `${undelivered} waiting, ${live} live — enough boxes`, seen };
   if (live === 0) return { action: "none", why: "queue empty, no boxes", seen };
@@ -152,7 +153,10 @@ export async function reconcile(deps = {}) {
       // Inventory first: the probe is only worth its side effect when there is no box to take the work.
       const inv = await boxes(m.topic, region);
       const q = await queue(m.topic, undefined, undefined, undefined, (inv.live ?? 0) === 0);
-      const d = decideForModel({ ...q, live: inv.live ?? 0, region });
+      // Tests and one-off callers may inject a topic-only model stub; production MODELS always carry
+      // the explicit value. Resolve a canonical model by topic without creating another config source.
+      const capacityModel = m.parallel == null ? byTopic(m.topic) : m;
+      const d = decideForModel({ ...q, live: inv.live ?? 0, parallel: parallelOf(capacityModel), region });
       logDecide(m.topic, region, d.action, d.why, { ...d.seen, prod: isProdLike() });
       if (d.action === "start") await start(m.topic, region, undefined, `reconcile: ${d.why}`);
       if (d.action === "stop") {

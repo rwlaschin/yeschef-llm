@@ -1,4 +1,0 @@
-{
-  "_id": "6a774dee46da04360288571f",
-  "fail": "A course position on the list left with no row at all, a slot from the previous step left with no row, a row whose Dish is a sauce, gravy, dressing, dip, relish or condiment rather than a dish, an empty or uncategorized Components cell, a `name:category` pair written into the Protein/Starch/Vegetable/Fruit columns, courses invented for positions no course list asked for, or output that is not the pipe-delimited rows.\n\nBEFORE YOU STOP: reread the rows you just wrote, ONE ROW AT A TIME, against every Fail criterion above. THEN output the status block — @@::PASS::@@ or @@::FAIL:reason::@@ — ALONE on the final line. YOUR RESPONSE IS NOT FINISHED UNTIL THAT LINE IS WRITTEN."
-}

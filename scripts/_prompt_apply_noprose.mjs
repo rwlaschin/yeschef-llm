@@ -1,6 +1,6 @@
 // One-shot: harden the cross-subtype output-contract prompt (no tool-call JSON in message,
 // no preamble/closing chatter). Updates ONLY _id 6a2ce7b4a816493790ff1c02. Backed up first to
-// db-backups/. Usage (NODE_ENV=dev): node scripts/_prompt_apply_noprose.mjs [--apply]
+// .backups/. Usage (NODE_ENV=dev): node scripts/_prompt_apply_noprose.mjs [--apply]
 import { MongoClient, ObjectId } from "mongodb";
 import dotenvFlow from "dotenv-flow";
 dotenvFlow.config();

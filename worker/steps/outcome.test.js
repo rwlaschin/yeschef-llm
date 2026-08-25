@@ -58,6 +58,72 @@ test("splitOutcome: opening but dropped close → still pulled out (eat to end)"
   );
 });
 
+// --- splitOutcome: dual status-token contract ---
+
+test("splitOutcome: new PASS token returns the legacy result shape", () => {
+  assert.deepEqual(
+    splitOutcome("Here is the answer.\n\n@@::PASS;:&@"),
+    { status: "PASS", reason: "", thinking: "", clean: "Here is the answer." }
+  );
+});
+
+test("splitOutcome: new FAIL token returns its generated reason", () => {
+  assert.deepEqual(
+    splitOutcome("Some output.\n@@::FAIL:components column is empty;:&@"),
+    { status: "FAIL", reason: "components column is empty", thinking: "", clean: "Some output." }
+  );
+});
+
+test("splitOutcome: new status tokens are case-insensitive", () => {
+  assert.deepEqual(
+    splitOutcome("Answer.\n@@::fAiL:Wrong Diet;:&@"),
+    { status: "FAIL", reason: "Wrong Diet", thinking: "", clean: "Answer." }
+  );
+});
+
+test("splitOutcome: a bare new FAIL reports that no reason was given", () => {
+  assert.deepEqual(
+    splitOutcome("Some output.\n@@::FAIL;:&@"),
+    { status: "FAIL", reason: "no reason given", thinking: "", clean: "Some output." }
+  );
+});
+
+test("splitOutcome: new PASS with a dropped closing at-sign still uses fallback without inventing a reason", () => {
+  assert.deepEqual(
+    splitOutcome("Answer.\n@@::PASS;:&"),
+    { status: "PASS", reason: "", thinking: "", clean: "Answer." }
+  );
+});
+
+test("splitOutcome: new FAIL with its close dropped still uses fallback and keeps the reason", () => {
+  assert.deepEqual(
+    splitOutcome("Some output.\n@@::FAIL:wrong number of rows"),
+    { status: "FAIL", reason: "wrong number of rows", thinking: "", clean: "Some output." }
+  );
+});
+
+test("splitOutcome: ordinary new closing characters without a status are not a marker", () => {
+  const raw = "Use ;:&@ as an example delimiter, but do not report a status.";
+  assert.deepEqual(
+    splitOutcome(raw),
+    { status: null, reason: "", thinking: "", clean: raw }
+  );
+});
+
+test("splitOutcome: the first complete marker wins when new PASS precedes legacy FAIL", () => {
+  assert.deepEqual(
+    splitOutcome("Answer.\n@@::PASS;:&@\n@@::FAIL:later legacy marker::@@"),
+    { status: "PASS", reason: "", thinking: "", clean: "Answer." }
+  );
+});
+
+test("splitOutcome: the first complete marker wins when legacy FAIL precedes new PASS", () => {
+  assert.deepEqual(
+    splitOutcome("Answer.\n@@::FAIL:first legacy marker::@@\n@@::PASS;:&@"),
+    { status: "FAIL", reason: "first legacy marker", thinking: "", clean: "Answer." }
+  );
+});
+
 // --- visibleResponse: the streaming guarantee (no half-block ever leaks) ---
 
 test("visibleResponse: a buffer ending on a bare '@' withholds it", () => {
@@ -90,6 +156,38 @@ test("streaming sim: feeding chunk-by-chunk never reveals any part of the block"
     assert.ok(!/@$/.test(v), `leaked trailing '@' in: ${JSON.stringify(v)}`);
   }
   assert.deepEqual(splitOutcome(full), { status: "PASS", reason: "", thinking: "", clean: "The answer is 42." });
+});
+
+test("streaming sim: chunked new PASS never reveals marker bytes", () => {
+  const chunks = ["The ", "answer is 42.", "\n\n@", "@:", ":PA", "SS;", ":&", "@"];
+  let full = "";
+  for (const chunk of chunks) {
+    full += chunk;
+    const visible = visibleResponse(full);
+    assert.ok(!visible.includes("@@"), `leaked '@@' in: ${JSON.stringify(visible)}`);
+    assert.ok(!visible.includes(";:&@"), `leaked new close in: ${JSON.stringify(visible)}`);
+    assert.ok(!/@$/.test(visible), `leaked trailing '@' in: ${JSON.stringify(visible)}`);
+  }
+  assert.deepEqual(
+    splitOutcome(full),
+    { status: "PASS", reason: "", thinking: "", clean: "The answer is 42." }
+  );
+});
+
+test("streaming sim: chunked new FAIL never reveals marker bytes", () => {
+  const chunks = ["Invalid table.", "\n@", "@::F", "AIL:", "empty components", ";:", "&@"];
+  let full = "";
+  for (const chunk of chunks) {
+    full += chunk;
+    const visible = visibleResponse(full);
+    assert.ok(!visible.includes("@@"), `leaked '@@' in: ${JSON.stringify(visible)}`);
+    assert.ok(!visible.includes(";:&@"), `leaked new close in: ${JSON.stringify(visible)}`);
+    assert.ok(!/@$/.test(visible), `leaked trailing '@' in: ${JSON.stringify(visible)}`);
+  }
+  assert.deepEqual(
+    splitOutcome(full),
+    { status: "FAIL", reason: "empty components", thinking: "", clean: "Invalid table." }
+  );
 });
 
 // --- the THINKING block: working, not deliverable ---

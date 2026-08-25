@@ -26,7 +26,7 @@ import fastifyMultipart from "@fastify/multipart";
 import { lazy } from "./lib/lazy.js";
 import { requireAuth } from "./lib/auth.js";
 import { validateBody } from "./lib/validate.js";
-import { menuSchema, planSchema, querySchema, stepsWriteSchema, jobIdSchema } from "./entry/ai/schemas.js";
+import { menuSchema, planSchema, querySchema, tquerySchema, stepsWriteSchema, jobIdSchema } from "./entry/ai/schemas.js";
 
 if (!getApps().length) initializeApp(); // ADC on Cloud Run
 
@@ -93,6 +93,11 @@ ai.addHook("preHandler", requireAuth);
 ai.post("/plan", { preHandler: validateBody(planSchema) }, lazy(() => import(`./entry/ai/plan.js`), "post"));    // UI/YesChef launch a plan
 ai.post("/menu", { preHandler: validateBody(menuSchema) }, lazy(() => import(`./entry/ai/menu.js`), "post"));    // UI: compose a Menu Plan (no planner) → run step 0
 ai.post("/query", { preHandler: validateBody(querySchema) }, lazy(() => import(`./entry/ai/query.js`), "post"));  // UI chat copilot: single-shot query
+// Caller-composed TASK LIST through the orchestrator. Identity from the verified token (never the
+// body), every subtype checked against SUBTYPES, launch via {action:"start"} on `orchestrate`.
+// NOT in auth.js's PUBLIC set — a token is required.
+ai.post("/tquery", { preHandler: validateBody(tquerySchema) }, lazy(() => import(`./entry/ai/tquery.js`), "post"));
+ai.get("/tquery/:jobId", lazy(() => import(`./entry/ai/tquery.js`), "get"));   // poll + GATE the answer
 ai.get("/steps", lazy(() => import(`./entry/ai/steps.js`), "list"));   // Step Library list (Mongo plan_library)
 ai.post("/steps", { preHandler: validateBody(stepsWriteSchema) }, lazy(() => import(`./entry/ai/steps.js`), "post"));  // Step Library writes (Mongo plan_library)
 // Re-run an EXISTING plan without re-running the planner (hard-deletes the right run range,

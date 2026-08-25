@@ -1,7 +1,7 @@
 // One-shot: put output STYLE into the DB.
 //  1) model_config `_styles` doc  → the style→temperature map (dashboard-editable; code is fallback).
 //  2) plan_library step defs       → add `style: "structured"` where absent (the per-step selector).
-// Backs up BOTH collections to db-backups/ first. Usage (NODE_ENV=dev): node scripts/_add_style.mjs [--apply]
+// Backs up BOTH collections to .backups/ first. Usage (NODE_ENV=dev): node scripts/_add_style.mjs [--apply]
 import { MongoClient } from "mongodb";
 import { writeFileSync } from "fs";
 import dotenvFlow from "dotenv-flow";
@@ -29,9 +29,9 @@ for (const d of missingStyle) console.log(`  + ${d._id}  ${d.name ?? d.subtype ?
 if (!APPLY) { console.log("\n(dry run — pass --apply)"); await client.close(); process.exit(0); }
 
 // --- backups ---
-writeFileSync(`db-backups/model_config.backup.${STAMP}.json`, JSON.stringify(await modelCfg.find({}).toArray(), null, 2));
-writeFileSync(`db-backups/plan_library.backup.${STAMP}.json`, JSON.stringify(planDocs, null, 2));
-console.log(`\nbacked up model_config + plan_library → db-backups/*.${STAMP}.json`);
+writeFileSync(`.backups/model_config.backup.${STAMP}.json`, JSON.stringify(await modelCfg.find({}).toArray(), null, 2));
+writeFileSync(`.backups/plan_library.backup.${STAMP}.json`, JSON.stringify(planDocs, null, 2));
+console.log(`\nbacked up model_config + plan_library → .backups/*.${STAMP}.json`);
 
 // --- writes ---
 const now = new Date();

@@ -1,15 +1,9 @@
 // THE DECLARED FLEET. config/devboxes.json is the single source of truth for which GPU devboxes may
 // exist and what every name derived from one is; this module is its only reader on the ESM side.
-// ecosystem.devbox.config.cjs reads the JSON directly because pm2 require()s it as CommonJS and this
-// repo is "type": "module" — JSON is the one form both halves read with no build step and no second
-// list to drift.
-//
-// PURE, like config/regions.js: no Mongo, no GCP, no dotenv, so a pm2 config load and a CLI both pay
-// a file read and nothing else.
+// PURE, like config/regions.js: no Mongo, no GCP, no dotenv; callers pay one file read.
 //
 // A box's name is 001..004 and NOTHING ELSE. The names are validated here rather than at the moment
-// `create` is typed, because a box created under a name nobody declared is invisible to pm2 and bills
-// unattended — which is what happened on 2026-08-14.
+// `create` is typed, because a box created under a name nobody declared can bill unattended.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 

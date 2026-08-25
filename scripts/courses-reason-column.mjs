@@ -12,7 +12,7 @@
 // CONTENT (what belongs in the cell) is per-step. Order keys put them where the Why block was —
 // "f" < "f1" < "m" (the status contract), and systemPromptFor sorts mapping values as plain strings.
 //
-// BACKS UP plan_library + prompt_library to scripts/backups/ before writing.
+// BACKS UP plan_library + prompt_library to .backups/ before writing.
 //   node scripts/courses-reason-column.mjs           # dry run
 //   node scripts/courses-reason-column.mjs --commit
 import fs from "fs";
@@ -102,7 +102,7 @@ try {
 
   if (!COMMIT) { console.log("\nDRY RUN — nothing written. Re-run with --commit."); }
   else {
-    const dir = path.join(process.cwd(), "scripts", "backups");
+    const dir = path.join(process.cwd(), ".backups");
     fs.mkdirSync(dir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const backup = path.join(dir, `courses-reason-column-backup-${stamp}.json`);

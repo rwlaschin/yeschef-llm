@@ -72,7 +72,7 @@ async function gen(i) {
       });
       break;
     } catch (e) {
-      if (attempt) die(`cannot reach ${HOST} (${e.cause?.message || e.message}) — start a box first: node scripts/devbox.js start 001`);
+      if (attempt) die(`cannot reach ${HOST} (${e.cause?.message || e.message}) — start a box first: node dashboard/server/utils/devbox.js start 001`);
       await new Promise((r) => setTimeout(r, 5000));
     }
   }

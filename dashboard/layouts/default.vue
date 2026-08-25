@@ -201,6 +201,7 @@ const groups = [
   { label: 'Queries', items: [
     { to: '/', label: 'Requests' },
     { to: '/menu', label: 'Menu Plans' },
+    { to: '/tasks', label: 'Task Lists' },
   ] },
   { label: 'Configs', items: [
     { to: '/plan-library', label: 'Plans' },

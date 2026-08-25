@@ -16,7 +16,7 @@
 //   node scripts/prompt-patch.mjs --list
 //   node scripts/prompt-patch.mjs --id <_id> --field instruction --anchor-file a.txt --replace-file b.txt
 //   node scripts/prompt-patch.mjs ... --commit
-//   node scripts/prompt-patch.mjs --restore scripts/backups/<file>.json
+//   node scripts/prompt-patch.mjs --restore .backups/<file>.json
 import dotenvFlow from "dotenv-flow"; dotenvFlow.config({ node_env: "dev" });
 import { MongoClient, ObjectId } from "mongodb";
 import fs from "node:fs";
@@ -24,7 +24,7 @@ import path from "node:path";
 
 const arg = (k, d) => { const i = process.argv.indexOf(`--${k}`); const v = i > -1 ? process.argv[i + 1] : undefined; return v === undefined || v.startsWith("--") ? d : v; };
 const has = (k) => process.argv.includes(`--${k}`);
-const BACKUP_DIR = "scripts/backups";
+const BACKUP_DIR = ".backups";
 const COLLECTIONS = ["plan_library", "prompt_library"];
 
 const die = (m) => { console.error(`REFUSING: ${m}`); process.exit(1); };

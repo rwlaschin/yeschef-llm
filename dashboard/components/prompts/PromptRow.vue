@@ -37,6 +37,8 @@
       <span v-if="p.name" class="text-secondary">{{ p.name }}</span>
       <span v-else class="text-muted italic">unnamed · {{ String(p._id).slice(-6) }}</span>
       <span class="text-muted"> — </span>{{ Object.keys(p.mapping || {}).sort().join(' · ') || 'unassigned' }}
+      <!-- Meal-plans-only is the default and the overwhelming majority, so it gets no chip. -->
+      <span v-if="scopeLabel" class="ml-2 text-[11px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">{{ scopeLabel }}</span>
     </div>
 
     <!-- full prompt, shown verbatim (whitespace + indentation preserved) -->
@@ -47,8 +49,9 @@
 <script setup>
 import { PencilSquareIcon, TrashIcon } from '@heroicons/vue/24/outline'
 import Toggle from '~/components/Toggle.vue'
+import { PROMPT_SCOPES, inScope } from '~/utils/assemblePrompt'
 
-defineProps({
+const props = defineProps({
   p: { type: Object, required: true },
   type: { type: String, required: true },
   section: { type: String, default: null },   // null in flat/unassigned views
@@ -59,6 +62,15 @@ defineProps({
   overId: { type: String, default: null },
 })
 defineEmits(['dragstart', 'dragend', 'over', 'drop', 'edit', 'delete', 'toggleActive'])
+
+// Asked through the WORKER's `inScope`, never by reading `scopes` directly — an absent field is
+// meal-plans-only, so a chip derived from the raw array would call those prompts unrestricted.
+// Serving BOTH is the interesting case here: everything unscoped is meal-plan, so labelling that
+// on ~36 rows is noise, while a task-list prompt has to be visible without opening the editor.
+const scopeLabel = computed(() => {
+  const scopes = PROMPT_SCOPES.filter((s) => inScope(props.p, s))
+  return scopes.length === PROMPT_SCOPES.length ? 'both pipelines' : scopes[0] === 'task_list' ? 'task lists only' : ''
+})
 </script>
 
 <style scoped>

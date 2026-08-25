@@ -3,7 +3,7 @@
 // (e.g. "Simple Truth Organic® 2% Reduced Fat Milk") resolve to the recipe ingredient(s) it
 // fulfills ("milk") so a menu can price against it via FULFILLS.
 //
-// Idempotent (upsert by name); BACKS UP prompt_library to scripts/backups/ before writing.
+// Idempotent (upsert by name); BACKS UP prompt_library to .backups/ before writing.
 // First blush — the LLM knows food, so we don't hand it a vocabulary. Tune the content later.
 //
 //   node scripts/seed-ingredient-normalizer.mjs
@@ -72,7 +72,7 @@ try {
   const db = client.db(dbName);
 
   const promptLib = await db.collection("prompt_library").find({}).toArray();
-  const dir = path.join(process.cwd(), "scripts", "backups");
+  const dir = path.join(process.cwd(), ".backups");
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const backup = path.join(dir, `ingredient-normalizer-seed-backup-${stamp}.json`);

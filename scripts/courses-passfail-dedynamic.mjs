@@ -75,7 +75,7 @@ try {
 
   if (!COMMIT) { console.log("\nDRY RUN — nothing written. Re-run with --commit."); }
   else {
-    const dir = path.join(process.cwd(), "scripts", "backups");
+    const dir = path.join(process.cwd(), ".backups");
     fs.mkdirSync(dir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const backup = path.join(dir, `courses-passfail-backup-${stamp}.json`);

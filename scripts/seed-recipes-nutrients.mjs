@@ -1,7 +1,7 @@
 // One-off seed: add the `recipes` + `nutrients` plan steps + their system prompts to
 // Mongo so the build can compose a one-step recipes/nutrients plan (mirrors the
 // protein_grid seed). Idempotent (upsert by name); BACKS UP plan_library +
-// prompt_library to scripts/backups/ before writing.
+// prompt_library to .backups/ before writing.
 //
 //   node scripts/seed-recipes-nutrients.mjs
 import { MongoClient } from "mongodb";
@@ -264,7 +264,7 @@ try {
   // ── BACK UP first (unrecoverable otherwise) ──
   const planLib = await db.collection("plan_library").find({}).toArray();
   const promptLib = await db.collection("prompt_library").find({}).toArray();
-  const dir = path.join(process.cwd(), "scripts", "backups");
+  const dir = path.join(process.cwd(), ".backups");
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const backup = path.join(dir, `recipes-nutrients-seed-backup-${stamp}.json`);

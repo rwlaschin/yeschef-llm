@@ -46,6 +46,18 @@
       </div>
     </div>
 
+    <!-- Which pipeline may use this prompt. The subtype above says WHAT the step does; this says
+         which kind of job it may be assembled into, so one subtype serves both without being split
+         in two. THREE choices, not two checkboxes: an empty setting is read as meal-plans-only by
+         the worker (that is what every prompt predating this field is), so an author who cleared
+         both boxes would be silently choosing meal plans — the control must not allow that state. -->
+    <div class="mb-5 max-w-md">
+      <label class="block text-sm text-secondary mb-1">Use in</label>
+      <select v-model="scope" class="w-full form-input text-sm">
+        <option v-for="c in SCOPE_CHOICES" :key="c.value" :value="c.value">{{ c.label }}</option>
+      </select>
+    </div>
+
     <!-- name: optional, purely so a fragment can be referred to by something other than its _id -->
     <div class="mb-5 max-w-md">
       <label class="block text-sm text-secondary mb-1">Name <span class="text-muted">· optional</span></label>
@@ -95,7 +107,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import Toggle from '~/components/Toggle.vue'
-import { RELATES_TO, SYSTEM, SECTION_DESCRIPTION } from '~/utils/assemblePrompt'
+import { RELATES_TO, SYSTEM, SECTION_DESCRIPTION, SCOPE_CHOICES, PROMPT_SCOPES, inScope } from '~/utils/assemblePrompt'
 
 const props = defineProps({
   prompt: { type: Object, required: true },
@@ -120,6 +132,12 @@ const filteredTypes = computed(() => {
   return q ? props.availableTypes.filter((t) => t.toLowerCase().includes(q)) : props.availableTypes
 })
 
+// Seeded through the WORKER's own `inScope`, so what the select shows is what the worker will do
+// with this doc — including the absent-field case, which resolves to meal-plans-only, not "both".
+const inMenu = inScope(props.prompt, 'menu_plan')
+const inTask = inScope(props.prompt, 'task_list')
+const scope = ref(inMenu && inTask ? 'both' : inTask ? 'task_list' : 'menu_plan')
+
 const toggle = (t) => {
   const i = selected.value.indexOf(t)
   if (i >= 0) selected.value.splice(i, 1)
@@ -138,6 +156,9 @@ const onSave = () => {
     // does not fail — it silently saves the default, discarding whatever the author chose.
     name: form.value.name || '',
     relatesTo: form.value.relatesTo || SYSTEM,
+    // Always EXPLICIT — never []. The three writable values are the only ones the reader can
+    // distinguish; an empty array would come back as meal-plans-only whatever the author picked.
+    scopes: scope.value === 'both' ? [...PROMPT_SCOPES] : [scope.value],
     types: selected.value, // page builds mapping from these; deselected types are dropped (order cleared)
   })
 }

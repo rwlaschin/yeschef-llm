@@ -1,6 +1,53 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { STYLE_TEMPS, DEFAULT_STYLE, temperatureForStyle } from "./models.js";
+import { MODELS, STYLE_TEMPS, DEFAULT_STYLE, parallelOf, temperatureForStyle } from "./models.js";
+
+test("equivalence partition: every configured model explicitly declares its generation capacity", () => {
+  assert.deepEqual(
+    MODELS.map(({ topic, parallel }) => ({ topic, parallel })),
+    [
+      { topic: "llama3_1_8b_v1", parallel: 3 },
+      { topic: "llama3_3_70b_v1", parallel: 1 },
+      { topic: "gemma4_12b_v1", parallel: 1 },
+      { topic: "qwen3_5_9b_v1", parallel: 1 },
+      { topic: "openclaw_gemma4_12b_v1", parallel: 1 },
+      { topic: "openclaw_llama3_1_8b_v1", parallel: 1 },
+      { topic: "openclaw_llama3_3_70b_v1", parallel: 1 },
+    ],
+  );
+});
+
+test("boundary analysis: a model may explicitly own the minimum capacity of one", () => {
+  assert.equal(parallelOf({ topic: "one_slot", parallel: 1 }), 1);
+});
+
+test("equivalence partition: a model may explicitly own a multi-slot capacity", () => {
+  assert.equal(parallelOf({ topic: "three_slots", parallel: 3 }), 3);
+});
+
+test("boundary analysis: rejects zero model capacity instead of inventing a default", () => {
+  assert.throws(() => parallelOf({ topic: "zero_slots", parallel: 0 }), /parallel/i);
+});
+
+test("equivalence partition: rejects negative model capacity", () => {
+  assert.throws(() => parallelOf({ topic: "negative_slots", parallel: -1 }), /parallel/i);
+});
+
+test("equivalence partition: rejects fractional model capacity", () => {
+  assert.throws(() => parallelOf({ topic: "fractional_slots", parallel: 1.5 }), /parallel/i);
+});
+
+test("equivalence partition: rejects numeric-string model capacity", () => {
+  assert.throws(() => parallelOf({ topic: "string_slots", parallel: "3" }), /parallel/i);
+});
+
+test("equivalence partition: rejects missing model capacity", () => {
+  assert.throws(() => parallelOf({ topic: "missing_slots" }), /parallel/i);
+});
+
+test("equivalence partition: rejects a missing model", () => {
+  assert.throws(() => parallelOf(undefined), /parallel/i);
+});
 
 test("each style maps to its temperature (code fallback)", () => {
   assert.equal(temperatureForStyle("structured"), 0.1);

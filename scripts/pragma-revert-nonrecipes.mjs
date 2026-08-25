@@ -24,7 +24,7 @@ const COMMIT = process.argv.includes("--commit");
 const KEEP = new Set(["Recipes system", "Build Recipes"]);   // the recipes rules — stay relaxed
 const FIELD = { prompt_library: "content", plan_library: "instruction" };
 
-const dir = path.join(process.cwd(), "scripts", "backups");
+const dir = path.join(process.cwd(), ".backups");
 const file = fs.readdirSync(dir).filter((f) => f.startsWith("pragma-allow-override-backup-")).sort().pop();
 if (!file) { console.error("no pragma-allow-override backup found"); process.exit(1); }
 const backup = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));

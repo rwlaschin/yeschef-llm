@@ -1,12 +1,11 @@
 // ============================================================
 // Dev - local emulation of the PROD execution model, for the dev-capable models.
 //
-//   Pub/Sub emulator + the /ai orchestrator. The model workers are the baremetal pm2
-//   apps (`b-*`, ecosystem.devbox.config.cjs), each already draining its own subscription.
+//   Pub/Sub emulator + the /ai orchestrator. Model workers are started separately.
 //
 //   The Docker path — a "waker" that docker-starts each model's pre-baked image, mirroring
 //   the GCE MIG autoscaler — is still here behind `--only=workers`. It is NOT part of the
-//   default because a container and a `b-*` listener on the SAME subscription are two
+//   default because two workers on the SAME subscription are two
 //   subscribers on one queue: Pub/Sub splits messages between them, so a job lands on
 //   whichever grabbed it first. Start one or the other, never both.
 //
@@ -28,7 +27,7 @@ import fs from "fs";
 import { renderDockerfile } from "../docker/render.js";
 import { setup as setupPubSub } from "./setup-pubsub.js";
 import { killEmulators } from "./kill-emulators.js";
-import { devModels, subscriptionOf, imageOf, containerOf, FAKE_SUBSCRIPTION } from "../config/models.js";
+import { devModels, subscriptionOf, imageOf, containerOf, FAKE_SUBSCRIPTION, parallelOf } from "../config/models.js";
 
 dotenvFlow.config();
 
@@ -47,9 +46,8 @@ if (!["all", "ai", "workers", "fake"].includes(ONLY)) {
   throw new Error(`--only must be ai|fake|workers|all, got "${ONLY}"`);
 }
 const RUN_AI = ONLY === "all" || ONLY === "ai";
-// Docker workers are OPT-IN, never part of the default: the `b-*` pm2 apps
-// (ecosystem.devbox.config.cjs) already drain every dev model's subscription. A container
-// and a `b-*` listener on one subscription are two subscribers on one queue — Pub/Sub
+// Docker workers are OPT-IN, never part of the default. Two workers on one subscription are
+// two subscribers on one queue — Pub/Sub
 // splits the messages between them, so each job lands on whichever grabbed it first.
 const RUN_WORKERS = ONLY === "workers";
 
@@ -103,6 +101,7 @@ const DEV_MODELS = selectedModels()
     model: m.model,
     topic: m.topic,
     subscription: subscriptionOf(m),
+    parallel: parallelOf(m),
     gateway: m.gateway || "",
   }))
   .sort((a, b) => (b.model === "llama3.1:8b") - (a.model === "llama3.1:8b"));
@@ -240,9 +239,8 @@ function buildDockerfileVars(m) {
     name: m.name,
     model: m.model,
     gpu: 1,
-    // ENV-sourced (dotenv-flow: .env.dev → .env), not hard-coded. Changing the value in
-    // .env.dev changes the recipe hash → the image auto-rebuilds on next `npm run dev:workers`.
-    parallel: process.env.OLLAMA_NUM_PARALLEL || 2,
+    // Derived from config/models.js and transported to the worker as OLLAMA_NUM_PARALLEL.
+    parallel: parallelOf(m),
     maxQueue: process.env.OLLAMA_MAX_QUEUE || 5,
     subscription: m.subscription,
     gateway: m.gateway || "",
@@ -412,8 +410,7 @@ async function main() {
     console.log(`  Pub/Sub Emulator : ${PUBSUB_EMULATOR_HOST}`);
     console.log(`  Orchestrator /ai : ${AI_BASE_URL}`);
     console.log(`  Firestore        : PROD (${process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID})`);
-    console.log("  Model workers    : the baremetal pm2 apps (`pm2 ls` → the `b-*` entries).");
-    console.log("  (Docker workers are opt-in — `npm run dev:workers` — and must not run alongside them.)\n");
+    console.log("  Model workers    : start separately, or use `npm run dev:workers`.");
     return;
   }
 

@@ -4,7 +4,7 @@
 // (`Build Protein Grid`, lex order A vs B) was never handed in, and the recipes prompt rendered its
 // pool from an empty list. Every unit then invented proteins or failed.
 //
-// BACKS UP plan_library + prompt_library to scripts/backups/ before writing, same as
+// BACKS UP plan_library + prompt_library to .backups/ before writing, same as
 // scripts/seed-protein-grid.mjs. Prints the exact before/after of every field it touches.
 //
 //   node scripts/wire-recipes-proteins.mjs           # dry run, writes nothing
@@ -57,7 +57,7 @@ try {
     console.log("DRY RUN — nothing written. Re-run with --commit to apply.");
   } else {
     const promptLib = await db.collection("prompt_library").find({}).toArray();
-    const dir = path.join(process.cwd(), "scripts", "backups");
+    const dir = path.join(process.cwd(), ".backups");
     fs.mkdirSync(dir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const backup = path.join(dir, `plan_library-${stamp}.json`);

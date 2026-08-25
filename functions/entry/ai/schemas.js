@@ -95,6 +95,37 @@ export const querySchema = {
   },
 };
 
+// /tquery — a caller-composed TASK LIST. Deliberately NARROWER than querySchema: there is no
+// userId/companyId here at all (identity comes from the verified token, so accepting the fields
+// would only invite a caller to think they set them), and `type` is not a caller concern.
+// tquery.js re-checks every subtype against SUBTYPES — maxLength alone is not the guard.
+export const tquerySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["tasks"],
+  properties: {
+    tasks: {
+      type: "array",
+      minItems: 1,
+      maxItems: 20,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        // `subtype` is OPTIONAL: omitted means `task`, the general case for a task list. A caller
+        // opts IN to a specialized agent kind (tquery.js DEFAULT_SUBTYPE).
+        required: ["query"],
+        properties: {
+          subtype: { type: "string", maxLength: 64 },
+          query:   { type: "string", maxLength: 20000 },
+          style:   { type: "string", maxLength: 64 },
+        },
+      },
+    },
+    fake:  { type: "boolean" },   // ignored in production (isProdLike) — see tquery.js
+    model: { type: "string", maxLength: 128 },  // topic override; resolveTopic validates it
+  },
+};
+
 export const stepsWriteSchema = {
   type: "object",
   additionalProperties: false,

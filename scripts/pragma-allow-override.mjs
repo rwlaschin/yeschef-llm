@@ -82,7 +82,7 @@ try {
   if (!plan.length) { console.log("\nnothing to do."); }
   else if (!COMMIT) { console.log("\nDRY RUN — nothing written. Re-run with --commit."); }
   else {
-    const dir = path.join(process.cwd(), "scripts", "backups");
+    const dir = path.join(process.cwd(), ".backups");
     fs.mkdirSync(dir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const file = path.join(dir, `pragma-allow-override-backup-${stamp}.json`);

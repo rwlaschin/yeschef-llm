@@ -46,7 +46,7 @@ try {
 
   if (!COMMIT) { console.log("\nDRY RUN — nothing written. Re-run with --commit."); }
   else {
-    const dir = path.join(process.cwd(), "scripts", "backups");
+    const dir = path.join(process.cwd(), ".backups");
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, `courses-pragma-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
     fs.writeFileSync(file, JSON.stringify({ prompt_library: all }, null, 2));

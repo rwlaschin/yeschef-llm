@@ -170,9 +170,9 @@ const IMAGES_ALL = MODELS.map((m) => ({
   diskGb: m.diskGb,
   dev: m.dev,         // true = also runs in dev; false = prod-only (build on Cloud Build)
   gateway: m.gateway || null,
-  // ENV-sourced (dotenv-flow: .env.production → .env), DEFAULTS fallback. Feeds BOTH the baked
-  // Dockerfile ENV (renderDockerfile) and the runtime `docker run -e` in the VM startup script.
-  parallel: process.env.OLLAMA_NUM_PARALLEL || parallelOf(m),
+  // The model owns its generation capacity. This derived value is baked into the image and passed
+  // to the runtime container as OLLAMA_NUM_PARALLEL; no deploy environment can override it.
+  parallel: parallelOf(m),
   maxQueue: process.env.OLLAMA_MAX_QUEUE || DEFAULTS.maxQueue,
 }));
 // Deploy every GPU model except OpenClaw (Llama 3.3 70B) — held back for now. deployFake (the
@@ -396,7 +396,7 @@ export function createProgress(names, { enabled }) {
 
 // Autoscale a MIG on its Pub/Sub subscription backlog: 0 → maxReplicas, full scale-in after a 60s
 // window. `singleInstanceAssignment` = how many undelivered messages one instance covers; set it to
-// the worker's concurrency (OLLAMA_NUM_PARALLEL) so the autoscaler provisions 1 box per N messages,
+// the model's declared concurrency so the autoscaler provisions 1 box per N messages,
 // NOT 1 box per message (the old =1 over-provisioned by the concurrency factor). SHARED by the GPU
 // tiers AND the fake tier so their scaling policy can't drift.
 function setMigAutoscaling({ mig, region, subscription, maxReplicas, singleInstanceAssignment = 1 }) {

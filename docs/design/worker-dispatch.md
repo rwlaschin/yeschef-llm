@@ -163,10 +163,10 @@ Unit slot: `llmResults/{job}/steps/{unit}` → `{ status, response, attempt, out
 - **Postconditions.** All enqueued units are eventually processed; at no point does any single process hold a lease/token whose loss would strand capacity.
 - **Basic Course of Events.**
   1. The orchestrator publishes one message per fanout unit to the model's topic.
-  2. Each live worker instance is subscribed with Pub/Sub flow control `maxMessages` (1 in dev, 2 in prod by default, tunable via `MAX_CONCURRENCY`) — it only pulls what it's configured to run at once.
-  3. Within a single instance, `handleMessage` additionally acquires the in-process `genGate` semaphore (sized to `OLLAMA_NUM_PARALLEL`, the Ollama server's actual run-slot count) before starting generation, so a redelivery or dev-emulator over-delivery can't run more concurrent generations than Ollama has slots — the excess queues in-process while its Pub/Sub lease auto-extends.
+  2. Each live worker instance subscribes with Pub/Sub flow control `maxMessages` derived from that model's `parallel` declaration in `config/models.js`, so it only leases what it is configured to run at once.
+  3. Within a single instance, `handleMessage` additionally acquires the in-process `genGate` semaphore. Its runtime `OLLAMA_NUM_PARALLEL` value is derived from the same model declaration, so a redelivery or emulator over-delivery cannot run more concurrent generations than Ollama has slots.
   4. Units beyond what the live fleet can currently pull simply sit unacked in the subscription's backlog — this backlog *is* the queue; no separate queueing system exists.
-  5. The MIG autoscaler observes backlog depth and adds worker instances; newly-started instances subscribe and begin pulling from the same backlog.
+  5. The MIG autoscaler observes backlog depth and sizes required boxes as `ceil(backlog / model.parallel)`, bounded by the fleet ceiling; newly-started instances subscribe and begin pulling from the same backlog.
   6. As units complete (Use Case 1's terminal-write flow), the backlog drains; the autoscaler can then scale instances back down.
 - **Alternate Flows.** Nobody sets an explicit "max N concurrent units" for the fleet — total concurrency is just however many instances are alive multiplied by each instance's `maxMessages`/`genGate` limit, an emergent property rather than an enforced one.
 - **Exceptions.** If a worker instance is terminated (scale-in, host maintenance, or crash) while holding leased-but-unacked messages, nothing is stranded: Pub/Sub redelivers those messages to the remaining fleet exactly as in Use Case 1 — there is no separate capacity-accounting state to reconcile on instance loss.

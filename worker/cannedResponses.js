@@ -7,6 +7,7 @@
 // (no block → success).
 import { FAKE_TOPIC } from "../config/models.js";
 import { COMPONENT_CATEGORIES } from "./recipeTemplate.js";
+import { WIDGET_REFUSAL } from "./analyticsWidget.js";
 
 // The PLANNER dispatched to the fake worker (type="planner", no subtype) must return a VALID plan —
 // a YAML step list build.js can parse — not the generic stub. Emit ONE step routed back to the fake
@@ -967,7 +968,28 @@ function cannedNutrients(payload = {}) {
   return lines.join("\n");
 }
 
+// ONE chart spec for ONE typed question — the analytics ask box (yeschef /analytics). Emits the
+// exact contract in worker/analyticsWidget.js, byte for byte, so the app's parser reads the fake
+// and the real answer identically. A question that names none of the metrics we hold gets the
+// refusal line, exactly as the prompt tells the model to answer: the panel must be able to say
+// "I can't answer that" rather than draw an unrelated chart.
+const WIDGET_RULES = [
+  { re: /take[ -]?rate|uptake|acceptance/i, metric: "takeRate", kind: "line" },
+  { re: /diet|renal|pureed|plant|allergen/i, metric: "dietBreakdown", kind: "donut" },
+  { re: /ingredient|lbs|pound|produce/i, metric: "ingredientsLbs", kind: "bar" },
+  { re: /meal|served|cover|breakfast|lunch|dinner/i, metric: "mealsServed", kind: "stack" },
+];
+
+function cannedAnalyticsWidget(payload = {}) {
+  const q = String(payload?.query || "").trim();
+  const hit = WIDGET_RULES.find((r) => r.re.test(q));
+  if (!hit) return WIDGET_REFUSAL;
+  const title = q.length > 60 ? `${q.slice(0, 59)}…` : q || "Kitchen figures";
+  return ["```yaml", `title: ${title}`, `metric: ${hit.metric}`, `kind: ${hit.kind}`, "```"].join("\n");
+}
+
 const BY_SUBTYPE = {
+  analytics_widget: cannedAnalyticsWidget,
   planner:      cannedPlanner,
   compliance:   cannedCompliance,
   menu_plan:    cannedMenuPlan,
@@ -976,6 +998,10 @@ const BY_SUBTYPE = {
   recipes:      cannedRecipes,
   courses:      cannedCourses,
   recipe_detail:  cannedRecipeDetail,
+  // "Ask Remy, replace this dish" answers in the recipe-detail format (one DISH block, read by
+  // parseReplacementDish), so the detail fake IS the fake: with no fan-out row it emits the
+  // catalogue entrée. A generic stub here would reach the panel unparseable.
+  replace_dish:   cannedRecipeDetail,
   nutrients:    cannedNutrients,
   protein_dietary_categorization: cannedProteinCategories,
 };

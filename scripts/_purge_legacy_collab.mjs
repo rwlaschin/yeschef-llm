@@ -28,8 +28,8 @@ console.log(`total legacy items: ${total}`);
 
 if (!APPLY) { console.log("\n(dry run — pass --apply to back up + recursiveDelete)"); process.exit(0); }
 
-writeFileSync(`db-backups/legacy-collab.backup.20260624.json`, JSON.stringify(backup, null, 2));
-console.log(`\nbacked up → db-backups/legacy-collab.backup.20260624.json`);
+writeFileSync(`.backups/legacy-collab.backup.20260624.json`, JSON.stringify(backup, null, 2));
+console.log(`\nbacked up → .backups/legacy-collab.backup.20260624.json`);
 for (const c of COLLS) { await db.recursiveDelete(db.collection(c)); console.log(`recursiveDelete ${c} ✓`); }
 console.log("done.");
 process.exit(0);

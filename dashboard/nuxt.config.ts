@@ -14,6 +14,8 @@ export default defineNuxtConfig({
   // Alias keeps the import clean + refactor-safe instead of a brittle ../../../../ path.
   alias: {
     "#models": fileURLToPath(new URL("../config/models.js", import.meta.url)),
+    // THE chart renderer — spec + rows → savable SVG string. Same shelf, same reason as #models.
+    "#svg-chart": fileURLToPath(new URL("../config/svgChart.js", import.meta.url)),
     // Menu Plan workflow registry (pure: registry + composer, no admin/pubsub) — single source
     // shared with the /ai/menu endpoint so the form's fields can't drift from what composes.
     "#menu-plan": fileURLToPath(new URL("../functions/entry/ai/menu-plan.js", import.meta.url)),
@@ -22,7 +24,8 @@ export default defineNuxtConfig({
     // the path when it bundles into .nuxt/dev, and the import then fails at RUNTIME with
     // "Cannot find module '/Users/<you>/config/promptSections.js'".
     "#prompt-sections": fileURLToPath(new URL("../config/promptSections.js", import.meta.url)),
-    "#devbox": fileURLToPath(new URL("../scripts/devbox.js", import.meta.url)),
+    // Same Nitro-rewrite trap as #prompt-sections — devbox.js is a server util.
+    "#devboxes": fileURLToPath(new URL("../config/devboxes.js", import.meta.url)),
   },
   // The model registry lives outside the dashboard root, so Nitro doesn't hot-reload
   // it by default — label/model edits wouldn't show until a manual restart. Watch it
@@ -31,8 +34,16 @@ export default defineNuxtConfig({
     fileURLToPath(new URL("../config/models.js", import.meta.url)),
     fileURLToPath(new URL("../functions/entry/ai/menu-plan.js", import.meta.url)),
     fileURLToPath(new URL("../config/promptSections.js", import.meta.url)),
-    fileURLToPath(new URL("../scripts/devbox.js", import.meta.url)),
   ],
+  // NOT SOURCE — never watch. chokidar v4+ (Nuxt/Nitro) dropped its fsevents backend, so every
+  // watched file and directory costs ONE open fd. Measured: 232 of dash's 743 fds were held on
+  // .codegraph (a regenerated index) and .backups (4.2 MB of dumps) — 31% of the total, and
+  // a dev-server restart every time either changed. `watch:` above reaches into ../scripts for
+  // devbox.js alone; without this, the whole tree comes with it.
+  ignore: ["**/.codegraph/**", "**/.backups/**"],
+  watchers: {
+    chokidar: { ignored: [/[\\/]\.codegraph[\\/]/, /[\\/]\.backups[\\/]/] },
+  },
   css: ["~/assets/css/main.css"],
   modules: [
     ["@nuxtjs/tailwindcss", {}],
@@ -42,9 +53,14 @@ export default defineNuxtConfig({
     optimizeDeps: {
       exclude: ["nuxt"],
     },
+    server: {
+      hmr: { clientPort: 3200 },
+      watch: { ignored: ["**/.codegraph/**", "**/.backups/**"] },
+    },
   },
   nitro: {
     compatibilityDate: '2026-05-28',
+    watchOptions: { ignored: ["**/.codegraph/**", "**/.backups/**"] },
     prerender: {
       crawlLinks: false,
     },

@@ -201,7 +201,7 @@ const savePrompt = async (data) => {
       // keep current order for types the prompt already had; append new ones
       mapping[type] = existing[type] != null ? String(existing[type]) : endOrderForType(type)
     }
-    const body = { active: data.active, content: data.content, mapping, modelOverride: data.modelOverride ?? null, name: data.name ?? '', relatesTo: data.relatesTo ?? 'system' }
+    const body = { active: data.active, content: data.content, mapping, modelOverride: data.modelOverride ?? null, name: data.name ?? '', relatesTo: data.relatesTo ?? 'system', scopes: data.scopes }
     const isEdit = !!data._id
     await $fetch(isEdit ? `/api/admin/prompt?id=${data._id}` : '/api/admin/prompt', {
       method: isEdit ? 'PUT' : 'POST',
@@ -218,7 +218,7 @@ const savePrompt = async (data) => {
 }
 
 const persist = (p) =>
-  $fetch(`/api/admin/prompt?id=${p._id}`, { method: 'PUT', body: { active: p.active, content: p.content, mapping: p.mapping, modelOverride: p.modelOverride ?? null, name: p.name ?? '', relatesTo: p.relatesTo ?? 'system' } })
+  $fetch(`/api/admin/prompt?id=${p._id}`, { method: 'PUT', body: { active: p.active, content: p.content, mapping: p.mapping, modelOverride: p.modelOverride ?? null, name: p.name ?? '', relatesTo: p.relatesTo ?? 'system', ...(p.scopes === undefined ? {} : { scopes: p.scopes }) } })
 
 // A drag writes the order key. A drag that CROSSED a section also writes `relatesTo` — moving a
 // fragment to a different part of the assembled prompt is the same gesture as reordering it.

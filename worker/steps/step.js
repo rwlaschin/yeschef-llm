@@ -5,7 +5,7 @@
 
 import { section, joinSections } from "./prompt.js";
 import { unitDocId } from "../../config/models.js";
-import { assembleFor } from "../lib/assemble.js";
+import { assembleFor, scopeOfJobType } from "../lib/assemble.js";
 
 // ---- Chat message assembly --------------------------------------------------
 // Build chat messages from a system prompt (+ optional RAG context) and the user content.
@@ -39,8 +39,12 @@ export async function loadStep(payload, deps) {
   const db = deps.getFirestoreClient();
   const jobDoc = db.collection("llmResults").doc(payload.jobId);
   const jobSnap = await jobDoc.get();
-  const plan = (jobSnap.exists ? jobSnap.data().plan : null) || [];
+  const job = jobSnap.exists ? jobSnap.data() : {};
+  const plan = job.plan || [];
   const def = plan[payload.step] || {};
+  // The job doc is ALREADY read here, so the pipeline scope needs no new field in the Pub/Sub
+  // message: `type` is on the doc ("tquery" for a task list, "plan"/"meal_plan" for a build).
+  const scope = scopeOfJobType(job.type);
 
   const ctxBlocks = [];
   const item = Array.isArray(def.items) ? def.items[payload.unit] : null;
@@ -78,14 +82,14 @@ export async function loadStep(payload, deps) {
     const text = runs.docs.filter((d) => !d.data().isDeleted).map((d) => d.data().response).filter(Boolean).join("\n\n");
     if (text) ctxBlocks.push(`# Result of step ${idx}:\n${text}`);
   }
-  return { def, ctxBlocks };
+  return { def, ctxBlocks, scope };
 }
 
 // Generic step builder + subtype dispatch. A step routes by its `subtype` to a specialized
 // builder (deps.subtypeBuilders[subtype], e.g. compliance) if one is registered; otherwise it
 // uses the generic assembly: the subtype's system prompt + (instructions + prior-step contexts).
 export async function buildStepMessages(payload, context, deps) {
-  const { def, ctxBlocks } = await loadStep(payload, deps);
+  const { def, ctxBlocks, scope } = await loadStep(payload, deps);
 
   // Fan-out individuation: a step that runs once-per-item carries a per-unit prompt array (def.units,
   // built by compose). Hand THIS unit (payload.unit) its own rendered instruction. Without this every
@@ -114,7 +118,7 @@ export async function buildStepMessages(payload, context, deps) {
   );
 
   const sub = deps.subtypeBuilders?.[def.subtype];
-  if (sub) return sub({ payload, def, ctxBlocks, context, deps });
+  if (sub) return sub({ payload, def, ctxBlocks, context, deps, scope });
 
   // Fragment placement (lib/assemble.js). A fragment with a `relatesTo` is substituted into the
   // marker of that name INSIDE the instruction; the rest stay in the system prompt. An instruction
@@ -126,8 +130,12 @@ export async function buildStepMessages(payload, context, deps) {
   // "{leading} shipped verbatim". (It did exactly that once — deps had no getPrompts and the
   // markers went out whole.) With no getPrompts the fragments still come from systemPromptFor, so
   // the system message is unchanged.
-  const placed = assembleFor(deps.getPrompts ? await deps.getPrompts() : [], type, def.instructions);
-  const system = deps.getPrompts ? placed.system : await deps.systemPromptFor(type);
+  // `scope` narrows the prompt library to this job's PIPELINE, so `compliance` (or `query`, or
+  // `task`) can carry different text in a task list than in a meal-plan build without forking the
+  // subtype. An unscoped prompt is a menu_plan prompt (config/promptSections.js inScope), so every
+  // existing meal-plan job resolves exactly the prompts it resolved before.
+  const placed = assembleFor(deps.getPrompts ? await deps.getPrompts() : [], type, def.instructions, { scope });
+  const system = deps.getPrompts ? placed.system : await deps.systemPromptFor(type, scope);
 
   // "# Instructions" + the already-labeled prior-step results. (Removed the "# Step type" note —
   // it injected the engine term "fan-out", which the model has no concept of, and was untested.)

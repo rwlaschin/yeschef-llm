@@ -18,7 +18,7 @@ const flags = (argv) => {
   return { ONLY, ai: eval(`((ONLY) => (${expr("RUN_AI")}))`)(ONLY), workers: eval(`((ONLY) => (${expr("RUN_WORKERS")}))`)(ONLY) };
 };
 
-// THE CONTRACT. The `b-*` pm2 apps already drain every dev model's subscription; a Docker worker on
+// THE CONTRACT. A separately started model worker may already drain a dev model's subscription; a Docker worker on
 // the same subscription is a second subscriber on one queue, and Pub/Sub would split jobs between
 // them. So the Docker half is opt-in — nothing but an explicit --only=workers may turn it on.
 test("a plain `npm run dev` does NOT start the Docker workers", () => {

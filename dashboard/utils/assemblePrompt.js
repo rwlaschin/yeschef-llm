@@ -10,6 +10,23 @@ import { assembleFor, SYSTEM, SECTIONS, RELATES_TO, MARKER, SECTION_DESCRIPTION,
 
 export { SYSTEM, SECTIONS, RELATES_TO, MARKER, SECTION_DESCRIPTION, withMarkers }
 
+// Which PIPELINE a prompt fragment serves. VOCABULARY AND SEMANTICS COME FROM #prompt-sections —
+// the same `inScope` the worker filters with. Do not re-derive either here: a second copy is exactly
+// how this shipped backwards once (a dashboard that stored "both" as [] against a reader for which
+// []/absent means menu_plan ONLY, silently dropping the task-list half).
+// Absent/empty = menu_plan only, because every prompt that predates the field is a meal-plan prompt.
+export { PROMPT_SCOPES, inScope, scopeOfJobType, normalizeScopes } from '#prompt-sections'
+
+// Plain-language labels for the three states an author may choose. `both` is not a stored value —
+// it writes ["menu_plan","task_list"] — but it is the only honest way to offer the choice, since
+// "nothing selected" reads back as meal-plans-only rather than as no restriction.
+export const SCOPE_CHOICES = [
+  { value: 'menu_plan', label: 'Meal plans only' },
+  { value: 'task_list', label: 'Task lists only' },
+  { value: 'both',      label: 'Both meal plans and task lists' },
+]
+export const SCOPE_LABEL = { menu_plan: 'Meal plans', task_list: 'Task lists' }
+
 // `includeInactive` mirrors the worker's INCLUDE_INACTIVE (dev loads inactive prompts too, prod
 // doesn't). It DEFAULTS TO FALSE here so the preview shows what production would actually send —
 // an inactive fragment appearing in the preview is how a safety rule looks present while being

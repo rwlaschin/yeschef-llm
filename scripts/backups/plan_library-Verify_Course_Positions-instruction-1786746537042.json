@@ -1,9 +1,0 @@
-{
-  "_id": "6a7e6f6adff6312de744477a",
-  "coll": "plan_library",
-  "name": "Verify Course Positions",
-  "field": "instruction",
-  "before": "# REQUIRED POSITIONS\n\n{{courseListNoEntree}}\n\nThat list is COMPLETE — it names every position this table may contain.\n\n## STEP 1 — EVERY POSITION HAS A ROW\nTake each position on the list IN ORDER. Count the rows whose Kind is that position.\n  0 rows  → DEFECT: name that position.\n  1+ rows → OK. More than one is CORRECT, never a fault.\n\n## STEP 2 — EVERY ROW BELONGS TO A POSITION\nTake each row of the table IN ORDER. Read its Kind, then look for that exact word on the list above.\n  found     → OK.\n  not found → DEFECT: name that Kind.\n\n# TABLE TO CHECK",
-  "after": "# REQUIRED POSITIONS\n\n{{join (without (keys courseCounts) \"entree\") \", \"}}\n\nThat list is COMPLETE — it names every position this table may contain.\n\n## STEP 1 — EVERY POSITION HAS A ROW\nTake each position on the list IN ORDER. Count the rows whose Kind is that position.\n  0 rows  → DEFECT: name that position.\n  1+ rows → OK. More than one is CORRECT, never a fault.\n\n## STEP 2 — EVERY ROW BELONGS TO A POSITION\nTake each row of the table IN ORDER. Read its Kind, then look for that exact word on the list above.\n  found     → OK.\n  not found → DEFECT: name that Kind.\n\n# TABLE TO CHECK",
-  "takenAt": "2026-08-14T22:28:57.042Z"
-}

@@ -26,4 +26,8 @@ export {
   withMarkers,
   fragmentsFor,
   assembleFor,
+  PROMPT_SCOPES,
+  inScope,
+  scopeOfJobType,
+  normalizeScopes,
 } from "../../config/promptSections.js";

@@ -21,6 +21,7 @@
     "dev:workers:8b": "cross-env NODE_ENV=dev DEV_QUICK=1 node scripts/dev.js --only=workers",
     "kill:emulators": "node scripts/kill-emulators.js",
     "test": "node --test \"worker/**/*.test.js\" \"functions/**/*.test.js\" \"scripts/**/*.test.js\" \"config/**/*.test.js\"",
+    "test:orchestrator": "node --experimental-test-module-mocks --test \"functions/**/*.mocktest.js\"",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-exclude=\"**/*.test.js\" --test-coverage-lines=90 --test-coverage-functions=80 --test-coverage-branches=60 \"worker/**/*.test.js\"",
     "deploy": "node scripts/deploy-all.js",
     "deploy:workers": "cross-env NODE_ENV=production node scripts/deploy.js",
@@ -47,6 +48,7 @@
     "dev:worker:native": "cross-env NODE_ENV=dev node scripts/worker-native.mjs"
   },
   "dependencies": {
+    "@google-cloud/compute": "^7.1.0",
     "@google-cloud/pubsub": "^4.0.0",
     "cross-env": "^7.0.3",
     "dotenv-flow": "^4.1.0",

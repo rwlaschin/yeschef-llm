@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const tmpDir = resolve(ROOT, "../tmp");
@@ -35,7 +35,7 @@ globalThis.createError = (opts) => {
 const GET_PATH = join(ROOT, "../dashboard/server/api/devbox.get.ts");
 const POST_PATH = join(ROOT, "../dashboard/server/api/devbox.post.ts");
 const AUTH_PATH = join(ROOT, "../dashboard/server/api/devbox/auth.get.ts");
-const DEVBOX_PATH = join(ROOT, "devbox.js");
+const DEVBOX_PATH = join(ROOT, "..", "dashboard", "server", "utils", "devbox.js");
 
 test("Rule 1: File Loading & Dynamic Import — devbox API routes can be imported cleanly", async () => {
   const getMod = await import(GET_PATH);
@@ -77,6 +77,13 @@ test("Rule 2: Function Execution — devbox.post handler dispatches actions with
   await assert.rejects(async () => {
     await postMod.default({});
   }, /Unknown action/);
+});
+
+test("Regression: dashboard starts the CLI wrapper that consumes passed options", () => {
+  const source = readFileSync(POST_PATH, "utf8");
+  assert.match(source, /scripts\/devbox\.js/);
+  assert.doesNotMatch(source, /new URL\('\.\.\/utils\/devbox\.js'/);
+  assert.match(source, /`--timeout=\$\{timeoutMinutes\}`/);
 });
 
 test("Rule 2: Function Execution — devbox/auth.get handler executes cleanly", async () => {

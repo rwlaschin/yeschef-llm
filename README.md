@@ -72,4 +72,5 @@ See `.env.dev` (local) and `.env.production` (prod). Layering via `dotenv-flow`:
 | `MONGO_DB` | Database name |
 | `MONGO_COLLECTION` | Regulations collection |
 | `OLLAMA_MODEL` | Model to load |
-| `OLLAMA_NUM_PARALLEL` | Concurrency (2 for single GPU) |
+Worker concurrency is declared per model as `parallel` in `config/models.js`. Deployment and dev
+derive the runtime `OLLAMA_NUM_PARALLEL` transport value from that model declaration.

@@ -131,6 +131,7 @@ The worker's own prompt cache/load layer (assembly by subtype from these entries
 {
   "_id": "ObjectId",
   "mapping": { "<type>": "<priority>" },
+  "scopes": ["menu_plan", "task_list"],
   "active": true,
   "content": "the prompt text, exactly as authored",
   "modelOverride": null,
@@ -140,6 +141,18 @@ The worker's own prompt cache/load layer (assembly by subtype from these entries
 }
 ```
 `mapping` is how an entry attaches to one or more request `type`s (with a priority, for when more than one entry maps to the same type). `modelOverride: null` means "use the request's model" — a non-null value pins this prompt's step to a specific model regardless of what the request asked for (used by the planner override in [[plan-orchestration]]).
+
+### `scopes` — which pipeline a prompt applies to
+
+`scopes` narrows an entry to one PIPELINE: `"menu_plan"` (a meal-plan build), `"task_list"` (a `/ai/tquery` task list), or both. It exists so **one subtype can serve both pipelines with different prompt text** — a `compliance` step inside a meal-plan build and a `compliance` step inside a task list need different instructions, and forking the subtype (`compliance_menu`, `compliance_task`) would be a subtype explosion that the planner menu, `MESSAGE_TYPES`, and every stored `mapping` would then have to carry. The subtype stays one name; the *prompt* carries the scope.
+
+It is a flat array, not a second level inside `mapping`, because `mapping[<type>]` is a lexBetween **order key** and must stay one — and a prompt's order within a type does not differ per pipeline.
+
+**Absent or empty `scopes` means `menu_plan`.** Every entry authored before this field existed is a meal-plan prompt (task lists had no prompts at all: `task` and `analytics_widget` map zero), so reading absent as "menu_plan" is what makes this need **no backfill and no migration**. Reading it as "both" would pour the entire meal-plan library into every task list; reading it as "neither" would silently empty the meal-plan pipeline.
+
+The vocabulary and both decisions live in `config/promptSections.js` beside `normalizeRelatesTo`, for the same reason: `PROMPT_SCOPES`, `inScope(prompt, scope)` (read side), `scopeOfJobType(jobType)` (`"tquery"` → `task_list`, everything else → `menu_plan`), and `normalizeScopes(value)` (the one decision about what may reach the database — the dashboard's two write handlers call it instead of holding their own copy).
+
+The worker learns the scope from the **job doc's `type`**, which `worker/steps/step.js` `loadStep` already reads — so no new field rides in the Pub/Sub message. It is then passed to `fragmentsFor`/`assembleFor` (`{ scope }`), to `systemPromptFor(type, scope)`, and on to any subtype builder. Callers that pass no scope (the dashboard's `GET /api/llm/system-prompt` preview, a direct `/ai/query`, the planner) are unfiltered, exactly as before.
 
 ## Use Cases
 

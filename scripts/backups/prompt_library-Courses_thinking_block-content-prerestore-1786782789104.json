@@ -1,8 +1,0 @@
-{
-  "_id": "6a7fa15a6c8125895e0d27f9",
-  "coll": "prompt_library",
-  "name": "Courses thinking block",
-  "field": "content",
-  "before": "Your response is three things, in this order: your working, then the table, then the status block on the last line by itself.\n\nYour working goes between these two markers, exactly as written:\n--- THINKING START ---\n--- THINKING END ---\nBetween them, count out the rows this call needs, one line at a time, position by position, using the position names and counts you were given above — never a name from an example. For each position: write one line per row as you commit to it, then a line confirming that position is complete before you move to the next. Then read the plan’s diet list once, left to right, and stop at the last name on it. Take each name in turn: if a row you already wrote for this position names that diet, write nothing and take the next name; otherwise write ONE row that diet can eat, then take the next name. When you have taken the last name, this position is finished. What you write there is working, not the deliverable.\n",
-  "takenAt": "2026-08-15T08:33:09.104Z"
-}

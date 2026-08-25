@@ -1,7 +1,7 @@
 import { getCollection } from '../../utils/db'
 // #prompt-sections, not a relative path: Nitro rewrites relative paths into .nuxt/dev and the
 // import fails at runtime. Same reason #models exists (nuxt.config.ts).
-import { normalizeRelatesTo } from '#prompt-sections'
+import { normalizeRelatesTo, normalizeScopes } from '#prompt-sections'
 import { ObjectId } from 'mongodb'
 
 // Update a prompt_library entry by ?id=.
@@ -28,6 +28,9 @@ export default defineEventHandler(async (event) => {
     if (body?.name !== undefined) update.name = typeof body.name === 'string' ? body.name.trim() : ''
     // Unrecognised placement → the system message, which is what assembly does with it anyway.
     if (body?.relatesTo !== undefined) update.relatesTo = normalizeRelatesTo(body.relatesTo)
+    // Only touched when the caller actually sends it, so a drag-reorder or an active toggle can
+    // never rewrite the scope. null (nothing valid sent) reads back as menu_plan, like an absent field.
+    if (body?.scopes !== undefined) update.scopes = normalizeScopes(body.scopes)
     await collection.updateOne({ _id: objectId }, { $set: update })
     return await collection.findOne({ _id: objectId })
   } catch (error: any) {

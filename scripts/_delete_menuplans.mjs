@@ -1,6 +1,6 @@
 // One-shot: back up + recursiveDelete the LEGACY top-level Firestore `menuPlans` collection
 // (orphaned pre-company-scoping). Does NOT touch companies/{cid}/menuPlans (a different path).
-// Backs up every doc (+ any subcollection docs) to db-backups/ before deleting.
+// Backs up every doc (+ any subcollection docs) to .backups/ before deleting.
 // Usage (NODE_ENV=dev): node scripts/_delete_menuplans.mjs [--apply]
 import { initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
@@ -33,7 +33,7 @@ for (const b of backup) console.log(`  - ${b.id}${Object.keys(b.subcollections).
 if (!snap.size) { console.log("nothing to delete."); process.exit(0); }
 if (!APPLY) { console.log("\n(dry run — pass --apply to back up + delete)"); process.exit(0); }
 
-const file = `db-backups/firestore-menuPlans-top-level.backup.${STAMP}.json`;
+const file = `.backups/firestore-menuPlans-top-level.backup.${STAMP}.json`;
 writeFileSync(file, JSON.stringify(backup, null, 2));
 console.log(`\nbacked up → ${file}`);
 

@@ -9,7 +9,10 @@
 // needs a migration, not a greener test.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { SYSTEM, SECTIONS, RELATES_TO, MARKER, MARKER_PATTERN, withMarkers, normalizeRelatesTo, assembleFor } from "./promptSections.js";
+import {
+  SYSTEM, SECTIONS, RELATES_TO, MARKER, MARKER_PATTERN, withMarkers, normalizeRelatesTo, assembleFor,
+  fragmentsFor, PROMPT_SCOPES, inScope, scopeOfJobType, normalizeScopes,
+} from "./promptSections.js";
 
 test("the section names are exactly these, in this order", () => {
   assert.deepEqual(SECTIONS, ["leading", "trailing", "conditions", "pass", "fail"]);
@@ -77,4 +80,77 @@ test("empty parts render as empty, never as the string 'undefined'", () => {
   const out = withMarkers(undefined, null, "");
   assert.ok(!out.includes("undefined"));
   assert.ok(!out.includes("null"));
+});
+
+// ---- Scope: which pipeline a prompt belongs to -------------------------------------------------
+// The whole point is subtype REUSE (one `compliance`, two prompt docs) instead of a subtype
+// explosion, so these assert the two halves that make that safe: the pipeline split works, and
+// nothing already in Mongo changes behaviour.
+test("PROMPT_SCOPES is the two pipelines, and nothing else", () => {
+  assert.deepEqual(PROMPT_SCOPES, ["menu_plan", "task_list"]);
+});
+
+test("BACKWARD COMPAT: an UNSCOPED prompt still applies to menu_plan", () => {
+  // Every prompt doc in Mongo today has no `scopes`. None of them may drop out of the meal-plan
+  // pipeline — that is the whole prompt library.
+  for (const legacy of [{ mapping: { recipes: "a" } }, { mapping: { recipes: "a" }, scopes: null },
+                        { mapping: { recipes: "a" }, scopes: [] }, { mapping: { recipes: "a" }, scopes: "menu_plan" }]) {
+    assert.equal(inScope(legacy, "menu_plan"), true, `unscoped prompt dropped: ${JSON.stringify(legacy)}`);
+  }
+});
+
+test("an UNSCOPED prompt does NOT leak into task_list", () => {
+  // Reading absent as "both" would pour the entire meal-plan library into every task list.
+  assert.equal(inScope({ mapping: { recipes: "a" } }, "task_list"), false);
+});
+
+test("an explicitly scoped prompt applies only where it says", () => {
+  assert.equal(inScope({ scopes: ["task_list"] }, "task_list"), true);
+  assert.equal(inScope({ scopes: ["task_list"] }, "menu_plan"), false);
+  assert.equal(inScope({ scopes: ["menu_plan"] }, "menu_plan"), true);
+  assert.equal(inScope({ scopes: ["menu_plan"] }, "task_list"), false);
+  for (const s of PROMPT_SCOPES) assert.equal(inScope({ scopes: [...PROMPT_SCOPES] }, s), true);
+});
+
+test("scopeOfJobType: only tquery is a task list; everything else is menu_plan", () => {
+  assert.equal(scopeOfJobType("tquery"), "task_list");
+  for (const t of ["plan", "meal_plan", undefined, null, "", "something-new"]) {
+    assert.equal(scopeOfJobType(t), "menu_plan", `job type ${JSON.stringify(t)} must not lose its prompts`);
+  }
+});
+
+test("normalizeScopes drops junk and stores null rather than an empty list", () => {
+  assert.deepEqual(normalizeScopes(["task_list", "menu_plan"]), ["menu_plan", "task_list"]); // canonical order
+  assert.deepEqual(normalizeScopes(["task_list", "task_list"]), ["task_list"]);              // deduped
+  assert.deepEqual(normalizeScopes(["task_list", "nonsense"]), ["task_list"]);
+  for (const v of [[], ["nonsense"], null, undefined, "task_list", 7]) assert.equal(normalizeScopes(v), null);
+  // null reads back as menu_plan, which is what the legacy docs already do.
+  assert.equal(inScope({ scopes: normalizeScopes([]) }, "menu_plan"), true);
+});
+
+// ---- fragmentsFor honours scope --------------------------------------------------------------
+const SCOPED = [
+  { mapping: { compliance: "a" }, content: "LEGACY UNSCOPED", active: true },
+  { mapping: { compliance: "b" }, content: "MENU ONLY", scopes: ["menu_plan"], active: true },
+  { mapping: { compliance: "c" }, content: "TASK ONLY", scopes: ["task_list"], active: true },
+  { mapping: { compliance: "d" }, content: "BOTH", scopes: ["menu_plan", "task_list"], active: true },
+];
+const contents = (scope) => fragmentsFor(SCOPED, "compliance", { scope }).map((f) => f.content);
+
+test("fragmentsFor with NO scope filters nothing — every pre-existing caller is unchanged", () => {
+  assert.deepEqual(contents(undefined), ["LEGACY UNSCOPED", "MENU ONLY", "TASK ONLY", "BOTH"]);
+});
+
+test("fragmentsFor(scope: menu_plan) keeps the legacy prompts and drops the task-list-only one", () => {
+  assert.deepEqual(contents("menu_plan"), ["LEGACY UNSCOPED", "MENU ONLY", "BOTH"]);
+});
+
+test("fragmentsFor(scope: task_list) sees ONLY prompts that opted in", () => {
+  assert.deepEqual(contents("task_list"), ["TASK ONLY", "BOTH"]);
+});
+
+test("scope filtering does not disturb the lexBetween order key sort", () => {
+  const shuffled = [SCOPED[3], SCOPED[0], SCOPED[2], SCOPED[1]];
+  assert.deepEqual(fragmentsFor(shuffled, "compliance", { scope: "menu_plan" }).map((f) => f.content),
+    ["LEGACY UNSCOPED", "MENU ONLY", "BOTH"]);
 });
