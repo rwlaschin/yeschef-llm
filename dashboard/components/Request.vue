@@ -1,7 +1,7 @@
 <template>
   <div class="flex gap-4 h-screen">
     <!-- Left Panel: Request History -->
-    <div class="w-64 panel backdrop-blur-md p-4 overflow-y-auto flex flex-col min-h-0">
+    <div class="w-64 panel backdrop-blur-md p-4 overflow-y-auto flex flex-col min-h-0" @scroll.passive="onHistoryScroll">
       <!-- New request + the plan/not-plan filter share ONE row — the filter gets no row of its own. -->
       <div class="mb-3 flex items-center gap-1.5">
         <button
@@ -605,10 +605,26 @@ const resultsCollection = () => useRuntimeConfig().public.firestoreCollectionRes
 let historyUnsub = null
 let docUnsub = null
 
+const HISTORY_PAGE = 50
+const historyLimit = ref(HISTORY_PAGE)
+const historyHasMore = ref(false)
+
+// Infinite scroll: grow the live listener's window. One extra doc per page tells us
+// whether more exist without a count query.
+const onHistoryScroll = (e) => {
+  if (!historyHasMore.value) return
+  const el = e.target
+  if (el.scrollHeight - el.scrollTop - el.clientHeight > 200) return
+  historyHasMore.value = false
+  historyLimit.value += HISTORY_PAGE
+  startHistory()
+}
+
 const startHistory = () => {
   // Show optimistic items immediately (survives reload), then reconcile with Firestore.
-  activeRequests.value = loadLocal()
-  const q = query(collection(getDb(), resultsCollection()), orderBy('createdAt', 'desc'), limit(50))
+  if (!historyUnsub) activeRequests.value = loadLocal()
+  else historyUnsub()
+  const q = query(collection(getDb(), resultsCollection()), orderBy('createdAt', 'desc'), limit(historyLimit.value + 1))
   historyUnsub = onSnapshot(
     q,
     (snap) => {
@@ -616,7 +632,8 @@ const startHistory = () => {
       // record is the only place the ORIGINAL selection lives, so it always wins over
       // whatever unrelated `type` the backend happens to store on the job doc.
       const localByJobId = new Map(loadLocal().map((l) => [l.jobId, l]))
-      const remote = snap.docs.map((d) => {
+      historyHasMore.value = snap.docs.length > historyLimit.value
+      const remote = snap.docs.slice(0, historyLimit.value).map((d) => {
         const x = d.data()
         const jobId = x.jobId || d.id
         return {

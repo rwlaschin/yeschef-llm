@@ -83,3 +83,30 @@ test("Regression: an existing firewall keeps prior operators when adding the cur
 
   assert.deepEqual(patches, [["198.51.100.1/32", "203.0.113.2/32"]]);
 });
+
+// THE REAL FAILURE, 2026-09-01: \`start 001\` printed "us-west1-a: CREATED" and waited 10 minutes for
+// Ollama on a VM that was never allocated. GCE finished the insert operation DONE carrying an L4
+// STOCKOUT error, and a DONE-with-error operation RESOLVES rather than rejecting — so wait() saw no
+// throw. createInstance MUST surface it, or startDevbox never reaches its stockout branch.
+test("Domain analysis: an operation that finishes DONE carrying an error is thrown, not reported as success", async () => {
+  const adapter = createComputeAdapter({
+    projectId: "yeschef-test",
+    instancesClient: { async insert() { return [{ name: "operation-1787-stockout", async promise() {} }]; } },
+    firewallsClient: {},
+    ZoneOperationsClient: class {
+      async wait({ operation }) {
+        return [{ name: operation, status: "DONE", error: { errors: [{ message: "The zone 'projects/p/zones/us-west1-a' does not have enough resources available to fulfill the request. 'NULL:0/NULL:0/NULL:0 (state:STOCKOUT, sub-state:STOCKOUT, resource type:compute)'." }] } }];
+      }
+    },
+  });
+
+  await assert.rejects(
+    () => adapter.createInstance({ zone: "us-west1-a", instanceResource: { name: "yc-ollama-001" } }),
+    (err) => {
+      assert.match(err.message, /state:STOCKOUT/);
+      assert.equal(isStockoutError(err), true); // this is what routes startDevbox to the next zone
+      return true;
+    },
+  );
+});
+

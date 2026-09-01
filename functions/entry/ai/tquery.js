@@ -47,7 +47,74 @@ const KNOWN_SUBTYPES = new Set(SUBTYPES.map((s) => s.name));
 // the same constants the output gate validates against, or a caller could ask for a metric the
 // validator will then reject. Any other (known) subtype takes the caller's question as-is, exactly
 // as /ai/query did.
-const COMPOSERS = { analytics_widget: svgChartInstructions };
+// A composer is called `(ref, body)`: `ref` is the pointer at the scrubbed request text, `body` the
+// validated request body, so a subtype whose facts are STRUCTURED (replace_dish) renders them from
+// the trusted object while the untrusted free text stays behind `ref`. `svgChartInstructions` takes
+// only `ref` and ignores the second argument.
+const COMPOSERS = { analytics_widget: svgChartInstructions, replace_dish: replaceDishInstructions };
+
+// The component vocabulary the replace_dish prompt names, in the order a kitchen reads a plate.
+// Category is DATA (the leaf schema caps it at 32 chars, it is not an enum), so anything outside this
+// list is still rendered — under its own name, after the known categories.
+const CATEGORY_ORDER = ["protein", "starch", "vegetable", "fruit", "dairy", "fat", "beverage", "seasoning"];
+
+// `[{ingredient, category}]` → one line per category, deduped. Moved here from yeschef's
+// `replaceDishQuery`, which is deleted: the component set is now rendered by the server, from the
+// validated body, so a caller cannot reshape the prompt by reshaping its own prose.
+function byCategory(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const cats = [...CATEGORY_ORDER, ...new Set(list.map((r) => String(r?.category ?? "").toLowerCase()))];
+  return [...new Set(cats)]
+    .map((cat) => {
+      const names = [...new Set(
+        list.filter((r) => String(r?.category ?? "").toLowerCase() === cat).map((r) => String(r?.ingredient ?? "")),
+      )].filter(Boolean);
+      return names.length ? `${cat}: ${names.join(", ")}` : null;
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+// The replace_dish step's instructions. EVERY structured fact here comes from `body.replaceDish`,
+// which AJV has already hardened to the leaf; the kitchen's feedback is NOT interpolated — it is
+// reached through `askRef`, so the only step that ever holds that text is pre-sanitize. The seeded
+// `prompt_library` `replace_dish` prompt (scripts/seed-replace-dish.mjs) carries the OUTPUT FORMAT
+// and the rules; this states the case. There are no markers, so assembleFor places that prompt in
+// the system message exactly as systemPromptFor always has.
+function replaceDishInstructions(ref, body) {
+  const d = body?.replaceDish ?? {};
+  const dish = d.dish ?? {};
+  const components = (dish.components ?? []).map((c) => `${c.ingredient} (${c.category})`).join(", ");
+  const rules = [
+    d.constraints?.proteins?.length ? `Proteins this plan is built on: ${d.constraints.proteins.join(", ")}` : null,
+    d.constraints?.restrictions?.length
+      ? `Requirements and restrictions from the plan:\n${d.constraints.restrictions.map((r) => `- ${r}`).join("\n")}`
+      : null,
+  ].filter(Boolean).join("\n");
+  const available = byCategory(d.constraints?.available);
+  return [
+    "Replace the dish in ONE meal slot of an already-built menu. Return exactly one dish.",
+    "",
+    "# THE SLOT",
+    `Day ${d.day ?? "?"}, ${d.mealtime ?? "?"}, served as the ${d.kind ?? "?"} course.`,
+    "",
+    "# DIETS THIS DISH MUST SATISFY — every one of them, not just the first",
+    (d.diets ?? []).map((x) => `- ${x}`).join("\n") || "- (none recorded)",
+    "",
+    "# DISH BEING REPLACED",
+    dish.name ?? "(unnamed)",
+    components ? `Its components: ${components}` : "It has no components on file.",
+    "",
+    "# PLAN RULES",
+    rules || "(none recorded)",
+    "",
+    "# AVAILABLE COMPONENTS — use nothing else",
+    available || "(none on file)",
+    "",
+    "# THE KITCHEN'S FEEDBACK",
+    `The feedback you must act on is ${ref}`,
+  ].join("\n");
+}
 
 // The CHECK step a producing subtype gets paired with. `withMarkers(instruction, pass, fail)` is the
 // pipeline's own layout — the same one compose.js emits for a meal-plan step — so the check step
@@ -87,6 +154,54 @@ const CHECKERS = {
       "control does not redraw the data — name the id or element and what is wrong with it",
     ),
   }),
+
+  // The replacement dish's judge. It reads the dish through `contexts` and the SLOT's requirements
+  // out of its own instructions — the same trusted `replaceDish` object the producer was composed
+  // from, so the judge cannot be told a laxer requirement than the producer was given. The feedback
+  // is reached through `askRef` here too: the judge has to check every line was acted on, and the
+  // only copy of those lines is pre-sanitize's scrubbed output.
+  replace_dish: (n, body) => {
+    const d = body?.replaceDish ?? {};
+    return {
+      subtype: "replace_dish_check",
+      style: "unstructured",
+      instructions: withMarkers(
+        `# ROLE\nThe prior step was asked to write ONE replacement dish for request ${n} and its answer is ` +
+        "below. You judge that one dish. You never write, rewrite or correct a dish — nothing you write is " +
+        "shown to anyone as a dish.\n\n" +
+        "# WHAT WAS ASKED FOR\n" +
+        `- the dish being replaced: ${d.dish?.name ?? "(unnamed)"}\n` +
+        `- diets it must satisfy: ${(d.diets ?? []).join(", ") || "(none recorded)"}\n` +
+        `- service kind: ${d.kind ?? "?"}\n` +
+        `- mealtime: ${d.mealtime ?? "?"}\n` +
+        `- the kitchen's feedback is ${askRef(n)}\n\n` +
+        "# ORDER OF WORK — STRICT\nWrite every line below before you reach a verdict. COPY NAMES OUT OF THE " +
+        "ANSWER — NEVER NAME A DISH OR COMPONENT YOU HAVE NOT READ THERE. Where a line offers two endings, " +
+        "DELETE THE ONE THAT IS NOT TRUE; a line still carrying both is not an observation.\n\n" +
+        "## STEP 1 — the dish name written, and the dish name being replaced: `<written> vs <replaced> — same` " +
+        "or `— different`.\n" +
+        "## STEP 2 — every diet listed above, one line each: `<diet> — <the component that breaks it>` or " +
+        "`<diet> — none`.\n" +
+        "## STEP 3 — the service kind asked for, and the kind this dish is: `asked <kind>, is <kind>`.\n" +
+        "## STEP 4 — the mealtime asked for, and whether the dish is servable at it: `<mealtime> — servable` " +
+        "or `— not servable`.\n" +
+        "## STEP 5 — every feedback line, one line each: `<feedback line> — <the specific change in the dish " +
+        "that acts on it>` or `— not acted on`.\n\n" +
+        "# WORKED EXAMPLE — THE SHAPE OF AN ANSWER, NOT A VERDICT TO COPY\n" +
+        "STEP 1: <written name> vs <replaced name> — different\n" +
+        "STEP 2: <diet> — <component>\n" +
+        "STEP 3: asked <kind>, is <kind>\n" +
+        "STEP 4: <mealtime> — servable\n" +
+        "STEP 5: <feedback line> — not acted on\n" +
+        "@@::FAIL: <diet> is broken by <component>, and the feedback line <feedback line> is not acted on;:&@",
+        "the dish written is a different dish from the one being replaced, no component breaks any listed " +
+        "diet, it is the service kind asked for, it is servable at the mealtime asked for, and every " +
+        "feedback line is acted on by a specific change in the dish",
+        "the dish is the same dish, a component breaks a listed diet, the kind or the mealtime is wrong, or " +
+        "a feedback line is not acted on — name the diet and the component, or the feedback line, that fails",
+      ),
+    };
+  },
 };
 
 // The general case for a task list. A task that names no subtype IS a `task` — the caller has to opt
@@ -104,7 +219,11 @@ const DEFAULT_SUBTYPE = "task";
 // contract rides on server-composed `instructions`. A LEADING/SYSTEM prompt authored later in the
 // Prompt Library layers ON TOP of this; it does not replace it.
 const PRE = "pre-sanitize", POST = "post-sanitize";
-const SANITIZERS = new Set([PRE, POST]);
+// Server-inserted subtypes: supplying one is a 400, not a silent dedupe. The sanitizers are the
+// boundary a caller is being CHECKED at; the judges (CHECKERS, below) are the gate a caller's answer
+// is being checked by — a caller that supplies its own would be grading itself, and `GET
+// /ai/tquery/:jobId` finds the gate by name, so an unpaired judge step would read as one.
+const SANITIZERS = new Set([PRE, POST, "chart_check", "replace_dish_check"]);
 
 // pre-sanitize is the ONLY step that sees the caller's raw text. It emits one numbered, scrubbed
 // `REQUEST k:` per caller task, and every later step is pointed at its own numbered line (askRef)
@@ -171,6 +290,14 @@ export function composeJob(body, user) {
     if (!t?.query || typeof t.query !== "string") return { code: 400, error: "each task needs a query" };
   }
 
+  // `replace_dish` runs on STRUCTURED facts, not on prose: without them the composer would render a
+  // prompt full of "?" and the judge would have nothing to check the answer against. One slot gets
+  // one dish, so one list gets one such task — a second would share step 0's numbering and the same
+  // single `replaceDish` object, i.e. two dishes composed for one slot.
+  const replacements = tasks.filter((t) => (t?.subtype ?? DEFAULT_SUBTYPE) === "replace_dish").length;
+  if (replacements > 1) return { code: 400, error: "only one replace_dish task per list" };
+  if (replacements === 1 && !body?.replaceDish) return { code: 400, error: "replace_dish requires a replaceDish object" };
+
   // A caller may only ask for the canned tier where the canned tier is the truth: outside
   // production. In production `fake` is dropped silently — refusing the request would just teach a
   // caller to retry without it, and the real tier is the correct answer either way.
@@ -189,7 +316,7 @@ export function composeJob(body, user) {
     const step = {
       subtype,
       instructions: COMPOSERS[subtype]
-        ? COMPOSERS[subtype](ref)
+        ? COMPOSERS[subtype](ref, body)
         : `Carry out request ${i + 1} of ${tasks.length}. Your instruction is ${ref}`,
       style: t.style === "unstructured" || t.style === "blended" ? t.style : "structured",
     };
@@ -198,7 +325,7 @@ export function composeJob(body, user) {
     // chart against Pass/Fail criteria and reports through the same `@@::PASS::@@` marker every other
     // step uses — so a bad chart fails the way anything else in the pipeline fails, not by a regex
     // in the route deciding what a good chart looks like.
-    return CHECKERS[subtype] ? [step, CHECKERS[subtype](i + 1)] : [step];
+    return CHECKERS[subtype] ? [step, CHECKERS[subtype](i + 1, body)] : [step];
   });
   const steps = [
     { subtype: PRE, instructions: preInstructions(tasks.map((t) => t.query)), style: "unstructured" },
@@ -233,7 +360,12 @@ export function composeJob(body, user) {
       model: topic, fake, status: "pending", response: "", isDeleted: false,
       message: summary, userPrompt: summary,
       plan, stepCount: plan.length, cursor: 0,
-      input: { tasks: tasks.map((t, i) => ({ subtype: middle[i].subtype, query: t.query })) },
+      input: {
+        tasks: tasks.map((t, i) => ({ subtype: middle[i].subtype, query: t.query })),
+        // Recorded for audit and for the reload path: the panel re-reads the slot it was asked about
+        // without re-deriving it. Never rendered into a prompt — the composer read it at compose time.
+        ...(body?.replaceDish ? { replaceDish: body.replaceDish } : {}),
+      },
     },
   };
 }
@@ -308,10 +440,29 @@ export async function get(req, reply, deps = {}) {
   // `answerStep` falls back to `last` and they behave exactly as before.
   // A gated subtype is found BY NAME, not by position: the drawing step is now followed by its own
   // chart_check step, so counting back from the tail lands on the judge rather than the artifact.
-  const widget = (job.plan || []).findIndex((s) => s?.subtype === "analytics_widget");
-  const answerStep = widget >= 0 ? widget : last;
+  // A judged producer is found BY NAME for a second reason too: its own step is followed by the
+  // judge, so post-sanitize's `contexts` reach the JUDGE'S VERDICT, not the artifact — counting back
+  // from the tail would hand the reader a critique of a dish instead of the dish.
+  const PRODUCERS = ["analytics_widget", "replace_dish"];
+  const producer = (job.plan || []).findIndex((s) => PRODUCERS.includes(s?.subtype));
+  const answerStep = producer >= 0 ? producer : last;
   const runs = (await jobRef.collection("steps").get()).docs.map((d) => d.data()).filter((r) => !r.isDeleted);
   const answer = runs.find((r) => r.step === answerStep)?.response || "";
+
+  // A JUDGE STEP IS A GATE, NOT A LABEL. `replace_dish`'s deliverable is parsed by the client and
+  // written to the graph, so a dish the judge failed must never be handed over — the client is the
+  // writer, and withholding the answer is what makes the write impossible. The judge's verdict is
+  // already machine-read: the worker maps its `@@::FAIL:reason::@@` block to the run's
+  // status/outcome (worker/index.js splitOutcome), so this reads that, not the judge's prose.
+  const judge = (job.plan || []).findIndex((s) => s?.subtype === "replace_dish_check");
+  if (judge >= 0) {
+    const verdict = runs.find((r) => r.step === judge);
+    if (verdict?.status === "fail") {
+      const reason = verdict.outcome || "the replacement dish did not pass its check";
+      console.error(`[ai/tquery] ${jobId} REJECTED — replace_dish_check FAIL: ${reason}`);
+      return reply.send({ status: "fail", spec: null, answer: null, reason });
+    }
+  }
   const check = checkAnswer(job.plan?.[answerStep]?.subtype, answer);
   if (!check.ok) console.error(`[ai/tquery] ${jobId} REJECTED — ${check.reason}`);
   return reply.send({

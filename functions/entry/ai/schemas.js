@@ -52,6 +52,7 @@ export const menuSchema = {
     // selectable range); 1 is not a menu, so it is not expressible.
     courseCounts:        { type: "object", additionalProperties: { type: "integer", anyOf: [{ const: 0 }, { minimum: 2, maximum: 7 }] } },
     planId:              { type: "string", maxLength: 128 },  // ← reverse link to the Mongo meal_plan
+    planName:            { type: "string", maxLength: 200 },  // ← chef's plan name, leads the job summary
     stepId:              { type: "string", maxLength: 128 },  // ← which plan step this build is for
     // Client-minted correlation id, so a request can be joined browser → orchestrator → worker.
     // The jobId is minted server-side and only reaches the browser in the response, so it cannot
@@ -123,6 +124,70 @@ export const tquerySchema = {
     },
     fake:  { type: "boolean" },   // ignored in production (isProdLike) — see tquery.js
     model: { type: "string", maxLength: 128 },  // topic override; resolveTopic validates it
+    // The STRUCTURED facts a `replace_dish` task runs on. They ride here, NOT in the task's `query`,
+    // because the server composes the step's instructions from them (tquery.js COMPOSERS) while
+    // `query` holds only the kitchen's free text — the one thing pre-sanitize has to scrub. Hardened
+    // to the leaf: a caller cannot smuggle prose into the composed prompt through a nested object.
+    // Required-when-present is enforced in composeJob (pure, directly testable), not by an AJV
+    // conditional for one subtype.
+    replaceDish: {
+      type: "object",
+      additionalProperties: false,
+      required: ["originalJobId", "planId", "slotId", "mealtime", "kind", "diets", "dish"],
+      properties: {
+        originalJobId: { type: "string", maxLength: 128 },
+        planId:        { type: "string", maxLength: 128 },
+        slotId:        { type: "string", maxLength: 200 },
+        siteId:        { type: ["string", "null"], maxLength: 128 },
+        day:           { type: "integer", minimum: 1, maximum: 366 },
+        mealtime:      { type: "string", maxLength: 32 },
+        kind:          { type: "string", maxLength: 64 },
+        diets:         { type: "array", minItems: 1, maxItems: 24, items: { type: "string", maxLength: 64 } },
+        dish: {
+          type: "object",
+          additionalProperties: false,
+          required: ["name"],
+          properties: {
+            id:   { type: "string", maxLength: 200 },
+            name: { type: "string", maxLength: 200 },
+            components: {
+              type: "array",
+              maxItems: 40,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["ingredient", "category"],
+                properties: {
+                  ingredient: { type: "string", maxLength: 120 },
+                  category:   { type: "string", maxLength: 32 },
+                },
+              },
+            },
+          },
+        },
+        constraints: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            proteins:     { type: "array", maxItems: 40,  items: { type: "string", maxLength: 120 } },
+            restrictions: { type: "array", maxItems: 40,  items: { type: "string", maxLength: 200 } },
+            available:    {
+              type: "array",
+              maxItems: 400,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["ingredient", "category"],
+                properties: {
+                  ingredient: { type: "string", maxLength: 120 },
+                  category:   { type: "string", maxLength: 32 },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
   },
 };
 

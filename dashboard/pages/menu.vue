@@ -4,7 +4,10 @@
 <template>
   <div class="flex gap-4 h-full">
     <!-- Left: history -->
-    <div class="w-64 panel backdrop-blur-md p-4 overflow-y-auto flex flex-col min-h-0">
+    <!-- The column itself does NOT scroll: the New plan button and the filters stay pinned, and
+         only the list below them scrolls. overscroll-contain keeps the wheel from chaining to the
+         page once that list hits its end. -->
+    <div class="w-64 panel backdrop-blur-md p-4 flex flex-col min-h-0">
       <button
         type="button"
         class="mb-3 w-full px-3 py-2 rounded bg-amber-500 text-gray-900 hover:bg-amber-600 text-sm font-medium"
@@ -28,7 +31,7 @@
           <span v-else class="inline-block w-2 h-2 rounded-full" :class="f.dot"></span>
         </button>
       </div>
-      <div class="space-y-2">
+      <div ref="historyEl" class="flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-2">
         <div v-if="!shown.length" class="text-muted text-xs text-center py-4">
           {{ history.length ? 'None match' : 'No menu plans' }}
         </div>
@@ -67,6 +70,8 @@
             </span>
           </div>
         </div>
+        <!-- Sentinel: entering the viewport pulls the next page. -->
+        <div ref="sentinelEl" class="h-1"></div>
       </div>
     </div>
 
@@ -103,7 +108,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { collection, query, orderBy, limit, onSnapshot, doc, getDoc } from 'firebase/firestore'
 import { getDb } from '~/lib/firebase'
 import MenuForm from '~/components/MenuForm.vue'
@@ -141,11 +146,22 @@ const { jobStatus: liveStatus, bind } = useJob()
 // MenuForm dirty-tracks it: its button reads "Rerun" while unchanged, "Generate" once edited.
 const preset = ref(null)
 
-onMounted(() => {
-  // Order by createdAt and filter to menu jobs client-side (avoids needing a composite index).
-  const q = query(collection(getDb(), coll), orderBy('createdAt', 'desc'), limit(50))
+const PAGE = 50
+const pageLimit = ref(PAGE)
+const hasMore = ref(false)
+
+// Order by createdAt and filter to menu jobs client-side (avoids needing a composite index).
+// One doc past the window tells us more exist without a count query.
+const startHistory = () => {
+  unsub && unsub()
+  const q = query(collection(getDb(), coll), orderBy('createdAt', 'desc'), limit(pageLimit.value + 1))
   unsub = onSnapshot(q, (snap) => {
+    // Re-subscribing emits a cached partial snapshot first — rendering it collapses the list to a
+    // row or two for a beat. Ignore any cached snapshot smaller than what is already on screen.
+    if (snap.metadata.fromCache && snap.docs.length < history.value.length) return
+    hasMore.value = snap.docs.length > pageLimit.value
     history.value = snap.docs
+      .slice(0, pageLimit.value)
       .map((d) => ({ id: d.id, ...d.data() }))
       .filter((r) => r.type === 'menu')
       .map((r) => ({
@@ -153,11 +169,52 @@ onMounted(() => {
         companyId: r.companyId || '',
         message: r.message || '',
         status: r.status || 'pending',
-        createdAt: r.createdAt?.toMillis?.() ?? 0,
+        // A just-created doc has a pending serverTimestamp (null) — treat it as now so it
+        // sorts to the TOP instead of falling to the bottom with createdAt 0.
+        createdAt: r.createdAt?.toMillis?.() ?? Date.now(),
       }))
+      .sort((a, b) => b.createdAt - a.createdAt)
+    nextTick(fill)
   })
+}
+
+// The status filter is applied client-side, so a page can render only a handful of rows — too few
+// to push the sentinel off screen, and IntersectionObserver only fires on a transition. Keep
+// pulling pages while the sentinel is still in view, so a filter that matches rarely still fills
+// the column instead of stalling after one page.
+const fill = () => {
+  if (!hasMore.value || !historyEl.value || !sentinelEl.value) return
+  const root = historyEl.value.getBoundingClientRect()
+  const s = sentinelEl.value.getBoundingClientRect()
+  if (s.top <= root.bottom + 200) loadMore()
+}
+
+// Infinite scroll. A sentinel + IntersectionObserver, not a scroll listener: the column's own
+// scroll event never reaches Vue here, and the observer also re-fires when a short page leaves
+// the sentinel still visible (the client-side type filter can thin a page down to a few rows).
+const historyEl = ref(null)
+const sentinelEl = ref(null)
+let io = null
+
+const loadMore = () => {
+  if (!hasMore.value) return
+  hasMore.value = false
+  pageLimit.value += PAGE
+  startHistory()
+}
+
+onMounted(() => {
+  startHistory()
+  io = new IntersectionObserver(
+    (entries) => { if (entries.some((e) => e.isIntersecting)) loadMore() },
+    { root: historyEl.value, rootMargin: '200px' }
+  )
+  io.observe(sentinelEl.value)
 })
-onBeforeUnmount(() => unsub && unsub())
+
+// Switching to a rarely-matching filter empties the column — pull more until it fills again.
+watch(filter, () => nextTick(fill))
+onBeforeUnmount(() => { unsub && unsub(); io && io.disconnect() })
 
 const select = async (id) => {
   selected.value = id; bind(id); tab.value = 'results'

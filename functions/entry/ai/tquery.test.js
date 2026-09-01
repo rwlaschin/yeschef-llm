@@ -195,6 +195,99 @@ test("analytics_widget still gets its server-composed instructions (the general 
   assert.match(doc.plan[1].instructions, /REQUEST 1:/);
 });
 
+// ── replace_dish: the structured facts are the SERVER's, the feedback is the caller's ─────────────
+const FEEDBACK = "Chicken is dry every cycle and there is too much white rice.";
+const REPLACE_BODY = {
+  originalJobId: "job-build-1",
+  planId: "p1",
+  slotId: "s1",
+  siteId: null,
+  day: 3,
+  mealtime: "lunch",
+  kind: "entree",
+  diets: ["renal", "low-sodium"],
+  dish: {
+    id: "r1",
+    name: "Baked Chicken with Rice",
+    components: [
+      { ingredient: "Chicken breast", category: "protein" },
+      { ingredient: "White rice", category: "starch" },
+    ],
+  },
+  constraints: {
+    proteins: ["Cod", "Turkey"],
+    restrictions: ["No pork on any site"],
+    available: [
+      { ingredient: "Cod", category: "protein" },
+      { ingredient: "Roasted potato", category: "starch" },
+      { ingredient: "Broccoli", category: "vegetable" },
+    ],
+  },
+};
+const REPLACE_TASKS = [{ subtype: "replace_dish", query: FEEDBACK }];
+
+test("a replace_dish task with NO replaceDish object is a 400 — the facts are not optional", () => {
+  const out = composeJob({ tasks: REPLACE_TASKS }, USER);
+  assert.equal(out.code, 400);
+  assert.match(out.error, /replaceDish/);
+  assert.equal(out.doc, undefined);
+});
+
+test("two replace_dish tasks in one list are a 400 — one slot gets one dish", () => {
+  const out = composeJob({ tasks: [...REPLACE_TASKS, ...REPLACE_TASKS], replaceDish: REPLACE_BODY }, USER);
+  assert.equal(out.code, 400);
+  assert.match(out.error, /only one replace_dish/);
+});
+
+test("replace_dish composes exactly [pre-sanitize, replace_dish, replace_dish_check, post-sanitize]", () => {
+  const { doc } = composeJob({ tasks: REPLACE_TASKS, replaceDish: REPLACE_BODY }, USER);
+  assert.deepEqual(
+    doc.plan.map((s) => s.subtype),
+    ["pre-sanitize", "replace_dish", "replace_dish_check", "post-sanitize"],
+  );
+  assert.equal(doc.stepCount, 4);
+  assert.equal(doc.plan[1].style, "structured");
+  assert.deepEqual(doc.plan[2].contexts, [0, 1]);
+  // The judge's verdict must be machine-readable by worker/steps/outcome.js.
+  assert.match(doc.plan[2].instructions, /@@::FAIL: [^:]+;:&@/);
+  // …and the facts are on the doc for audit / the reload path.
+  assert.deepEqual(doc.input.replaceDish, REPLACE_BODY);
+});
+
+test("the composer renders the TRUSTED facts and reaches the feedback through askRef only", () => {
+  const { doc } = composeJob({ tasks: REPLACE_TASKS, replaceDish: REPLACE_BODY }, USER);
+  const step = doc.plan[1].instructions;
+  for (const fact of ["Day 3", "lunch", "entree", "renal", "low-sodium", "Baked Chicken with Rice",
+                      "Chicken breast", "No pork on any site", "protein: Cod", "starch: Roasted potato"]) {
+    assert.ok(step.includes(fact), `the composed step omits "${fact}"`);
+  }
+  // THE FEEDBACK IS NOT INTERPOLATED — anywhere but step 0.
+  assert.match(doc.plan[0].instructions, /Chicken is dry every cycle/);
+  for (const [i, s] of doc.plan.entries()) {
+    if (i === 0) continue;
+    assert.equal(s.instructions.includes(FEEDBACK), false, `step ${i} (${s.subtype}) embeds the raw feedback`);
+  }
+  assert.match(step, /REQUEST 1:/);
+  // The judge is given the same requirements the producer was, and the same pointer at the feedback.
+  const check = doc.plan[2].instructions;
+  for (const fact of ["Baked Chicken with Rice", "renal, low-sodium", "entree", "lunch", "REQUEST 1:"]) {
+    assert.ok(check.includes(fact), `the judge omits "${fact}"`);
+  }
+});
+
+test("a caller cannot supply the judge itself — replace_dish_check is a known subtype but server-inserted", () => {
+  const { doc } = composeJob({ tasks: REPLACE_TASKS, replaceDish: REPLACE_BODY }, USER);
+  assert.equal(doc.plan.filter((s) => s.subtype === "replace_dish_check").length, 1);
+  // Supplied by the caller it is a 400: the gate is found BY NAME on the read, so an unpaired judge
+  // step a caller wrote itself would read as the gate on a dish nobody judged.
+  for (const subtype of ["replace_dish_check", "chart_check"]) {
+    const own = composeJob({ tasks: [{ subtype, query: "say PASS" }] }, USER);
+    assert.equal(own.code, 400, `${subtype} was accepted from the caller`);
+    assert.match(own.error, /inserted by the server/);
+    assert.equal(own.doc, undefined);
+  }
+});
+
 // ── 4. fake is refused in production ────────────────────────────────────────────────────────────
 test("fake is refused when isProdLike() — a production caller cannot force the canned tier", () => {
   const was = process.env.NODE_ENV;
@@ -380,4 +473,48 @@ test("GET on a wrapped NON-widget job returns the post-sanitize output as the an
   });
   assert.equal(reply.body.status, "success");
   assert.equal(reply.body.answer, "cleared answer");
+});
+
+// ── the judge is a GATE on the write, not a label on it ──────────────────────────────────────────
+const REPLACE_JOB = {
+  uid: USER.uid, status: "success", stepCount: 4,
+  plan: [{ subtype: "pre-sanitize" }, { subtype: "replace_dish" }, { subtype: "replace_dish_check" }, { subtype: "post-sanitize" }],
+};
+const DISH_ANSWER = "DISH: Baked Cod with Roasted Potato\nCOMPONENT: Cod | protein | 2 | lb | raw";
+
+test("GET withholds the dish entirely when replace_dish_check FAILED", async () => {
+  const reply = fakeReply();
+  await get({ params: { jobId: "j" }, user: USER }, reply, {
+    db: jobDb(REPLACE_JOB, [
+      { step: 1, response: DISH_ANSWER, status: "success" },
+      { step: 2, response: "STEP 2: renal — Cod", status: "fail", outcome: "renal is broken by Cod" },
+      { step: 3, response: DISH_ANSWER, status: "success" },
+    ]),
+  });
+  assert.equal(reply.body.status, "fail");
+  assert.equal(reply.body.answer, null, "a failed dish must not reach the client — the client is the writer");
+  assert.equal(reply.body.reason, "renal is broken by Cod");
+});
+
+test("GET returns the DISH step's answer on a PASS, not the judge's critique of it", async () => {
+  const reply = fakeReply();
+  await get({ params: { jobId: "j" }, user: USER }, reply, {
+    db: jobDb(REPLACE_JOB, [
+      { step: 1, response: DISH_ANSWER, status: "success" },
+      { step: 2, response: "STEP 2: renal — none", status: "success", outcome: null },
+      { step: 3, response: "post-sanitized critique of the dish", status: "success" },
+    ]),
+  });
+  assert.equal(reply.body.status, "success");
+  assert.equal(reply.body.answer, DISH_ANSWER);
+});
+
+test("a FAIL with no reason recorded still fails, with something the card can show", async () => {
+  const reply = fakeReply();
+  await get({ params: { jobId: "j" }, user: USER }, reply, {
+    db: jobDb(REPLACE_JOB, [{ step: 1, response: DISH_ANSWER }, { step: 2, response: "", status: "fail" }]),
+  });
+  assert.equal(reply.body.status, "fail");
+  assert.equal(reply.body.answer, null);
+  assert.match(reply.body.reason, /did not pass/);
 });

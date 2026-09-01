@@ -13,6 +13,7 @@
 import { installSeverityLogging } from "../config/log-severity.js";
 installSeverityLogging();
 
+import { pathToFileURL } from "node:url";
 import { PubSub } from "@google-cloud/pubsub";
 import { MongoClient } from "mongodb";
 import { initializeApp, getApps } from "firebase-admin/app";
@@ -20,7 +21,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { processDay } from "./lib/inventory.js";
 // Single source of truth (config/models.js, copied into the image + mounted in dev) — the
 // planner's subtype list and default tools live here, NOT hardcoded in the worker.
-import { SUBTYPES, DEFAULT_TOOLS, MODELS, unitDocId, defaultSampler, temperatureForStyle, DEFAULT_STYLE, STYLE_TEMPS, FAKE_SUBSCRIPTION, maxCtxFor } from "../config/models.js";
+import { SUBTYPES, DEFAULT_TOOLS, byTopic, unitDocId, defaultSampler, temperatureForStyle, DEFAULT_STYLE, STYLE_TEMPS, FAKE_SUBSCRIPTION, maxCtxFor } from "../config/models.js";
 import { parseYamlBlock } from "../config/yaml.js";
 import { inScope } from "./lib/assemble.js";
 import { cannedResponse } from "./cannedResponses.js";
@@ -41,11 +42,19 @@ import { createSemaphore } from "./semaphore.js";
 // Free-tier web_search provider pool (Ollama/Brave/Tavily/DDG) — replaces Ollama's metered hosted
 // search. Weighted-random pick, Firestore-tracked rolling-30-day quota. See search-pool.js.
 import { searchPool, fetchPage } from "./tools/search-pool.js";
+// Clean-context reviewer — a second round on the same host/model/window with NO tools, because a
+// model reviewing its own table never fails itself. See tools/subagent.js.
+import { SubAgent, runSubAgent, SUB_AGENT_TOOL_NAME } from "./tools/subagent.js";
+// Rewritable, searchable storage outside the model's context — a stream cannot erase, and a
+// 347,790-char payload does not fit. See tools/memory-buffer.js.
+import { MemoryBuffer, runMemoryBufferTool, MEMORY_BUFFER_TOOL_NAME } from "./tools/memory-buffer.js";
 // Idle self-shutdown — turns the VM off within IDLE_SHUTDOWN_MS of going idle (see idle-shutdown.js).
 import { makeIdleShutdown, selfDeleteFromMig, workerRegion, workerInstance } from "./idle-shutdown.js";
+// Refuses to subscribe on a box whose GPU never came up — see gpuGate.js for the incident.
+import { assertGpuResident } from "./gpuGate.js";
 // Lease bound: never hold more messages than we can generate (see lease.js — this is the P1 fix for a
 // backlog stranding a message and for an idle box holding a lease it can't act on).
-import { generationSlots } from "./lease.js";
+import { generationSlots, slotsSource } from "./lease.js";
 // Subscriber lifecycle + reopen-on-close (testable with a fake subscription — see reopen.test.js).
 import { makeSubscriberLoop } from "./reopen.js";
 
@@ -54,7 +63,7 @@ import { makeSubscriberLoop } from "./reopen.js";
 // part of the SOURCE: stale/baked code prints its OLD value (or no line at all, if it predates
 // this); current code prints this. Bump it by hand on meaningful worker changes — the string
 // travels with the code, so it identifies the code regardless of file timestamps.
-const WORKER_VERSION = "2026-07-13 idle self-shutdown";
+const WORKER_VERSION = "2026-08-28 gpu gate";
 console.log(`[worker] VERSION ${WORKER_VERSION} | pid ${process.pid}`);
 
 // ---- Config ------------------------------------------------
@@ -96,9 +105,12 @@ const {
                                                        // generation must FAIL (and recover), never lock the worker
 } = process.env;
 
-// This worker serves ONE model (OLLAMA_MODEL). Its max context window — the cap we must not
-// exceed — comes from the single source of truth (config/models.js). null if not found → no cap.
-const MODEL_DEF = MODELS.find((m) => m.model === OLLAMA_MODEL) ?? null;
+// This worker serves ONE model tier. Its max context window — the cap we must not exceed — and its
+// parallel slot count come from the single source of truth (config/models.js). Resolve by TOPIC
+// (SUBSCRIPTION_NAME is `sub_<topic>`), never by OLLAMA_MODEL: `llama3.1:8b` is BOTH the raw tier
+// (parallel 3) and the OpenClaw tier (parallel 1), so a model-string match picks one at random.
+// null for the fake sub → no cap.
+const MODEL_DEF = byTopic(String(SUBSCRIPTION_NAME ?? "").split(",")[0].replace(/^sub_/, "")) ?? null;
 const MODEL_MAX_CTX = MODEL_DEF?.ctx ?? null;
 // Usable VRAM on the box this worker talks to, for the KV-cache cap (maxCtxFor). Not the card's
 // nameplate: the CUDA context, compute buffers and fragmentation take a cut, so an L4 (24 GB,
@@ -115,8 +127,13 @@ if (!FAKE_ONLY) {
   required.OLLAMA_MODEL = OLLAMA_MODEL;
   required.OLLAMA_API_KEY = OLLAMA_API_KEY; // web search is on for every real tier — no key, no run
 }
-for (const [k, v] of Object.entries(required)) {
-  if (!v) throw new Error(`${k} env var is required`);
+// A missing env var is a config mistake, not a crash: name EVERY one that's missing and exit. A
+// thrown Error here printed a V8 stack trace and stopped at the FIRST missing var, so you fixed
+// them one restart at a time.
+const missing = Object.entries(required).filter(([, v]) => !v).map(([k]) => k);
+if (missing.length) {
+  console.error(`BLOCKED: missing required env var${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}\nSet them in .env / .env.${process.env.NODE_ENV || "dev"}.`);
+  process.exit(1);
 }
 
 // ---- Orchestrator report -----------------------------------
@@ -254,14 +271,14 @@ const INCLUDE_INACTIVE = !IS_PROD;
 // bound, but it isn't sufficient on its own: the dev emulator ignores maxMessages and delivers a
 // whole step's fanout at once, and in prod a redelivery can overlap a live run — either way we can
 // be asked to run more concurrent generations than Ollama has run-slots, which floods a CPU box into
-// first-token stalls. This gate caps concurrent generations at OLLAMA_NUM_PARALLEL (the Ollama
-// server's run-slot count, baked into the image); the excess QUEUES in-process while its Pub/Sub
+// first-token stalls. This gate caps concurrent generations at the model tier's declared `parallel`
+// (config/models.js — the same number the image gives Ollama); the excess QUEUES in-process while its Pub/Sub
 // lease keeps extending. It is NOT a lease and NOT cross-server correctness — duplicate concurrent
 // runs of one unit remain harmless via the first-writer-wins CAS (completionWrite). See
 // docs/design/worker-dispatch.md.
 const GEN_LIMIT = generationSlots(process.env);
 const genGate = createSemaphore(GEN_LIMIT);
-console.log(`[worker] generation gate: max ${GEN_LIMIT} concurrent (OLLAMA_NUM_PARALLEL=${process.env.OLLAMA_NUM_PARALLEL ?? "unset"})`);
+console.log(`[worker] generation gate: max ${GEN_LIMIT} concurrent (from ${slotsSource(process.env)})`);
 
 let promptCache = null;
 
@@ -513,6 +530,7 @@ const WEB_TOOL_FALLBACK_ON =
 // larger budget than one search hit.
 const WEB_RESULT_CHARS = 1200; // per web_search hit's content
 const WEB_FETCH_CHARS = 6000;  // a single web_fetch body
+const TOOL_ARG_LOG_CHARS = 300; // the "tool → started" line: enough to identify the call, not the payload
 const clip = (s, n) => {
   const str = typeof s === "string" ? s : (s == null ? "" : String(s));
   return str.length > n ? `${str.slice(0, n)}… [truncated, ${str.length} chars total]` : str;
@@ -523,6 +541,7 @@ const clip = (s, n) => {
 function condenseToolResult(name, result) {
   if (!result || result.error) return result;
   if (name === "normalize_ingredients") return result; // already-compact rows — never clip (would corrupt the JSON of a 50-100 row batch)
+  if (name === SUB_AGENT_TOOL_NAME) return result;     // free text of any length — clipping it would truncate the child's answer mid-word
   if (name === "web_search") {
     const hits = Array.isArray(result.results) ? result.results : [];
     return {
@@ -540,10 +559,28 @@ function condenseToolResult(name, result) {
       content: clip(result.content ?? "", WEB_FETCH_CHARS),
     };
   }
-  return JSON.parse(clip(JSON.stringify(result), WEB_FETCH_CHARS));
+  // NEVER JSON.parse a clipped string: clipping lands mid-string/mid-brace, so the parse throws —
+  // and this call sits OUTSIDE the try/catch around executeTool, so the throw killed the whole step
+  // for the one reason a tool result should degrade instead: it was too big. Hand the model the
+  // truncated text as text.
+  const json = JSON.stringify(result);
+  if (json.length <= WEB_FETCH_CHARS) return result;
+  return { note: `tool result truncated from ${json.length} chars`, content: clip(json, WEB_FETCH_CHARS) };
 }
 
-async function executeTool(name, args) {
+async function executeTool(name, args, sub, buff) {
+  // Working memory. Every verb is one SQLite statement against this run's own FTS5 table: no model
+  // call, no socket, no process.
+  if (name === MEMORY_BUFFER_TOOL_NAME) {
+    if (!buff) return { error: "No memory buffer on this step." };
+    return runMemoryBufferTool(buff, args);
+  }
+  // A clean-context agent call. The model decides WHEN and supplies the whole prompt; this file
+  // adds no task and no output format.
+  if (name === SUB_AGENT_TOOL_NAME) {
+    if (!sub) return { error: "No sub_agent on this step." };
+    return await runSubAgent(sub, { trigger: "model", args });
+  }
   // Inventory step: the model copied residents + the diet distribution + the day's recipes into
   // `args` (it does NO math); the tool normalizes the names and scales each amount by how many
   // residents are on that recipe's diet, in CODE. Pure (no web call). Returns rows for the model
@@ -608,7 +645,10 @@ function parseTextToolCall(content, toolDefs) {
   return null;
 }
 
-async function chatWithTools(initialMessages, onChunk, numCtx, toolDefs = TOOLS, style = DEFAULT_STYLE) {
+// `buff` deliberately has NO default: per-run state created downstream of the run doc's write can
+// never be persisted, so a default here would hand the model a buffer whose contents nothing can
+// read back. Omitting it makes memory_buffer answer "No memory buffer on this step." instead.
+async function chatWithTools(initialMessages, onChunk, numCtx, toolDefs = TOOLS, style = DEFAULT_STYLE, sub = null, buff) {
   const messages = [...initialMessages];
   const maxRounds = parseInt(MAX_TOOL_ROUNDS, 10) || 4;
   // Allow-list of tools actually offered THIS step. Weak/quantized models invent tool names
@@ -639,10 +679,19 @@ async function chatWithTools(initialMessages, onChunk, numCtx, toolDefs = TOOLS,
         messages.push({ role: "tool", tool_name: call.function.name, content: JSON.stringify({ error: `No tool named "${call.function.name}" exists. The ONLY available tools are: ${realList}. Do not call any other tool — use one of these or answer directly.` }) });
         continue;
       }
+      // Two lines per tool, started and finished, for EVERY tool. One line only tells you a tool
+      // finished — a tool that hangs or kills the process then leaves no trace it ever ran, which is
+      // exactly the case you need the log for.
+      const args = call.function.arguments || {};
+      const toolStarted = Date.now();
+      // CLIPPED: a memory_buffer write or a normalize_ingredients batch carries the whole payload
+      // in `args`, and an unclipped line put 349,853 chars of it into the log.
+      console.log(`  tool → ${call.function.name} started ${clip(JSON.stringify(args), TOOL_ARG_LOG_CHARS)}`);
       let raw;
       try {
-        raw = await executeTool(call.function.name, call.function.arguments || {});
+        raw = await executeTool(call.function.name, args, sub, buff);
       } catch (err) {
+        console.warn(`  tool ✗ ${call.function.name} failed after ${Date.now() - toolStarted}ms: ${err?.message || err}`);
         // A non-retryable web-tool failure (429/auth) arrives here as TerminalError. With
         // WEB_TOOL_FALLBACK on, don't fail the step — satisfy the dangling tool_call, tell the
         // model the tools are gone, and answer in one tool-free round from its own knowledge.
@@ -658,7 +707,8 @@ async function chatWithTools(initialMessages, onChunk, numCtx, toolDefs = TOOLS,
       }
       const result = condenseToolResult(call.function.name, raw);
       const out = JSON.stringify(result);
-      console.log(`  tool: ${call.function.name}(${JSON.stringify(call.function.arguments || {})}) → ${out.length} chars`);
+      const err = raw && typeof raw === "object" && raw.error;
+      console.log(`  tool ← ${call.function.name} ${err ? `error "${err}"` : "ok"} in ${Date.now() - toolStarted}ms → ${out.length} chars`);
       messages.push({ role: "tool", tool_name: call.function.name, content: out });
     }
   }
@@ -954,6 +1004,12 @@ async function handleMessage(message) {
     // than Ollama has run-slots (excess queues here while its lease auto-extends). release() in a
     // `finally` so a throw still frees the slot; correctness across workers stays in the CAS below.
     let fullResponse;
+    // Per-run tool state, constructed HERE and not defaulted inside chatWithTools: state created
+    // downstream of the run doc's write can never be persisted, so a default parameter there would
+    // give the tool a pad nothing can read back. Threaded into generation, written in the CAS below.
+    let sub = null;
+    let buff = null;
+    let memory = null; // buff's snapshot, taken before close() removes the tempfile it lives in
     if (FAKE_ONLY || payload.fake) {
       // The fake worker (FAKE_ONLY) cans EVERYTHING routed to it — it's a first-class model, so
       // picking it and sending works like any tier, no fake flag needed. (payload.fake still honored
@@ -970,6 +1026,39 @@ async function handleMessage(message) {
       if (genGate.waiting > 0 || genGate.active >= genGate.max) {
         console.log(`[worker]   ${jobId} waiting for a generation slot (${genGate.active}/${genGate.max} busy, ${genGate.waiting} queued)`);
       }
+      // The child runs on the SAME host, model, window and sampler as the parent — a different
+      // num_ctx or model makes Ollama reload the weights. It carries no prompt: the calling model
+      // supplies the whole thing as the tool's `prompt` argument.
+      if (!useGateway) {
+        // The child's TOOLS SLOT: everything this step was assigned except sub_agent itself, so a
+        // child can fetch, search and normalize but cannot recurse (the depth guard refuses too).
+        // It gets NO memory buffer — that is the parent's memory, and the child sees only its prompt.
+        // `chat` must be the tool-EXECUTING loop: handed a tools array, chatRound alone would return
+        // tool_calls that nobody runs, and the child's answer would come back empty.
+        // BOTH names out: sub_agent so a child cannot recurse, memory_buffer because the child is
+        // handed no buffer — offering it would advertise a tool whose every call returns an error,
+        // which is worse than not offering it at all (the model burns rounds on it).
+        const childTools = assignedTools.filter((t) => ![SUB_AGENT_TOOL_NAME, MEMORY_BUFFER_TOOL_NAME].includes(t.function.name));
+        sub = new SubAgent({
+          numCtx,
+          sampler: samplerForStyle(await getSampler(), genStyle, await getStyleTemps()),
+          toolDefs: childTools.length ? childTools : undefined,
+          chat: childTools.length
+            ? async (messages, toolDefs, onChunk, childCtx) => ({
+              content: await chatWithTools(messages, onChunk, childCtx, toolDefs, genStyle, new SubAgent({ depth: 1 }), null),
+            })
+            : undefined,
+        });
+        // The buffer lives as long as this generation — created here, closed in the `finally` —
+        // so it is this model's memory across every tool round. `payload.given` is the SETUP:
+        // material the step was handed, seeded before the first token so query/read can reach it
+        // in round 1. Nothing else writes into the buffer.
+        buff = new MemoryBuffer();
+        if (Array.isArray(payload.given)) {
+          buff.seed(payload.given);
+          console.log(`[worker]   ${jobId} memory_buffer seeded with ${payload.given.length} entr${payload.given.length === 1 ? "y" : "ies"}`);
+        }
+      }
       const releaseGen = await genGate.acquire();
       try {
         // Heartbeat wrapper: the console is otherwise silent from "Inference:" until END OUTPUT —
@@ -985,11 +1074,14 @@ async function handleMessage(message) {
         fullResponse = useGateway
           ? await chatViaOpenClaw(messages, push)
           : allowTools
-            ? await chatWithTools(messages, push, numCtx, assignedTools, genStyle)
+            ? await chatWithTools(messages, push, numCtx, assignedTools, genStyle, sub, buff)
             : await chatNoTools(messages, push, numCtx, genStyle);
         await flusher.flush();
       } finally {
         releaseGen();
+        // Snapshot BEFORE close: the tracking record is read out of the buffer, and close() removes
+        // the tempfile. In the `finally` so a thrown generation still frees the file.
+        if (buff) { memory = buff.snapshot(); buff.close(); }
       }
     }
 
@@ -1000,6 +1092,9 @@ async function handleMessage(message) {
     // the marker out of the visible `response`. Terminal status is one of just two: PASS → success,
     // FAIL → fail. The FAIL reason goes in `outcome` (success has no reason → null). The orchestrator
     // gets the status + outcome in the report below so it can decide success → advance / fail → stop.
+    // There is deliberately no fallback call for a model that never invoked sub_agent: the prompt
+    // is the CALLER's to write, so a fallback could only send one this file made up.
+
     const { status: blockStatus, reason, clean, thinking } = splitOutcome(fullResponse);
     let runStatus = blockStatus === "FAIL" ? "fail" : "success"; // PASS or no block → success
     let outcome = runStatus === "fail" ? reason : null;          // outcome carries the failure reason only
@@ -1037,6 +1132,11 @@ async function handleMessage(message) {
       if (!w) return;
       tx.set(jobRef, {
         status: w.status, response: w.response, outcome: w.outcome ?? null, thinking: w.thinking ?? "", attempt: w.attempt,
+        // Tool tracking, written inside the SAME transaction so only the CAS winner records it —
+        // and written from handleMessage rather than through completionWrite, whose return shape is
+        // asserted by admission.test.js. This is the only place either snapshot reaches a run doc.
+        subAgent: sub ? sub.snapshot() : null,
+        memory,
         updatedAt: FieldValue.serverTimestamp(), completedAt: FieldValue.serverTimestamp(),
       }, { merge: true });
     }));
@@ -1095,8 +1195,8 @@ async function handleMessage(message) {
 // ---- Main --------------------------------------------------
 async function main() {
   // Startup ENV dump → Cloud Logging (this container runs with --log-driver=gcplogs). We keep
-  // hitting config drift between dev and prod (NODE_ENV, OLLAMA_NUM_PARALLEL, SUBSCRIPTION_NAME,
-  // OLLAMA_NUM_PARALLEL), so log the full env at boot — but REDACT secret-looking values
+  // hitting config drift between dev and prod (NODE_ENV, SUBSCRIPTION_NAME, OLLAMA_MODEL), so log
+  // the full env at boot — but REDACT secret-looking values
   // (URI/KEY/TOKEN/SECRET/PASS/CRED/AUTH/MONGO) to their length so credentials never hit the logs.
   // One line per var, each prefixed `DBG `: logd splits an ingest body on newlines, so one
   // multi-line log became ~200 INFO records. The head token puts the whole dump below logd's
@@ -1115,15 +1215,15 @@ async function main() {
   // numbers and what it cost. maxExtensionMinutes keeps the lease auto-refreshed (up to 60 min) so a
   // long generation is never redelivered mid-run.
   // NEVER lease more messages than we can actually GENERATE. maxMessages defaulted to 2 in prod while
-  // GEN_LIMIT (OLLAMA_NUM_PARALLEL) is 1, so a box leased a second message it could not start. That
+  // GEN_LIMIT (the tier's declared `parallel`) is 1, so a box leased a second message it could not start. That
   // message was then: invisible to every other box (leased, with the deadline auto-extended up to 60
   // min), and lost the moment this box was torn down — which is how a backlog of >1 left a message
   // sitting in the queue that nothing ever picked up. It also made an idle box look busy to Pub/Sub,
   // holding a lease while generating nothing.
   const maxMessages = GEN_LIMIT;   // one number, one source of truth (worker/lease.js)
-  console.log(`  Flow control: maxMessages=${maxMessages} (= generation slots, OLLAMA_NUM_PARALLEL=${process.env.OLLAMA_NUM_PARALLEL ?? "unset"}), maxExtensionMinutes=60`);
+  console.log(`  Flow control: maxMessages=${maxMessages} (= generation slots, from ${slotsSource(process.env)}), maxExtensionMinutes=60`);
   if (process.env.MAX_CONCURRENCY) {
-    console.warn(`  \u26a0 MAX_CONCURRENCY=${process.env.MAX_CONCURRENCY} is IGNORED — lease size is OLLAMA_NUM_PARALLEL (${GEN_LIMIT}); a second knob is how the two drifted apart`);
+    console.warn(`  \u26a0 MAX_CONCURRENCY=${process.env.MAX_CONCURRENCY} is IGNORED — lease size is the model tier's declared parallel (${GEN_LIMIT}, ${slotsSource(process.env)}); a second knob is how the two drifted apart`);
   }
 
   // Split a comma list into individual names, but do NOT trim/normalize: each name is a
@@ -1196,6 +1296,21 @@ async function main() {
     },
   });
 
+  // GPU gate BEFORE the first listen: a box that lost the driver race must never lease a message.
+  // Subscribing first and checking later is what let a CPU-fallback box hold work it could only run
+  // at 1/100th speed. Failing here is deliberate and loud — the MIG replaces the instance, and a box
+  // that cannot serve stops billing instead of quietly poisoning the queue. Prod only: dev boxes
+  // legitimately run CPU-only.
+  if (IS_PROD) {
+    try {
+      await assertGpuResident({ host: OLLAMA_HOST, model: OLLAMA_MODEL });
+    } catch (e) {
+      console.error(`[worker] \u2717 ${e.message} \u2014 refusing to subscribe; deleting this instance`);
+      await selfDeleteFromMig(console);
+      throw e;
+    }
+  }
+
   for (const subName of subscriptionNames) loop.listen(subName);
 
   idle.armInitial(); // a worker that boots and never receives a job still shuts down after idleMs
@@ -1224,7 +1339,14 @@ for (const sig of ["SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"]) {
 process.on("beforeExit", (code) => console.error(`[worker] ⚠ beforeExit code=${code} at ${new Date().toISOString()} (event loop DRAINED — nothing kept the process alive) pid=${process.pid}`));
 process.on("exit", (code) => console.error(`[worker] ⚠ exit code=${code} at ${new Date().toISOString()} pid=${process.pid}`));
 
-main().catch((err) => {
-  console.error("Worker failed to start:", err.message);
-  process.exit(1);
-});
+// Entry-point guard. The container runs `node worker/index.js`, so main() still starts exactly as
+// before; importing this module (a probe, a test) no longer connects Mongo and Pub/Sub and enter
+// the subscription loop, which is why chatWithTools had no way to be exercised at all.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error("Worker failed to start:", err.message);
+    process.exit(1);
+  });
+}
+
+export { chatWithTools, systemPromptFor, connectMongo };

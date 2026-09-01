@@ -34,7 +34,7 @@
     "kill:workers": "bash scripts/kill-workers.sh",
     "restore:workers": "bash scripts/restore-workers.sh",
     "smoke": "node scripts/smoke.mjs",
-    "box": "node scripts/devbox.js list",
+    "box": "node scripts/devbox.js",
     "box:create": "node scripts/devbox.js create",
     "box:status": "node scripts/devbox.js status",
     "box:models": "node scripts/devbox.js models",

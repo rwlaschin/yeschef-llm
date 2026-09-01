@@ -22,6 +22,7 @@
 // is LINEAR (step+1). `failStep` is honored only when it's a sane revert target (0..step).
 import { getFirestore } from "firebase-admin/firestore";
 import { dispatchStep, unitCount } from "./dispatch.js";
+import { notifyBuildComplete } from "./notify.js";
 
 // Retries per step before giving up and passing through. Env-overridable; sane fallback.
 const MAX_GEN = parseInt(process.env.MAX_GEN, 10) || 2;
@@ -127,10 +128,11 @@ export async function handle(payload, _message) {
 // retries and is being passed through: it stays recorded in `failedSteps` so the job's TERMINAL
 // status reflects it (a job that limped past a failed step ends `fail`, not a clean `success`) —
 // the step says fail, the plan still falls through and runs the rest. Single-shot via cursor claim.
-export async function advance(db, jobRef, jobId, step, stepCount, why, failed = false) {
+export async function advance(db, jobRef, jobId, step, stepCount, why, failed = false, notify = notifyBuildComplete) {
   const next = step + 1;
+  let job = null;
   const result = await db.runTransaction(async (tx) => {
-    const j = (await tx.get(jobRef)).data();
+    const j = (job = (await tx.get(jobRef)).data());
     if (!j || j.cursor !== step) return "stale";
     const failedSteps = failed ? [...new Set([...(j.failedSteps || []), step])] : (j.failedSteps || []);
     if (next >= stepCount) {
@@ -151,6 +153,14 @@ export async function advance(db, jobRef, jobId, step, stepCount, why, failed = 
     return "advance";
   });
   if (result === "stale") return console.log(`[ai/step] ${why}: job=${jobId} step=${step} already transitioned — skip.`);
+  if (result === "done-success" || result === "done-fail") {
+    // Terminal, exactly once (the cursor claim above is the single-shot guard). Best-effort: a
+    // notification must never fail or retry the finalize that already landed.
+    try {
+      const sent = await notify(job, result === "done-success");
+      if (sent) console.log(`[ai/step] job=${jobId} notified plan ${job.planId} creator.`);
+    } catch (e) { console.error(`[ai/step] job=${jobId} notify failed (ignored): ${e?.message}`); }
+  }
   if (result === "done-success") return console.log(`[ai/step] ${why}: job=${jobId} step=${step} was last — job SUCCESS.`);
   if (result === "done-fail") return console.log(`[ai/step] ${why}: job=${jobId} step=${step} was last — job FAIL (some steps failed & passed through).`);
   console.log(`[ai/step] ${why}: job=${jobId} advancing step ${step} → ${next}.`);

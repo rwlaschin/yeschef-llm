@@ -140,8 +140,8 @@ export async function checkAuthAsync() {
 export function checkAuth(sh = defaultSh) {
   const cached = readAuthCache();
   if (cached && cached.ok) return cached;
-  let token = sh(`gcloud auth print-access-token 2>&1`, true);
-  if (/ETIMEDOUT|ENOMEM|EAGAIN/i.test(token)) token = sh(`gcloud auth print-access-token 2>&1`, true, 30000);
+  let token = sh(`gcloud auth print-access-token ${P} 2>&1`, true);
+  if (/ETIMEDOUT|ENOMEM|EAGAIN/i.test(token)) token = sh(`gcloud auth print-access-token ${P} 2>&1`, true, 30000);
   if (!token || /Reauthentication|ERROR|denied|problem refreshing|cannot prompt|not authenticated/i.test(token)) {
     return { ok: false, account: null, error: `gcloud session expired or unauthenticated. Please run 'gcloud auth login' in your terminal.` };
   }
@@ -582,6 +582,19 @@ const whyUnreachable = (code, sh = defaultSh) => {
   else lines.push(`  Your IP ${me} is NOT on the allowlist (${cur.join(", ")}) — the box is fine, your packets are dropped.\n  Fix:  npm run box allow`);
   return lines.join("\n");
 };
+
+// Called from 17 places and defined in NONE of them until now, so every one of those error paths
+// threw `ReferenceError: fail is not defined` instead of reporting — including the two that say
+// "The box is RUNNING and BILLING but unusable".
+//
+// It THROWS rather than exiting: startDevbox is also a library, called by the dashboard, and its
+// callers turn a throw into `{ ok: false }` (devbox-compute.test.js:402 requires exactly that for a
+// bad --rounds). A process.exit here would take the caller down with it. The tag is what lets runCli
+// print one line and exit 1 instead of dumping a stack at an operator.
+export class DevboxFailure extends Error {
+  constructor(message) { super(message); this.name = "DevboxFailure"; this.devboxFailure = true; }
+}
+export const fail = (message) => { throw new DevboxFailure(message); };
 
 const needName = (verb, sh = defaultSh) => {
   const name = process.argv[3];
@@ -1198,12 +1211,12 @@ export const cmds = {
     console.log(`ACCESS:  tcp:${PORT} from ${sources().join(", ") || "(no firewall rule!)"}`);
     const tags = defaultSh(`curl -s -m 5 ${url}/api/tags`, true);
     if (/ERROR/.test(tags) || !tags) {
-      console.log(`OLLAMA:  not answering.${s === "RUNNING" ? ` If you changed networks: npm run box allow` : ` (VM is ${s})`}`);
+      console.log(`OLLAMA:  not answering.${s === "RUNNING" ? ` If you changed networks: node scripts/devbox.js allow` : ` (VM is ${s})`}`);
     } else {
       let models = [];
       try { models = (JSON.parse(tags).models || []).map((m) => m.name); } catch {}
       console.log(`OLLAMA:  answering — models: ${models.join(", ") || "(none pulled)"}`);
-      if (!models.length) console.log(`BROKEN:  no models — every generation 404s. Fix: npm run box pull ${b.name} <model>`);
+      if (!models.length) console.log(`BROKEN:  no models — every generation 404s. Fix: node scripts/devbox.js pull ${b.name} <model>`);
       console.log(`\n  curl ${url}/api/tags`);
       console.log(`  Msty / Open WebUI → Ollama provider, base URL: ${url}`);
     }
@@ -1301,6 +1314,20 @@ export async function runCli() {
   // snapshot reports auth state rather than consuming it, so gating it here is what froze the
   // dashboard's snapshot at its last authenticated value.
   if (!new Set(["snapshot", "start", "create"]).has(cmd)) requireAuth();
-  const result = await cmds[cmd]();
+  // An expired session can also surface mid-command (describe throws), long after requireAuth
+  // passed on a cached token. Same operator remedy, so same exit code — not a stack trace.
+  let result;
+  try {
+    result = await cmds[cmd]();
+  } catch (e) {
+    // A fail() is a diagnosed operator problem — one line and exit 1, never a stack trace.
+    if (e?.devboxFailure) {
+      console.error(e.message);
+      process.exit(1);
+    }
+    if (!/expired or unauthenticated/i.test(e?.message || "")) throw e;
+    console.error(`BLOCKED: ${e.message}\nRun:  gcloud auth login`);
+    process.exit(2);
+  }
   if (new Set(["start", "create"]).has(cmd)) finishCliResult(result);
 }

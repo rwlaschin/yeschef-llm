@@ -21,15 +21,21 @@ export function createComputeAdapter({
   firewallsClient,
   InstancesClient: Instances = InstancesClient,
   FirewallsClient: Firewalls = FirewallsClient,
+  // Injectable for the same reason the other two are: the operations poll is where a DONE-with-error
+  // is caught, and a test cannot reach it while the client is constructed inside wait().
+  ZoneOperationsClient: ZoneOperations = ZoneOperationsClient,
+  GlobalOperationsClient: GlobalOperations = GlobalOperationsClient,
 } = {}) {
   if (!instancesClient) instancesClient = new Instances({});
   if (!firewallsClient) firewallsClient = new Firewalls({});
 
   const wait = async (call, zone) => {
     const [operation] = await call;
-    if (operation?.promise) return operation.promise();
+    // AWAITED, never RETURNED: a DONE-with-error operation resolves, so returning here skipped the
+    // error check below and an L4 stockout came back as "CREATED".
+    if (operation?.promise) await operation.promise();
     if (!operation?.name) return;
-    const client = zone ? new ZoneOperationsClient({}) : new GlobalOperationsClient({});
+    const client = zone ? new ZoneOperations({}) : new GlobalOperations({});
     const [done] = await client.wait({ project: projectId, zone, operation: operation.name });
     if (done.error) throw new Error(done.error.errors?.map((error) => error.message).filter(Boolean).join("; ") || "Compute operation failed");
   };

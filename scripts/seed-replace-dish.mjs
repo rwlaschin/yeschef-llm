@@ -1,8 +1,10 @@
 // Seed the `replace_dish` system prompt — the "Ask Remy" replacement for ONE dish in ONE slot
-// (yeschef docs/tasks/replace-dish.task_list.md step 3). It is a /ai/query job (subtype
-// "replace_dish"), NOT a plan_library step: nothing fans out, one slot asks for one dish. The worker
-// concatenates systemPromptFor(type) + systemPromptFor(subtype) — see worker/lib/query.js — so this
-// prompt IS the whole contract, and the answer is parsed by parseReplacementDish()
+// (yeschef docs/tasks/replace-dish.task_list.md step 2). It is a /ai/tquery TASK LIST step (subtype
+// "replace_dish"), NOT a plan_library step: nothing fans out, one slot asks for one dish. The step's
+// CASE — the slot, the diets, the dish being replaced, the plan rules and AVAILABLE COMPONENTS — is
+// composed server-side from the request's trusted `replaceDish` object (functions/entry/ai/tquery.js
+// COMPOSERS.replace_dish); this prompt carries the RULES and the OUTPUT FORMAT and is placed in the
+// system message by systemPromptFor(subtype). The answer is parsed by parseReplacementDish()
 // (yeschef/src/components/pages/recipeShared.ts), the same line-per-fact reader the recipe DETAIL
 // step already uses.
 //
@@ -28,17 +30,18 @@ export const REPLACE_DISH_PROMPT = {
   active: true,
   modelOverride: null,
   isDeleted: false,
-  content: `You REPLACE ONE DISH in one meal slot of an institutional menu. The request names the slot (day, mealtime, diet), the dish being replaced, the feedback the kitchen wrote about that dish, and AVAILABLE COMPONENTS — the only ingredients this kitchen has for this cycle.
+  content: `You REPLACE ONE DISH in one meal slot of an institutional menu. The request names the slot (day, mealtime, and the service kind the dish is served as), EVERY DIET the dish must satisfy, the dish being replaced, the plan's own rules, the feedback the kitchen wrote about that dish, and AVAILABLE COMPONENTS — the only ingredients this kitchen has for this cycle.
 
 Return EXACTLY ONE dish. One dish, not a list: no options, no alternatives, no "or", no second candidate, no ranking. If you can think of several, choose the best one and return only it.
 
 Rules, in order:
 1. ONE DISH. Exactly one DISH line in your answer.
 2. ONLY THE SUPPLIED INGREDIENTS. Every ingredient you name MUST appear in AVAILABLE COMPONENTS, spelled the way it is spelled there. You may not invent, substitute, or assume any other ingredient — not a garnish, not a stock, not a sauce base. Salt, black pepper and water are the only things you may use without being listed. If the components cannot make a good dish, make the plainest dish they can make; do not add anything.
-3. RAW PROTEIN NAMES, NEVER CUTS. Name the protein as the bare ingredient: write "Chicken", never "Chicken breast" or "chicken thigh"; "Lamb", never "Lamb chop"; "Beef", never "ground beef"; "Egg", never "scrambled egg"; "Cod", never "cod fillet". A cut, form or brand word in an ingredient name is a wrong line. Say how it is cut in the prep field instead. This rule OVERRIDES the spelling in AVAILABLE COMPONENTS: if that list names a cut, use the bare protein for the ingredient and put the cut in the prep field.
-4. THE DIET RULES. The dish must be servable on the slot's diet as written (vegan = no animal products; vegetarian = no meat, poultry or seafood; renal = control phosphorus and potassium; honor no-pork/halal/kosher; low-sodium = no salty ingredient and minimal added salt). A dish that breaks the slot's diet is a wrong answer no matter how good it is.
-5. ANSWER THE FEEDBACK. Every piece of feedback in the request must be visibly acted on in the dish you return — a different preparation, a different component, a different texture, a different seasoning. Feedback you cannot act on with the available components: ignore it silently, and never explain.
-6. It must be a different dish from the one being replaced, cookable in an institutional kitchen at scale.
+3. THE CUT IS PART OF THE INGREDIENT; THE KNIFE WORK IS THE PREP. The ingredient name is the thing a kitchen buys, cut included — "Beef chuck", "Chicken thigh", "Pork loin", "Cod" — spelled as AVAILABLE COMPONENTS spells it. What is then DONE to it goes in the prep field and only there: "cubed", "ground", "diced", "julienned", "trimmed". Write "Beef chuck" with prep "cubed", never "Cubed beef" with an empty prep.
+4. THE DIET RULES. The dish must be servable on EVERY diet the request lists, not just the first — one dish serves all of them, and a dish that breaks any one of them is a wrong answer no matter how good it is. Read each as written (vegan = no animal products; vegetarian = no meat, poultry or seafood; renal = control phosphorus and potassium; honor no-pork/halal/kosher; low-sodium = no salty ingredient and minimal added salt).
+5. THE SERVICE KIND AND THE MEALTIME. The dish must be the service kind the request names — an appetizer is not an entrée, a side is not a dessert — and must be servable at the mealtime it names.
+6. ANSWER THE FEEDBACK. Every piece of feedback in the request must be visibly acted on in the dish you return — a different preparation, a different component, a different texture, a different seasoning. Feedback you cannot act on with the available components: ignore it silently, and never explain.
+7. It must be a different dish from the one being replaced, cookable in an institutional kitchen at scale.
 
 OUTPUT — line-per-fact, one fact per line, these tags only, in this order:
 DISH: <the dish name a guest would read on the menu>

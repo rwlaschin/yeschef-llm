@@ -1,6 +1,6 @@
 ---
-modified: 2026-07-06
-dependencies: [llm-pipeline, worker-dispatch]
+modified: 2026-08-27
+dependencies: [llm-pipeline, worker-dispatch, prompt-library, fake-canned-mode]
 ---
 
 # Plan Orchestration
@@ -11,6 +11,7 @@ A **plan** is a multi-step LLM request (Build → Execution → Finalization) �
 
 - **The orchestrator never blocks and never calls the LLM directly.** All LLM work is dispatched as an agent job over Pub/Sub; violating this turns the orchestrator (a Cloud Function) into a long-running process, which breaks its stateless/scale-to-zero model.
 - **`cursor` compare-and-set is the only thing allowed to advance a step.** It must fire exactly once per step transition — a double-fire would dispatch the next step twice.
+- **A judge step is a GATE, not a label.** `GET /ai/tquery/:jobId` withholds the answer on a `replace_dish_check` FAIL, and the client is the thing that writes the dish to the graph — so weakening that check (or letting a caller supply its own judge, or finding the answer step by counting back from the tail instead of by subtype name) is what lets a diet-breaking dish be written.
 - **The PASS/FAIL marker parser runs while streaming**, not just at the end — an unparseable block at end-of-stream must retry the unit, never silently pass.
 
 ## Design Constraints
@@ -81,8 +82,25 @@ Computed, never stored: `outcome`, `all_done`, `unit_streaming`, `generations`. 
 
 **Status marker.** `worker/steps/outcome.js` is the source of truth for this format. Delimiters: literal `@@::` at the start, `::@@` at the end — **no angle brackets**, because weak models drop `<`/`>` and markdown renderers eat `<…>` as a tag. `PASS` alone; `FAIL` adds a single-colon reason of **at least one character** (a bare `@@::FAIL::@@` is non-compliant): `@@::PASS::@@` / `@@::FAIL:<reason>::@@`. Parser: `/@@::(?:(PASS)|FAIL:\s*([\s\S]+?))\s*::@@/i` — our tweak of developit-ai's `PLAN_STATUS` block (dropped the `?!`/`!?` weak models fumble; the `@@:: … ::@@` bookend still can't false-trigger). Parsed **while streaming** (`worker/steps/outcome.js`): the visible response freezes at the opening delimiter and withholds any trailing partial of it, so a forming block never leaks into the live `response` field. Content before the block is user data; the block itself becomes the `outcome` field and feeds the orchestrator's report. Unparseable at end-of-stream → retry the unit, never a silent pass.
 
+### Task lists (`/ai/tquery`) and the `replace_dish` subtype
+
+A **task list** is the second pipeline that runs on this same machinery (`scopes: "task_list"` in [[prompt-library]]): the caller supplies the steps itself instead of a planner emitting them. `functions/entry/ai/tquery.js` `composeJob` validates the caller's `tasks[]`, wraps them, and writes the same `plan` array onto the same `llmResults/{jobId}` doc — from Build onward nothing differs.
+
+**The sanitizer sandwich is applied in code, after validation, and no request shape changes it.** Every list runs `[pre-sanitize, …caller's tasks, post-sanitize]`. `pre-sanitize` is the only step that ever sees the caller's raw text; it emits one numbered, scrubbed `REQUEST k:` line per task, and every later step is pointed at its own line by reference rather than carrying the raw text — which is what makes the scrub a *filter* and not a detector running beside an unfiltered copy. Every graph field the walker reads (`contexts`/`successStep`/`failStep`) is recomputed from the FINAL array, so a task's own branch targets are never read and cannot be used to jump the tail. Supplying a sanitizer step yourself is a 400, not a silent dedupe.
+
+**`replace_dish`** (`config/models.js`, `excludePlan: true` — a one-shot UI action, never schedulable as a plan step) writes ONE replacement dish for ONE already-built meal slot. It is the only subtype whose facts are STRUCTURED, and that split is the point:
+
+- The **server-trusted** facts — the dish being replaced, its components by category, the slot's `diets`, `kind` and `mealtime` — ride in a top-level `body.replaceDish` object validated by the leaf schema (`functions/entry/ai/schemas.js`), and the prompt is composed from them by `replaceDishInstructions` in the server (`COMPOSERS`). A caller cannot reshape the prompt by reshaping its own prose.
+- The task's **`query`** carries only the kitchen's free-text feedback, and it is untrusted: like every other list, it reaches the producer only as a pointer at pre-sanitize's scrubbed line.
+- One slot gets one dish, so one list gets one such task: a second `replace_dish` is a 400 (both would share step 0's numbering and the same single `replaceDish` object), and a `replace_dish` with no `replaceDish` object is a 400 rather than a prompt full of `?`.
+
+**The judge is server-inserted and it is a gate, not a label.** `CHECKERS` appends a `replace_dish_check` step after the producer, composed from *the same trusted `replaceDish` object* — so the judge cannot be handed a laxer requirement than the producer was given, while the feedback lines it must confirm were acted on are reached through the same scrubbed reference. Its verdict is machine-read: the worker maps `@@::FAIL:<reason>::@@` onto the run's status/outcome exactly as for any step, and `GET /ai/tquery/:jobId` finds the judge BY NAME and, on a `fail`, returns `{ status: "fail", answer: null, reason }` — withholding the dish. The client is the writer (it parses the deliverable and writes it to the recipe graph), so withholding the answer is the only thing that actually makes a bad write impossible. Both judges (`replace_dish_check`, `chart_check`) sit in the same server-inserted set as the two sanitizers, for the same reason plus one more: the reader locates the gate by subtype name, so a caller-supplied judge step would read as one.
+
+Because the producer is followed by its judge, the answer step is also found by name (`PRODUCERS`) rather than by counting back from the tail — counting back would hand the reader a critique of a dish instead of the dish.
+
 ## Functions
 
+- **`composeJob`** (`functions/entry/ai/tquery.js`) — validates a caller's `tasks[]`, rejects server-inserted subtypes, wraps the sandwich, inserts each producer's judge, and returns the job doc.
 - **`assert_steps`** — persists the planner's emitted step list as frozen metadata on the job doc.
 - **`dispatch`** — creates a fresh generation of unit docs and publishes work messages for them.
 - **`claim_advance`** — the compare-and-set that fires the step transition exactly once.
@@ -112,7 +130,7 @@ The **plan** (what each step *is*) lives as metadata on the job doc; a **run** (
 
 ## Use Cases
 
-### Run a multi-step plan end-to-end, unattended
+### 1. Run a multi-step plan end-to-end, unattended
 
 **Goal.** A caller (e.g. `/ai/plan`) gets a multi-step LLM request carried from intake to a finished result with no human in the loop.
 
@@ -146,7 +164,36 @@ The **plan** (what each step *is*) lives as metadata on the job doc; a **run** (
 - **Missing plan/model definition at dispatch time.** If `plan[step]` doesn't exist, or exists without a `model`, `dispatch.js` logs an error and returns without publishing anything (no job-status write) — this indicates a malformed plan and is treated as a bug to surface via logs, not a retryable condition.
 - **Stale or duplicate step reports.** `step.js` ignores any report where `job.cursor !== step` (the flow already moved past it) and only acts once every unit for the step is terminal; `advance`'s transaction re-checks `cursor === step` before writing, so a duplicate terminal report after the cursor has already moved is a no-op (covered by `step.test.js`'s "duplicate report does NOT re-finalize" case).
 
-### Retry and pass-through a step that fails validation
+### 2. Replace one dish of a built plan, with the answer gated by a judge
+
+**Goal.** A chef who dislikes one dish of an already-built plan gets a different dish for that one slot, and never gets one that breaks the slot's diets or ignores what they asked for.
+
+**Stakeholders.** The chef waiting on the replacement; the diners the slot's diets protect (a bad dish reaching the graph is a safety problem, not a quality one); whoever reviews rejected replacements from the dashboard.
+
+**Actors.** The yeschef recipe panel (intake, external — it is also the WRITER of the accepted dish), `POST /ai/tquery` (`composeJob`), the `replace_dish` model agent, the `replace_dish_check` model agent, `GET /ai/tquery/:jobId`.
+
+**Preconditions.** The slot exists in a built plan; the caller sends `tasks: [{ subtype: "replace_dish", query: <the kitchen's feedback> }]` plus a top-level `replaceDish` object carrying the dish being replaced, its components, and the slot's `diets`/`kind`/`mealtime`.
+
+**Postconditions.** Either the reader returned a dish that passed its judge, or it returned `{ status: "fail", answer: null, reason }` and nothing was written to the recipe graph. In both cases every step's prompt and response are on the job doc for review.
+
+**Basic Course of Events.**
+1. `composeJob` validates the task, rejects the request if it names a server-inserted subtype, if it carries more than one `replace_dish`, or if `body.replaceDish` is absent.
+2. It composes the producer's whole prompt server-side from `body.replaceDish` (`replaceDishInstructions`) — the caller's `query` is not rendered into it — and appends the `replace_dish_check` step from that same object (`CHECKERS`).
+3. It wraps the pair in the sanitizer sandwich and writes the resulting `plan[]` onto `llmResults/{jobId}`, recording `input.replaceDish` for audit and the panel's reload path only.
+4. Step 0, `pre-sanitize`, restates the feedback as a scrubbed numbered line; the producer and the judge each reach that line by reference, never the raw text.
+5. The producer writes the dish; the judge enumerates name, each diet, kind, mealtime, and each feedback line before emitting `@@::PASS::@@` or `@@::FAIL:<reason>::@@`, which the worker maps onto its run's `status`/`outcome`.
+6. `GET /ai/tquery/:jobId` locates the producer by subtype name for the answer and the judge by subtype name for the verdict, and on a PASS returns the producer's response — the dish, not the judge's prose.
+7. The panel parses the dish and writes it to the recipe graph (see yeschef's [[graph-model]] — the write is `writeRecipe`, and a replacement must send a COMPLETE dish).
+
+**Alternate Flows.**
+- **Canned tier.** Outside production a caller may send `fake: true`; the list runs over `FAKE_TOPIC` and `replace_dish` resolves to `cannedRecipeDetail` (see [[fake-canned-mode]]). In production `fake` is dropped silently.
+
+**Exceptions.**
+- **Judge FAILs.** The reader logs `REJECTED — replace_dish_check FAIL: <reason>` and returns `answer: null` with the reason; the client has nothing to write, which is the mechanism, not a courtesy. The job doc's own `status` is untouched — the dish and the critique both stay readable in the dashboard.
+- **No verdict recorded** (the judge step never completed). `verdict?.status` is not `fail`, so the gate does not fire and the producer's answer is returned — the gate withholds on a recorded FAIL, it does not require a recorded PASS.
+- **Caller supplies its own judge or sanitizer.** 400 from `composeJob` — the reader finds the gate by name, so a caller-supplied one would read as the real gate.
+
+### 3. Retry and pass-through a step that fails validation
 
 **Goal.** A step whose unit(s) self-report `FAIL` gets a bounded number of automatic retries before the plan is allowed to continue rather than stall forever.
 
@@ -177,7 +224,7 @@ The **plan** (what each step *is*) lives as metadata on the job doc; a **run** (
 - **Concurrent fail reports from sibling units.** The compare-and-set transaction means only one of several simultaneous fail reports for the same step actually claims and fires the retry; the rest log "already claimed — skip" and take no action, preventing a double-dispatch of the same generation.
 - **No reason given.** If neither the failed run's `outcome` nor the report payload's `outcome` carries a reason, `step.js` falls back to the literal string `"(no reason given)"` so the retry prompt and logs are never blank.
 
-### Parse a streamed self-report into a terminal PASS/FAIL
+### 4. Parse a streamed self-report into a terminal PASS/FAIL
 
 **Goal.** Determine, from a model's own streamed output, whether its unit passed or failed — without ever leaking a partial marker into the visible response the dashboard renders live.
 

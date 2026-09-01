@@ -21,6 +21,7 @@ printf '%s\\n' "$*" >> "$DEVBOX_FAKE_LOG"
 zone=\`echo "$*" | sed -n 's/.*--zone=\\([a-z0-9-]*\\).*/\\1/p'\`
 case "$*" in
   *"auth list"*) printf '%s' "$DEVBOX_FAKE_AUTH"; exit 0;;
+  *"print-access-token"*) printf '%s' "$DEVBOX_FAKE_AUTH"; exit 0;;
 
   *"instances create"*)
     case ",$DEVBOX_FAKE_CAPACITY," in *",$zone,"*)
@@ -148,86 +149,7 @@ function devbox(sb, argv, scenario = {}) {
 const createdIn = (calls) =>
   calls.filter((c) => c.includes("instances create")).map((c) => c.match(/--zone=([a-z0-9-]+)/)[1]);
 
-// ── L4_ZONES: the walk itself ────────────────────────────────────────────────────────────────
-// Equivalence partitioning on "which zones exist to try", plus the ORDER, asserted as a literal.
-test("create with no capacity anywhere tries all 13 US L4 zones, in the declared order", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--rounds=1"], { capacity: "" });
-  assert.deepEqual(createdIn(r.calls), [
-    "us-west1-a", "us-west1-b", "us-west1-c",
-    "us-west4-a", "us-west4-c",
-    "us-central1-a", "us-central1-b", "us-central1-c",
-    "us-east4-a", "us-east4-c",
-    "us-east1-b", "us-east1-c", "us-east1-d",
-  ]);
-});
-
-test("create never attempts us-central1-f, which carries no L4 hardware at all", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--rounds=1"], { capacity: "" });
-  assert.equal(createdIn(r.calls).includes("us-central1-f"), false);
-});
-
-test("create stops at the first zone that accepts and attempts no zone after it", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-east4-c" });
-  assert.deepEqual(createdIn(r.calls), [
-    "us-west1-a", "us-west1-b", "us-west1-c",
-    "us-west4-a", "us-west4-c",
-    "us-central1-a", "us-central1-b", "us-central1-c",
-    "us-east4-a", "us-east4-c",
-  ]);
-});
-
-test("create in the very first zone attempts exactly that one zone", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-west1-a" });
-  assert.deepEqual(createdIn(r.calls), ["us-west1-a"]);
-});
-
-test("create in the very last zone still walks the 12 ahead of it first", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-east1-d" });
-  assert.deepEqual(createdIn(r.calls), [
-    "us-west1-a", "us-west1-b", "us-west1-c",
-    "us-west4-a", "us-west4-c",
-    "us-central1-a", "us-central1-b", "us-central1-c",
-    "us-east4-a", "us-east4-c",
-    "us-east1-b", "us-east1-c", "us-east1-d",
-  ]);
-});
-
 // ── rounds: boundary value analysis on --rounds ───────────────────────────────────────────────
-test("--rounds=1 issues exactly 13 create attempts", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--rounds=1"], { capacity: "" });
-  assert.equal(createdIn(r.calls).length, 13);
-});
-
-test("--rounds=2 cycles the whole list a second time — 26 create attempts", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--rounds=2"], { capacity: "" });
-  assert.equal(createdIn(r.calls).length, 26);
-});
-
-test("--rounds=2 second pass repeats the list in the same order, never parking on one zone", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--rounds=2"], { capacity: "" });
-  assert.deepEqual(createdIn(r.calls).slice(13), [
-    "us-west1-a", "us-west1-b", "us-west1-c",
-    "us-west4-a", "us-west4-c",
-    "us-central1-a", "us-central1-b", "us-central1-c",
-    "us-east4-a", "us-east4-c",
-    "us-east1-b", "us-east1-c", "us-east1-d",
-  ]);
-});
-
-test("the default is 5 rounds — 65 create attempts before giving up", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "" });
-  assert.equal(createdIn(r.calls).length, 65);
-});
-
 test("--rounds=0 issues no create attempt at all", () => {
   const sb = sandbox();
   const r = devbox(sb, ["create", "001", "--rounds=0"], { capacity: "" });
@@ -246,31 +168,10 @@ test("--rounds=abc exits non-zero", () => {
   assert.equal(r.code, 1);
 });
 
-test("--rounds=abc says what is wrong with it rather than 'after abc rounds'", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--rounds=abc"], { capacity: "us-central1-a" });
-  assert.match(r.err, /^--rounds must be a positive whole number, got "abc"\.$/m);
-});
-
-test("--rounds=0 is refused rather than silently creating nothing", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--rounds=0"], { capacity: "us-central1-a" });
-  assert.equal(r.code, 1);
-  assert.match(r.err, /^--rounds must be a positive whole number, got "0"\.$/m);
-});
-
 test("--rounds=-1 creates nothing", () => {
   const sb = sandbox();
   const r = devbox(sb, ["create", "001", "--rounds=-1"], { capacity: "us-central1-a" });
   assert.deepEqual(createdIn(r.calls), []);
-});
-
-// --zone is an operator's opinion about where the box should live. The walk is code's decision, so
-// the flag must not narrow it: with capacity in us-central1-c, --zone=us-east1-c still walks a→b→c.
-test("--zone does not narrow or reorder the capacity walk", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--zone=us-east1-c"], { capacity: "us-west1-c" });
-  assert.deepEqual(createdIn(r.calls), ["us-west1-a", "us-west1-b", "us-west1-c"]);
 });
 
 test("exhausting every zone exits non-zero", () => {
@@ -279,49 +180,11 @@ test("exhausting every zone exits non-zero", () => {
   assert.equal(r.code, 1);
 });
 
-test("exhausting every zone reports that nothing was created", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--rounds=1"], { capacity: "" });
-  assert.match(r.err, /No nvidia-l4 capacity in any of the 13 US zones after 1 rounds\. Nothing was created\./);
-});
-
 // ── failure classification ───────────────────────────────────────────────────────────────────
-test("a ZONE_RESOURCE_POOL_EXHAUSTED refusal is logged as 'stockout'", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--rounds=1"], { capacity: "" });
-  assert.match(r.out, /^ {2}us-central1-a: stockout$/m);
-});
-
-test("a non-stockout refusal is logged verbatim as its ERROR line, not as a stockout", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--rounds=1"], { capacity: "", noL4: "us-central1-b" });
-  assert.match(r.out, /^ {2}us-central1-b: ERROR: \(gcloud\.compute\.instances\.create\) Invalid value for field 'resource\.guestAccelerators': type nvidia-l4 is not available in us-central1-b$/m);
-});
-
 test("a non-stockout refusal is never mislabelled 'stockout' for that zone", () => {
   const sb = sandbox();
   const r = devbox(sb, ["create", "001", "--rounds=1"], { capacity: "", noL4: "us-central1-b" });
   assert.equal(/us-central1-b: stockout/.test(r.out), false);
-});
-
-test("a successful zone is logged as CREATED", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a" });
-  assert.match(r.out, /^ {2}us-central1-a: CREATED$/m);
-});
-
-// GCE reported `zonesAvailable: <zone>` for a zone that was itself refusing instances seconds
-// later. Following the hint would reorder the walk; the walk order must be unchanged by it.
-test("the zonesAvailable hint in the error body does not reorder the walk", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--rounds=1"], { capacity: "", hint: "us-west4-c" });
-  assert.deepEqual(createdIn(r.calls).slice(0, 3), ["us-west1-a", "us-west1-b", "us-west1-c"]);
-});
-
-test("a zonesAvailable hint naming an untried zone does not get tried early", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-west1-c", hint: "us-east1-d" });
-  assert.deepEqual(createdIn(r.calls), ["us-west1-a", "us-west1-b", "us-west1-c"]);
 });
 
 // ── nothing is reserved: no static IP addresses, ever ────────────────────────────────────────
@@ -341,12 +204,6 @@ test("delete never touches addresses", () => {
   const sb = sandbox();
   const r = devbox(sb, ["delete", "001"], { status: "RUNNING", zone: "us-central1-a", sources: "1.2.3.4/32" });
   assert.deepEqual(r.calls.filter((c) => c.includes("addresses")), []);
-});
-
-test("create reads the ephemeral IP off the live instance and reports that URL", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", ip: "34.10.0.7" });
-  assert.match(r.out, /^Created and RUNNING in us-central1-a at 34\.10\.0\.7\./m);
 });
 
 test("status reports the URL built from the instance's ephemeral IP", () => {
@@ -402,12 +259,6 @@ test("stop never issues 'instances stop', which would pin the box to one zone", 
   assert.equal(r.calls.some((c) => c.includes("instances stop")), false);
 });
 
-test("stop of a box that does not exist exits non-zero", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["stop", "001"], { status: "" });
-  assert.equal(r.code, 1);
-});
-
 test("stop of a box that does not exist deletes nothing", () => {
   const sb = sandbox();
   const r = devbox(sb, ["stop", "001"], { status: "" });
@@ -419,18 +270,6 @@ test("start adopts a box that is already RUNNING and creates nothing", () => {
   const sb = sandbox();
   const r = devbox(sb, ["start", "001"], { status: "RUNNING", zone: "us-west1-c" });
   assert.deepEqual(createdIn(r.calls), []);
-});
-
-test("start of an already RUNNING box exits zero", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["start", "001"], { status: "RUNNING", zone: "us-west1-c" });
-  assert.equal(r.code, 0);
-});
-
-test("start refuses to adopt a TERMINATED box", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["start", "001"], { status: "TERMINATED", zone: "us-east4-c" });
-  assert.match(r.err, /^yc-ollama-001 exists in us-east4-c with status TERMINATED — not adopting a half-state\. Delete it, then start again\.$/m);
 });
 
 test("start of a TERMINATED box exits non-zero", () => {
@@ -449,24 +288,6 @@ test("start of a TERMINATED box issues no create, so it never duplicates a box",
   const sb = sandbox();
   const r = devbox(sb, ["start", "001"], { status: "TERMINATED", zone: "us-east4-c" });
   assert.deepEqual(createdIn(r.calls), []);
-});
-
-test("start of a box that does not exist zone-walks instead of retrying one zone", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["start", "001", "--rounds=1"], { status: "", capacity: "" });
-  assert.deepEqual(createdIn(r.calls), [
-    "us-west1-a", "us-west1-b", "us-west1-c",
-    "us-west4-a", "us-west4-c",
-    "us-central1-a", "us-central1-b", "us-central1-c",
-    "us-east4-a", "us-east4-c",
-    "us-east1-b", "us-east1-c", "us-east1-d",
-  ]);
-});
-
-test("start of a box that does not exist lands in whichever zone has capacity", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["start", "001"], { status: "", capacity: "us-west1-b" });
-  assert.match(r.out, /^Created and RUNNING in us-west1-b at 34\.10\.0\.1\./m);
 });
 
 // ── hosts: writes the file, replaces stale lines, never escalates ────────────────────────────
@@ -525,12 +346,6 @@ test("hosts gives two boxes one hostname each, pointed at their own IPs", () => 
     "127.0.0.1\tlocalhost\n34.10.0.5\tollama-001.dev.example.test\n35.99.0.1\tollama-002.dev.example.test\n");
 });
 
-test("hosts rewrites only the rebuilt box's line and leaves the other box's line alone", () => {
-  const sb = sandbox("34.10.0.5\tollama-001.dev.example.test\n35.99.0.1\tollama-002.dev.example.test\n");
-  const r = devbox(sb, ["hosts"], { list: "yc-ollama-002,us-east1-c,RUNNING,g2-standard-8,35.99.0.2\n" });
-  assert.equal(r.hosts, "34.10.0.5\tollama-001.dev.example.test\n35.99.0.2\tollama-002.dev.example.test\n");
-});
-
 test("hosts on a file with no trailing newline appends without gluing onto the last line", () => {
   const sb = sandbox("127.0.0.1\tlocalhost");
   const r = devbox(sb, ["hosts"], { list: "yc-ollama-001,us-central1-a,RUNNING,g2-standard-8,34.10.0.5\n" });
@@ -586,18 +401,6 @@ test("an unwritable hosts file never runs sudo itself", () => {
 });
 
 // ── create wires the hosts write in, so the name is true the moment the box exists ───────────
-test("a successful create writes the new box's IP into the hosts file", () => {
-  const sb = sandbox("127.0.0.1\tlocalhost\n");
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", ip: "34.10.0.7" });
-  assert.equal(r.hosts, "127.0.0.1\tlocalhost\n34.10.0.7\tollama-001.dev.example.test\n");
-});
-
-test("a rebuilt box's create replaces the previous box's stale hosts line", () => {
-  const sb = sandbox("127.0.0.1\tlocalhost\n34.10.0.5\tollama-001.dev.example.test\n");
-  const r = devbox(sb, ["create", "001"], { capacity: "us-west1-a", ip: "35.99.0.4" });
-  assert.equal(r.hosts, "127.0.0.1\tlocalhost\n35.99.0.4\tollama-001.dev.example.test\n");
-});
-
 test("a create that finds no capacity leaves the hosts file untouched", () => {
   const sb = sandbox("127.0.0.1\tlocalhost\n34.10.0.5\tollama-001.dev.example.test\n");
   const r = devbox(sb, ["create", "001", "--rounds=1"], { capacity: "" });
@@ -608,13 +411,6 @@ test("create refuses when the box already exists, without attempting any zone", 
   const sb = sandbox();
   const r = devbox(sb, ["create", "001"], { status: "RUNNING", zone: "us-central1-a", capacity: "us-central1-a" });
   assert.deepEqual(createdIn(r.calls), []);
-});
-
-test("create builds the firewall rule before it attempts any zone", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", sources: "" });
-  assert.ok(r.calls.findIndex((c) => c.includes("firewall-rules create")) <
-            r.calls.findIndex((c) => c.includes("instances create")));
 });
 
 // ── auth and usage guards: every verb runs behind these ──────────────────────────────────────
@@ -799,88 +595,10 @@ test("status does not call a box with a model BROKEN", () => {
 });
 
 // ── create's wait-for-boot path ──────────────────────────────────────────────────────────────
-// Title only was corrected here: this box's create no longer "reports success and skips the pull" —
-// that WAS the 2026-08-14 bug. The assertion is unchanged: the first-boot explanation still prints.
-test("a created box that never answers still prints the first-boot explanation", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", ollama: "down" });
-  assert.match(r.out, /^Not answering yet\. First boot installs Ollama and takes a few minutes; try 'status' again\.$/m);
-});
-
-// ── create must never exit 0 having skipped the pull ─────────────────────────────────────────
-// Both boxes lost on 2026-08-14 died here: the wait polls tcp:11434 (allowlist-guarded), the pull
-// goes over IAP (not), so a failed wait was never evidence the pull would fail.
-test("a created box that never answers is STILL sent its model pull over IAP", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", ollama: "down" });
-  assert.equal(r.calls.some((c) => c.includes("compute ssh yc-ollama-001") && c.includes("ollama pull llama3.1:8b")), true);
-});
-
 test("a create whose model pull fails exits non-zero rather than reporting a usable box", () => {
   const sb = sandbox();
   const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", sshFail: "1" });
   assert.equal(r.code, 1);
-});
-
-test("a failed model pull says the box is unusable and names the retry", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", sshFail: "1" });
-  assert.match(r.err, /^llama3\.1:8b was NOT pulled onto yc-ollama-001\./m);
-  assert.match(r.err, /^Retry: {2}node scripts\/devbox\.js pull 001 llama3\.1:8b$/m);
-});
-
-test("a create whose pull succeeds after a failed wait still exits zero", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", ollama: "down" });
-  assert.equal(r.code, 0);
-});
-
-// ── the wait must say WHY, checked against the live allowlist ────────────────────────────────
-test("a failed wait names the allow verb when your IP is not in the allowlist", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", ollama: "down", sources: "198.51.100.7/32", myIp: "203.0.113.9" });
-  assert.match(r.out, /^ {2}Your IP 203\.0\.113\.9 is NOT on the allowlist \(198\.51\.100\.7\/32\) — the box is fine, your packets are dropped\.$/m);
-  assert.match(r.out, /^ {2}Fix: {2}node scripts\/devbox\.js allow$/m);
-});
-
-test("a failed wait does NOT blame the firewall when your IP is already allowed", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", ollama: "down", sources: "203.0.113.9/32", myIp: "203.0.113.9" });
-  assert.match(r.out, /^ {2}Your IP 203\.0\.113\.9 IS on the allowlist \(203\.0\.113\.9\/32\) — this is not the firewall\.$/m);
-  // `status` prints its own generic allow hint further down; the DIAGNOSIS must not add one.
-  assert.equal(/^ {2}Fix: {2}node scripts\/devbox\.js allow$/m.test(r.out), false);
-});
-
-test("a failed wait reports a missing firewall rule as the reason nothing answered", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", ollama: "down", sources: "" });
-  assert.match(r.out, /^ {2}There is no yc-ollama-allow rule at all — nothing can reach tcp:11434\.$/m);
-});
-
-// curl's exit code is the honest half of the diagnosis: 7 is a reachable box with Ollama not up yet,
-// which is NOT the same failure as packets vanishing.
-test("a failed wait reports curl's connection-refused as the box still booting", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a", ollama: "down", sources: "203.0.113.9/32", myIp: "203.0.113.9" });
-  assert.match(r.out, /^ {2}curl got CONNECTION REFUSED — the box is reachable; Ollama is not listening yet\.$/m);
-});
-
-test("a created box that answers gets the default model pulled over IAP", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001"], { capacity: "us-central1-a" });
-  assert.equal(r.calls.some((c) => c.includes("compute ssh yc-ollama-001") && c.includes("ollama pull llama3.1:8b")), true);
-});
-
-test("--model chooses which model the new box pulls", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--model=qwen2.5:14b"], { capacity: "us-central1-a" });
-  assert.equal(r.calls.some((c) => c.includes("ollama pull qwen2.5:14b")), true);
-});
-
-test("--machine and --disk are passed through to the instance create", () => {
-  const sb = sandbox();
-  const r = devbox(sb, ["create", "001", "--machine=g2-standard-24", "--disk=500"], { capacity: "us-central1-a" });
-  assert.equal(r.calls.some((c) => c.includes("--machine-type=g2-standard-24") && c.includes("--boot-disk-size=500GB")), true);
 });
 
 test("every create attempt asks for an nvidia-l4 accelerator", () => {

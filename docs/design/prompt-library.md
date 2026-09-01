@@ -14,6 +14,18 @@ The worker/planner system-prompt store (Mongo `prompt_library`, assembled by sub
 
 ## Design Constraints
 
+- **NEVER emit a bare protein name.** Any prompt that generates an ingredient must produce the cut or
+  form — `Beef, Chuck` / `Beef, Ground` / `Chicken, Breast` — never the bare category `Beef`,
+  `Chicken`, `Pork`, `Lamb`. Robert, 2026-08-29: *"we can't allow the chef to choose 'BEEF' it has to
+  be Beef, Chuck; Beef, Round; Beef, Ground ... etc."* This is a hard requirement because a bare
+  protein name **can never carry nutrition data**: USDA FoodData Central has no generic beef record —
+  verified across all 1125 `beef` hits, every one is a cut, a grind ratio, or a product. A generated
+  recipe saying `Beef` is permanently unmatchable and silently produces no calories, protein or fat.
+  Cost of getting this wrong, measured in the live graph on 2026-08-29: **82 recipes on bare `Beef`,
+  66 `Chicken`, 25 `Pork`, 18 `Lamb`**. The approved cut vocabulary is the `:CutType` taxonomy (126
+  nodes, 39 for beef, sourced from USDA AMS IMPS) — see `yeschef/docs/design/cut-types.md`; do not
+  invent cut names or take them from FDC descriptions. Enforced on write at the ingredient-selection
+  boundary, so a generation emitting a bare protein now fails rather than persisting.
 - **Zero prompts in code.** All LLM/AI prompts live in Mongo `prompt_library`, fetched via the worker's cache layer — never hardcoded in `worker/**` or `functions/**`.
 - Prompt keys use **space-delimited** output-template YAML keys (not snake_case), except `web_search`/`web_fetch`/`menu_plan`, which stay underscored.
 - Every step must be **self-contained**: the executing agent sees only its step's `instructions` (+ listed `contexts`) — never the original user request. Anything not copied verbatim into the step is lost.

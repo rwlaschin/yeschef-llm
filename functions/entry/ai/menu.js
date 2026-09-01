@@ -171,7 +171,7 @@ async function composeMenuPlan(form = {}) {
 }
 
 export async function post(req, reply) {
-  const { userId, companyId, values, duration, residents, flags, costTier, location, enabled, dietWeights, proteins, proteinWeights, addedProteins, courseCounts, jobId: reuseJobId, fake, planId, stepId, siteId } = req.body || {};
+  const { userId, companyId, values, duration, residents, flags, costTier, location, enabled, dietWeights, proteins, proteinWeights, addedProteins, courseCounts, jobId: reuseJobId, fake, planId, planName, stepId, siteId } = req.body || {};
   const isFake = fake === true;   // dev/test: dispatch steps to the canned topic, not the model
 
   // Location is OPTIONAL and IS an IANA timezone — the single source of truth. When set, derive region
@@ -255,13 +255,16 @@ export async function post(req, reply) {
   // on its own to fill its protein list. Naming it "Menu plan" put it in the history looking exactly
   // like a generated plan, so the label states the step it actually ran.
   const single = plan.length === 1 ? plan[0] : null;
-  const summary = single
+  // The chef named the plan; lead with that name so the history row is recognisable, and keep the
+  // generated description after it. Builds kicked outside a saved plan carry no name.
+  const named = (s) => (planName ? `${planName} · ${s}` : s);
+  const summary = named(single
     ? `${STEP_LABELS[single.subtype] ?? single.subtype}` +
       (values?.diets ? ` · ${dietCount(values.diets)} diets` : "")
     : `Menu plan · ${duration?.weeks ?? "?"}w${duration?.businessDaysOnly ? " (business days)" : ""}` +
       ` · ${residents ?? 300} residents` +
       (values?.institution ? ` · ${values.institution}` : "") +
-      (values?.diets ? ` · ${dietCount(values.diets)} diets` : "");
+      (values?.diets ? ` · ${dietCount(values.diets)} diets` : ""));
   // No run-level model: each step carries its own (def.model). Record the first step's for the summary.
   const jobModel = plan[0]?.model || "";
 
@@ -274,6 +277,7 @@ export async function post(req, reply) {
     await jobRef.set({
       model: jobModel, message: summary, userPrompt: summary, plan, stepCount: plan.length,
       cursor: 0, status: "running", failedSteps: [], attempts: {}, outcome: null, fake: isFake,
+      ...(planId ? { planId } : {}), ...(stepId ? { stepId } : {}),
     }, { merge: true });
   } else {
     await jobRef.set({
@@ -282,6 +286,9 @@ export async function post(req, reply) {
       jobId, userId, companyId, model: jobModel, type: "menu",
       message: summary, userPrompt: summary, plan, stepCount: plan.length, cursor: 0,
       status: "running", fake: isFake, createdAt: FieldValue.serverTimestamp(),
+      // The orchestrator finalizes this job long after the browser is gone and notifies the plan's
+      // creator; it only has the job doc, so the reverse link to the Mongo meal_plan lives here too.
+      ...(planId ? { planId } : {}), ...(stepId ? { stepId } : {}),
     });
   }
   // Save/refresh the FORM INPUTS doc (id = jobId) so the dashboard can reload this plan into the form.

@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { PubSub } from "@google-cloud/pubsub";
 import { generationSlots, leaseBound } from "./lease.js";
 import { createSemaphore } from "./semaphore.js";
-import { MODELS, parallelOf, maxCtxFor } from "../config/models.js";
+import { MODELS, parallelOf, maxCtxFor, subscriptionOf, byTopic } from "../config/models.js";
 
 const HOST = process.env.PUBSUB_EMULATOR_HOST || "localhost:8185";
 const PROJECT = "leasing-test";
@@ -107,40 +107,37 @@ test("P1-1 domain analysis: the lease and generation gate are the same runtime f
   assert.equal(leaseBound, generationSlots);
 });
 
-test("P1-1 combinatorial pairing: a one-slot runtime gates one generation and leases one message", () => {
-  assert.deepEqual(
-    { gate: generationSlots({ OLLAMA_NUM_PARALLEL: "1" }), lease: leaseBound({ OLLAMA_NUM_PARALLEL: "1" }) },
-    { gate: 1, lease: 1 },
-  );
+// The slot count is derived from the model tier the worker actually serves — no env var transports it.
+// Every model in MODELS is checked, so a new tier is covered the moment it is declared.
+test("P1-1 combinatorial pairing: every tier gates and leases its own declared parallel", () => {
+  for (const m of MODELS) {
+    const env = { SUBSCRIPTION_NAME: subscriptionOf(m) };
+    assert.deepEqual(
+      { gate: generationSlots(env), lease: leaseBound(env) },
+      { gate: m.parallel, lease: m.parallel },
+      `${m.topic} must gate and lease its declared parallel`,
+    );
+  }
 });
 
-test("P1-1 combinatorial pairing: a three-slot runtime gates three generations and leases three messages", () => {
-  assert.deepEqual(
-    { gate: generationSlots({ OLLAMA_NUM_PARALLEL: "3" }), lease: leaseBound({ OLLAMA_NUM_PARALLEL: "3" }) },
-    { gate: 3, lease: 3 },
-  );
+// The reason resolution is by TOPIC and not by model string: `llama3.1:8b` is declared twice — the raw
+// tier owns 3 slots, the OpenClaw gateway tier owns 1. A model-string lookup returns whichever comes
+// first in MODELS and would give the OpenClaw box a lease of 3 it cannot run.
+test("a model string shared by two tiers resolves to the tier's own parallel, not the first match", () => {
+  const raw = byTopic("llama3_1_8b_v1");
+  const gw = byTopic("openclaw_llama3_1_8b_v1");
+  assert.equal(raw.model, gw.model, "the premise: both tiers declare the same model string");
+  assert.equal(generationSlots({ SUBSCRIPTION_NAME: subscriptionOf(raw) }), 3);
+  assert.equal(generationSlots({ SUBSCRIPTION_NAME: subscriptionOf(gw) }), 1);
 });
 
-test("runtime transport equivalence partition: missing OLLAMA_NUM_PARALLEL defaults to 1", () => {
+// The fake/canned worker's subscription has no model tier: it runs no generations, so one slot is the
+// whole truth. Same for a module-scope import with no subscription in the environment (worker/ollama.js
+// sizes its socket pool this way).
+test("a subscription with no model tier leases exactly one", () => {
+  assert.equal(generationSlots({ SUBSCRIPTION_NAME: "sub_fake_canned_v1" }), 1);
   assert.equal(generationSlots({}), 1);
-  assert.equal(generationSlots({ OLLAMA_NUM_PARALLEL: "" }), 1);
-  assert.equal(leaseBound({}), 1, "the lease defaults with the gate — never lease what you cannot run");
-});
-
-test("runtime transport boundary analysis: zero OLLAMA_NUM_PARALLEL fails fast", () => {
-  assert.throws(() => generationSlots({ OLLAMA_NUM_PARALLEL: "0" }), /OLLAMA_NUM_PARALLEL|parallel/i);
-});
-
-test("runtime transport equivalence partition: negative OLLAMA_NUM_PARALLEL fails fast", () => {
-  assert.throws(() => generationSlots({ OLLAMA_NUM_PARALLEL: "-1" }), /OLLAMA_NUM_PARALLEL|parallel/i);
-});
-
-test("runtime transport equivalence partition: fractional OLLAMA_NUM_PARALLEL fails fast", () => {
-  assert.throws(() => generationSlots({ OLLAMA_NUM_PARALLEL: "1.5" }), /OLLAMA_NUM_PARALLEL|parallel/i);
-});
-
-test("runtime transport equivalence partition: non-numeric OLLAMA_NUM_PARALLEL fails fast", () => {
-  assert.throws(() => generationSlots({ OLLAMA_NUM_PARALLEL: "junk" }), /OLLAMA_NUM_PARALLEL|parallel/i);
+  assert.equal(leaseBound({}), 1, "the lease follows the gate — never lease what you cannot run");
 });
 
 test("P1-1: the whole backlog drains — nothing is left behind", async (t) => {
@@ -206,7 +203,7 @@ test("no model's slot count starves its context below the worker's floor", () =>
       `every request would be trimmed. Lower parallel, or raise GPU_VRAM_GB if the box is bigger.`);
     assert.ok(cap <= m.ctx,
       `${m.topic}: the machine cap ${cap} exceeds the model's own ${m.ctx} window — cap the smaller`);
-    assert.equal(leaseBound({ OLLAMA_NUM_PARALLEL: String(slots) }), slots,
+    assert.equal(leaseBound({ SUBSCRIPTION_NAME: subscriptionOf(m) }), slots,
       `${m.topic}: the Pub/Sub lease must equal the slots — never lease what you cannot run`);
   }
 });
@@ -218,8 +215,9 @@ test("generation slots: the configured three-slot model still holds a real windo
   // throughput of one at a time. The cap must leave room for that request, not merely for the floor.
   const cap = maxCtxFor(LLAMA, SLOTS, L4_USABLE_GB);
   assert.ok(cap >= 9366, `3 slots caps num_ctx at ${cap}, under the 9366 a real job asks for`);
-  assert.equal(leaseBound({ OLLAMA_NUM_PARALLEL: String(SLOTS) }), SLOTS, "the lease must equal the slots — never lease what you cannot run");
-  assert.equal(generationSlots({ OLLAMA_NUM_PARALLEL: String(SLOTS) }), SLOTS, "the in-process gate must open the same number");
+  const env = { SUBSCRIPTION_NAME: subscriptionOf(LLAMA) };
+  assert.equal(leaseBound(env), SLOTS, "the lease must equal the slots — never lease what you cannot run");
+  assert.equal(generationSlots(env), SLOTS, "the in-process gate must open the same number");
   // The other four dev models did not opt in; a box-wide setting must not silently raise their lease.
   for (const m of MODELS.filter((x) => x !== LLAMA)) {
     assert.equal(parallelOf(m), 1, `${m.topic} did not opt into extra slots`);

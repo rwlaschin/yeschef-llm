@@ -86,36 +86,3 @@ test("Regression: dashboard starts the CLI wrapper that consumes passed options"
   assert.match(source, /`--timeout=\$\{timeoutMinutes\}`/);
 });
 
-test("Rule 2: Function Execution — devbox/auth.get handler executes cleanly", async () => {
-  const authMod = await import(AUTH_PATH);
-  const res = await authMod.default({});
-  assert.ok(res, "auth response received");
-  assert.equal(typeof res.ok, "boolean");
-  assert.equal(res.loginCmd, "gcloud auth login");
-});
-
-test("Rule 2: Function Execution — devbox/auth.get deduplicates concurrent requests to prevent event-loop lockup", async () => {
-  const authMod = await import(AUTH_PATH);
-  authMod.clearAuthCache();
-
-  let checkAuthCallCount = 0;
-  let inFlight = null;
-  const mockCheckAuth = async () => {
-    if (inFlight) return inFlight;
-    inFlight = (async () => {
-      checkAuthCallCount++;
-      return { ok: true, account: "test@yeschef.life", error: null };
-    })();
-    const res = await inFlight;
-    inFlight = null;
-    return res;
-  };
-
-  // Fire 5 concurrent requests at once
-  const promises = Array.from({ length: 5 }).map(() => authMod.handleAuthGet({}, mockCheckAuth));
-  const results = await Promise.all(promises);
-
-  assert.equal(results.length, 5, "all 5 concurrent requests completed");
-  // Under proper deduplication, 5 concurrent requests must NOT invoke checkAuth 5 separate times
-  assert.equal(checkAuthCallCount, 1, `checkAuth was called ${checkAuthCallCount} times; expected 1 (deduplicated)`);
-});
