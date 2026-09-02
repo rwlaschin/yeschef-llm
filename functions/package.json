@@ -15,7 +15,7 @@
     "@google-cloud/pubsub": "^4.0.0",
     "@vvo/tzdb": "^6.198.0",
     "ajv": "^8.20.0",
-    "fastify": "^5.0.0",
+    "fastify": "^5.12.1",
     "firebase-admin": "^13.10.0",
     "firebase-functions": "^6.0.0",
     "handlebars": "^4.7.9",
