@@ -311,6 +311,10 @@ async function startFakeWorker() {
     PUBSUB_EMULATOR_HOST,
     GCP_PROJECT_ID,
     FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID,
+    // The worker's Admin SDK inits with no cert (worker/index.js initializeApp({projectId})), so it
+    // only reaches a local Firestore/Auth if these are set — otherwise it silently talks to PROD.
+    FIRESTORE_EMULATOR_HOST: process.env.FIRESTORE_EMULATOR_HOST,
+    FIREBASE_AUTH_EMULATOR_HOST: process.env.FIREBASE_AUTH_EMULATOR_HOST,
     SUBSCRIPTION_NAME: FAKE_SUBSCRIPTION,
     MONGO_URI,
     MONGO_DB,
@@ -318,6 +322,20 @@ async function startFakeWorker() {
     OLLAMA_MODEL: "canned",            // log-only on the fake path; the model is never called
     OLLAMA_HOST: "http://127.0.0.1:0", // unused on the fake path
   });
+}
+
+// Poll /ai/health instead of a fixed sleep — a cold functions emulator can take longer than 8s to
+// come up, and setupPubSub() silently fails to create topics if it runs before the function does.
+async function waitForAiHealth(timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${AI_BASE_URL}/health`);
+      if (res.ok) return true;
+    } catch { /* not up yet */ }
+    await sleep(500);
+  }
+  return false;
 }
 
 async function main() {
@@ -388,9 +406,22 @@ async function main() {
       AI_BASE_URL, // point the orchestrate push sub at the local /ai/events
       MONGO_URI, // the /ai function reads/writes the Step Library (plan_library) in Mongo
       MONGO_DB,
+      // The Admin SDK inits with no cert (functions/index.js initializeApp()), so it only reaches
+      // a local Firestore/Auth if these are set — otherwise it silently talks to PROD. Auth is
+      // also required for requireAuth()'s verifyIdToken on every non-public /ai route.
+      FIRESTORE_EMULATOR_HOST: process.env.FIRESTORE_EMULATOR_HOST,
+      FIREBASE_AUTH_EMULATOR_HOST: process.env.FIREBASE_AUTH_EMULATOR_HOST,
+      // resolveProteinSeed (functions/entry/ai/menu.js) reads these; the error is caught, so
+      // without them the recipes build silently free-styles instead of failing loudly.
+      NEO4J_URI: process.env.NEO4J_URI,
+      NEO4J_USERNAME: process.env.NEO4J_USERNAME,
+      NEO4J_PASSWORD: process.env.NEO4J_PASSWORD,
+      NEO4J_DATABASE: process.env.NEO4J_DATABASE,
     });
     console.log("Waiting for emulators (Pub/Sub + functions)...");
-    await sleep(8000);
+    if (!(await waitForAiHealth())) {
+      throw new Error(`${AI_BASE_URL}/health never came up — check the emulator logs above.`);
+    }
   }
 
   // 2. Topics + subscriptions (emulator is ephemeral — every start).
@@ -409,7 +440,7 @@ async function main() {
     console.log("\n=== /ai orchestrator ready ===");
     console.log(`  Pub/Sub Emulator : ${PUBSUB_EMULATOR_HOST}`);
     console.log(`  Orchestrator /ai : ${AI_BASE_URL}`);
-    console.log(`  Firestore        : PROD (${process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID})`);
+    console.log(`  Firestore        : ${process.env.FIRESTORE_EMULATOR_HOST ? `emulator (${process.env.FIRESTORE_EMULATOR_HOST})` : `PROD (${process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID})`}`);
     console.log("  Model workers    : start separately, or use `npm run dev:workers`.");
     return;
   }
@@ -474,7 +505,7 @@ async function main() {
   console.log("\n=== Dev environment ready ===");
   console.log(`  Pub/Sub Emulator : ${PUBSUB_EMULATOR_HOST}`);
   console.log(`  Orchestrator /ai : ${AI_BASE_URL}`);
-  console.log(`  Firestore        : PROD (${process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID})`);
+  console.log(`  Firestore        : ${process.env.FIRESTORE_EMULATOR_HOST ? `emulator (${process.env.FIRESTORE_EMULATOR_HOST})` : `PROD (${process.env.FIREBASE_PROJECT_ID || GCP_PROJECT_ID})`}`);
   console.log(`  Models (on demand):`);
   for (const m of available) console.log(`    - ${m.model}  (${m.subscription} → ${containerName(m)})`);
   console.log(`  (70B/large omitted — needs 2× L4 GPUs)`);

@@ -110,6 +110,18 @@ const GPU_VRAM_GB = parseFloat(process.env.GPU_VRAM_GB) || 20;
 // web-search key. It still needs GCP/Mongo/Firestore like any worker.
 const FAKE_ONLY = SUBSCRIPTION_NAME === FAKE_SUBSCRIPTION;
 
+// Canned responses have no model latency, so a large fan-out step (e.g. 75 recipe units) reports
+// completion to the orchestrator in a rapid burst — real inference naturally paces these seconds
+// apart, so the orchestrator's per-job Firestore transaction (functions/entry/ai/dispatch/step.js,
+// "many units report per step" contention) never sees more than a couple of concurrent writers.
+// Firestore's Firebase Local Emulator handles that burst far worse than real Firestore does (its
+// transaction lock is coarser-grained), producing a redelivery storm of "ABORTED: Transaction lock
+// timeout" that can outlast e2e/seeds/recipes.mjs's poll deadline. This stagger only paces the
+// FAKE/CANNED report path — real builds are untouched. Override with FAKE_REPORT_STAGGER_MS; 0
+// disables it (e.g. for a real Firestore backend, which doesn't need it).
+const FAKE_REPORT_STAGGER_MS = process.env.FAKE_REPORT_STAGGER_MS != null
+  ? parseInt(process.env.FAKE_REPORT_STAGGER_MS, 10) : 300
+
 const required = { GCP_PROJECT_ID, SUBSCRIPTION_NAME, MONGO_URI, MONGO_DB, MONGO_COLLECTION };
 if (!FAKE_ONLY) {
   required.OLLAMA_MODEL = OLLAMA_MODEL;
@@ -1043,6 +1055,9 @@ async function handleMessage(message) {
 
     // Only the WINNER reports — a lost race means another run already told the orchestrator.
     if (wrote) {
+      if ((FAKE_ONLY || payload.fake) && FAKE_REPORT_STAGGER_MS > 0) {
+        await new Promise((r) => setTimeout(r, FAKE_REPORT_STAGGER_MS))
+      }
       await reportToOrchestrator(payload);
       // DONE signal → capacity outcome event to the orchestrator for EVERY job type (queries included),
       // both success AND fail. The orchestrator records it (success → ok + re-decide; fail → log only) —
